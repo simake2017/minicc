@@ -120,7 +120,8 @@ public:
     //     `Kind<int&&>` 时把 T 绑成 int&（错）。
     //   ⚠ 两套规则共用一个开关：matchPattern 为跳过左值/右值绑定检查而传 argIsLValue=true，
     //     而它【同时】是万能引用分支的开关 —— 关掉一个必然误开另一个。
-    bool deducePair(const TypePtr& P, const TypePtr& A, bool argIsLValue,
+    // ★ A 按值传入：入口要按 [expr.type]/1 剥引用壳（见 .cpp 顶部注释），const& 改不了绑
+    bool deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
                     const std::vector<std::string>& paramNames,
                     Subst& subst, DeductionResult& out,
                     bool structuralMatch = false);

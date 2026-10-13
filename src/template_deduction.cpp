@@ -316,7 +316,7 @@ bool TemplateDeducer::bind(const std::string& paramName, const TypePtr& type,
 //   P=const X → 剥顶层 const │ P=T& → 左值检查后深入 │ P=T&& → 万能引用折叠/深入
 //   P=T* → 对 pointee 深入    │ P=T → 值传递调整后绑定 │ P 非依赖 → 恒等比较
 // demo: f(const T& x) 配 const int& 左值 ⇒ 剥 const ⇒ 左值 ✓ 深入 ⇒ (T, int) ⇒ T := int ✓
-bool TemplateDeducer::deducePair(const TypePtr& P, const TypePtr& A, bool argIsLValue,
+bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
                                  const std::vector<std::string>& paramNames,
                                  Subst& subst, DeductionResult& out, bool structuralMatch) {
     if (!P || !A) {
@@ -325,6 +325,23 @@ bool TemplateDeducer::deducePair(const TypePtr& P, const TypePtr& A, bool argIsL
     }
     std::string pStr = P->toString();
     std::string aStr = A->toString();
+
+    // ── A 的引用壳按 [expr.type]/1 剥掉（仅限调用推导）──────────────────────
+    // A 来自 inferCall 取的【声明类型】：变量 `int& r` 给的 A 是 `int&`。但表达式的
+    // 类型永不可能是引用 —— 值类别由 argIsLValue 单独携带，deducePair 看见的 A
+    // 必须是裸类型。不剥的话【具体 P】配引用实参会死磕结构不等（实测 rc=1）：
+    //   template<class T> int f(int& x, T y);
+    //   int& r = a;  f(r, 2);
+    //   ⇒ P=int& 绑定检查 ✓，递归到 P=int（非依赖）vs A=int& ⇒
+    //     "no match for non-dependent parameter: P='int' vs A='int&'"
+    // P=T 形参位此前靠「值传递调整 A'=int」侥幸存活（T 被绑成 int& 而非 clang 的 int，
+    // 靠折叠归一兜住）—— 统一从入口剥，两条路同一判据。
+    // ★ 偏特化匹配（structuralMatch=true）的 A 是【模板实参】（Box<int&> 的 int&
+    //   是有意义信息），不剥 —— 与 T&& 分支跳过万能引用是同一个守卫。
+    if (!structuralMatch && A->isReference()) {
+        A = A->referencedType;
+        aStr = A->toString();
+    }
 
     // ── 别名模板 id 先解糖（[temp.alias]/1）──
     // ★ 放在【每一个递归层】而不只是入口：别名常被引用/const 包着（`const Vec<T>&`

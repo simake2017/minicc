@@ -1934,6 +1934,59 @@ docs/learn/23 之后：const T& 建成 LRef(Const(T))     → 剥 const 的分�
 
 ---
 
+### B26 追补：A 的引用壳没剥（[expr.type]/1 的债，2026-10 第二天发现）
+
+**来源**：用户读 `template_deduction.cpp:351`（P=LRef 分支）时问"模板是 `<int&>`、
+实参也是 `<int&>` 的是不是匹配不上"。实测——**能**（模板形参位），但【具体 P】
+**不能**。又是"侥幸活着"掩盖缺陷的现场。
+
+**复现**
+
+```cpp
+// P = int&（具体类型，不含模板形参），实参是 int& 变量
+template<class T> int f(int& x, T y) { return x + y; }
+int main() { int a = 1; int& r = a; return f(r, 2) - 3; }
+```
+
+| | minicc（修前） | clang++-18 |
+|---|---|---|
+| `f(r, 2)`（P=int&，r 是 int&） | ❌ rc=1 `no match for non-dependent parameter: P='int' vs A='int&'` | ✅ rc=0 |
+| `g(r, 2)`（P=T& 与 P=T 共享 T） | ⚠️ rc=0 但 `T := int&`（靠"值传递调整 A'=int"+折叠兜住；clang 是 `T := int`） | ✅ rc=0 |
+
+**根因**：**A 是声明类型，不是表达式类型**。[expr.type]/1：表达式的类型
+永不可能是引用 —— `int& r` 的表达式 `r` 类型是 `int`，值类别（左值）另由
+`argIsLValue` 携带。而 inferCall 喂给 deducePair 的 A 是 `inferType(arg)` 的产物
+（声明类型 `int&`）。P=T 形参位有"值传递调整 A'=int"兜底所以侥幸活着；
+**具体 P** 走到非依赖比较时 `int` vs `int&` 结构不等，当场死。
+`deducePair` 头部注释里其实早就写着这半句（"[expr.type]/1：表达式永远没有
+引用类型，故 clang 里 A 到这一步已是裸类型"）—— 写了判据却没写实现。
+
+**修法**：deducePair **入口**剥 A 的引用壳（仅 `!structuralMatch` —— 偏特化匹配的
+A 是模板实参，`Box<int&>` 的 `int&` 是有意义信息）：
+
+```cpp
+if (!structuralMatch && A->isReference()) {
+    A = A->referencedType;
+    aStr = A->toString();
+}
+```
+
+两条路同一判据：P=T 形参位与具体 P 位都从裸 A 推（② 的 `T := int&` 变成
+clang 同款 `T := int`）。`structuralMatch` 守卫与 T&& 分支跳过万能引用是
+**同一个守卫、同一个理由**。`deducePair` 的 A 形参因此从 `const TypePtr&`
+改为**按值** `TypePtr`（入口要改绑，const& 改不了）。
+
+**回归用例**：`tests/tmpl/test_tmpl_72_concrete_ref_param.cpp`（①具体 P=int& +
+②T&/T 共享 T + ③右值引用变量作左值实参，运行 rc=0，clang 同 rc=0）。
+**突变验证**：整块删掉剥壳 ⇒ 72 当场 rc=1（logdiff 红出 rc 差异）。
+★ 突变验证时**必须 `./build.sh` 重编 minicc** —— `cmake --build unit_tests`
+只编单测，logdiff 吃的是 `./minicc`，不重编就永远"零差异"（本次实测踩到）。
+**既有用例漂移**：仅 `test_tmpl_52` 的推导 trace 8 行
+（`A=int&`/`A=int&&` → `A=int`，语义不变，恰好是 52 自己注释里写的
+[expr.type]/1 口径），重刷基线。
+
+---
+
 ## B27. 无可行候选时静默退回候选集首个
 
 **来源**：B22 那一轮写的 `pickBestByArgs`（候选集 → 最优）里，第③档是
