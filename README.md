@@ -126,10 +126,17 @@ ctest --test-dir build-linux --output-on-failure
 
 ### CLion 调试入口（单个测试逐行步进）
 
-- **调测试程序本身**：CMake target `integration_gtest` 把 94 个正例集成测试
-  （`-Dmain=` 改名 + 具名 namespace 包装，错误用例不在其中）包成了 gtest 用例 ——
-  CLion 底部 Test 面板逐条列出，点任一用例左侧三角即可单独 Run/**Debug**，
-  断点设在 tests/ 的测试源码里。返回值校验归 logdiff，这里只管"能跑、可断点"。
+- **调测试程序本身**：CMake target `integration_gtest` 把 tests/ 下**全部 125 个**
+  main 入口用例包成了 gtest 用例，CLion 底部 Test 面板逐条列出，点任一用例左侧
+  三角即可单独 Run/**Debug**：
+  - `Integration.*`（94 个）—— 正例，`-Dmain=` 改名 + 具名 namespace 包装后
+    编进同一二进制，**可真正断点步进**测试源码（返回值校验归 logdiff，这里只管
+    "能跑、可断点"，故 TEST 体不断言返回值）；
+  - `MiniccSubprocess.*`（31 个）—— 主机编译器编不过的用例（错误用例 + minicc
+    方言糖）：TEST 体以**子进程**调 minicc 编译该文件并核对退出码（期望值由 CMake
+    从 `.logbaseline` 解析，与 logdiff 同一 oracle；重刷基线后需 Reload CMake）。
+    点 Debug 步进到的只是包装层 —— 这批用例没有"程序语义"可步进（错误用例本就
+    编译不过），要断进编译器请用下面的 minicc 运行配置。
 - **调编译器本身**：直接建 `minicc` 的运行配置，
   Program arguments 填 `tests/xxx/yyy.cpp -o /tmp/yyy`，断点打在 `src/*.cpp`。
 

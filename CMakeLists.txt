@@ -173,11 +173,62 @@ foreach(src ${ITEST_SOURCES})
         COMPILE_DEFINITIONS "main=${sym}"
         COMPILE_OPTIONS "-Wno-everything")   # 教学用例不按主机编译器的 -Wall 要求整改
 endforeach()
-message(STATUS "集成测试 gtest 包装：${ITEST_N} 个用例 → integration_gtest")
+message(STATUS "集成测试 gtest 包装：in-process ${ITEST_N} 个用例")
+
+# ── 剩余用例：子进程包装（MiniccSubprocess 套件）──────────────────────────
+# in-process 二进制之外的每一个 main 入口用例（错误用例 + minicc 方言用例，
+# 主机编译器编不过）都包成【子进程用例】：TEST 体调 minicc 编译该文件、
+# 核对退出码，rc=0 再运行产物核对 run-rc —— 期望值从 .logbaseline 解析
+# （与 logdiff 同一 oracle）。这样 CLion Test 面板 = tests/ 全部 main 用例，
+# 一个不缺。机理与调试语义见 tests/itest_subprocess_helper.h 头注释。
+file(GLOB_RECURSE ITEST_ALL CONFIGURE_DEPENDS tests/*.cpp)
+list(FILTER ITEST_ALL EXCLUDE REGEX "/tests/unit/")
+list(FILTER ITEST_ALL EXCLUDE REGEX "/tests/search-path/")
+set(ITEST_SUB_N 0)
+foreach(src ${ITEST_ALL})
+    if(src IN_LIST ITEST_SOURCES)
+        continue()
+    endif()
+    get_filename_component(base ${src} NAME_WE)
+    # 基线名规则与 logdiff.sh 一致：tests/tmpl/x.cpp → tmpl__x.log
+    file(RELATIVE_PATH blrel ${CMAKE_CURRENT_SOURCE_DIR} ${src})
+    string(REGEX REPLACE "^tests/" "" blname ${blrel})
+    string(REPLACE "/" "__" blname ${blname})
+    string(REGEX REPLACE "\\.cpp$" "" blname ${blname})
+    set(blog ${CMAKE_CURRENT_SOURCE_DIR}/.logbaseline/${blname}.log)
+    if(NOT EXISTS ${blog})
+        message(WARNING "  ${base}：缺 .logbaseline 日志，跳过子进程包装（先跑 ./logdiff.sh save）")
+        continue()
+    endif()
+    file(READ ${blog} bcontent)
+    string(REGEX MATCH "=== rc=([0-9]+)" _unused ${bcontent})
+    set(crc ${CMAKE_MATCH_1})
+    set(hasrun 0)
+    set(rrc 0)
+    string(REGEX MATCH "=== run-rc=([0-9]+)" _unused ${bcontent})
+    if(CMAKE_MATCH_1)
+        set(hasrun 1)
+        set(rrc ${CMAKE_MATCH_1})
+    endif()
+    math(EXPR ITEST_SUB_N "${ITEST_SUB_N} + 1")
+    set(wrapper ${CMAKE_CURRENT_BINARY_DIR}/itest_wrappers/sub_${base}.cpp)
+    file(WRITE ${wrapper}
+        "// 本文件由 CMake 生成，勿手改。子进程包装的 minicc 用例（主机编译器编不过的那批）。\n"
+        "#include \"${CMAKE_CURRENT_SOURCE_DIR}/tests/itest_subprocess_helper.h\"\n"
+        "TEST(MiniccSubprocess, ${base}) { itest_subprocess::runCase(\"${base}\"); }\n")
+    set(ITEST_WRAPPERS ${ITEST_WRAPPERS} ${wrapper})
+    set_source_files_properties(${wrapper} PROPERTIES COMPILE_DEFINITIONS
+        "ITEST_SRC=\"${src}\";ITEST_EXPECT_COMPILE_RC=${crc};ITEST_HAS_RUN=${hasrun};ITEST_EXPECT_RUN_RC=${rrc}")
+endforeach()
+message(STATUS "集成测试 gtest 包装：subprocess ${ITEST_SUB_N} 个用例")
 
 add_executable(integration_gtest ${ITEST_WRAPPERS})
 target_include_directories(integration_gtest PRIVATE include tests)
 target_link_libraries(integration_gtest GTest::gtest GTest::gtest_main)
+# 子进程用例要以子进程方式启动本项目的 minicc：
+add_dependencies(integration_gtest minicc)
+target_compile_definitions(integration_gtest PRIVATE
+    "MINICC_BIN_PATH=\"$<TARGET_FILE:minicc>\"")
 gtest_discover_tests(integration_gtest)
 
 # ─── ministl 测试 ───────────────────────────────────────────────────────────
