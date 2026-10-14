@@ -42,6 +42,13 @@
 //   [call] measure(1 args) → int      [普通查找：形参类型精确匹配]
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_decl_02_adl_and_qualified_lookup) { minicc_gtest_body(); }
+#endif
 namespace N {
     struct S { int v; };          // 只以 "N::S" 登记在全局符号表里
 

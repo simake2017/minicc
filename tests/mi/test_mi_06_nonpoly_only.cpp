@@ -15,6 +15,13 @@
 //   一律 8 字节对齐（教学简化），x@0/y@8/d@16/size=20，不重叠即自洽。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_mi_06_nonpoly_only) { minicc_gtest_body(); }
+#endif
 class A {
 public:
     int x;

@@ -23,6 +23,13 @@
 //   同一个缺口的两半：语义层没通路、语法层压根不认这种写法。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_basics_09_qualified_member) { minicc_gtest_body(); }
+#endif
 struct Base {
 public:
     int v;

@@ -49,6 +49,13 @@
 //     as 报 duplicate symbol。）
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_46_ptr_vs_ref_instance) { minicc_gtest_body(); }
+#endif
 template <typename T> struct Box { int tag() { return 0; } };   // 主模板
 template <typename T> struct Box<T*>  { int tag() { return 1; } };
 template <typename T> struct Box<T&>  { int tag() { return 2; } };

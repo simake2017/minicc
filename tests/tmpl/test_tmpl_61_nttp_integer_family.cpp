@@ -34,6 +34,14 @@
 // =============================================================================
 
 // 多关键字写法：`unsigned long` 与 `long unsigned` 是同一个类型
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_61_nttp_integer_family) { minicc_gtest_body(); }
+#endif
 template<unsigned long N>
 struct UB {
     long get() { return N; }

@@ -9,6 +9,13 @@
 // 预期：return 0（4 个转型全部成功）
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, mini_rtti_demo) { minicc_gtest_body(); }
+#endif
 class Animal {
 public:
     int legs;

@@ -36,6 +36,14 @@
 
 // minicc 的 std 垫片（void_t / false_type / true_type）由 registerBuiltins
 // 内建注入，无需头文件；clang 需要真实的 <type_traits>。条件编译对齐两边。
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_49_dependent_type_name) { minicc_gtest_body(); }
+#endif
 #ifdef __clang__
 #include <type_traits>
 #include <utility>

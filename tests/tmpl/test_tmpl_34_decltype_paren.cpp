@@ -49,6 +49,13 @@
 //   两条断言方向相反 —— 本测试正是要复现这个差别。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_34_decltype_paren) { minicc_gtest_body(); }
+#endif
 template <typename T>
 struct Probe { int tag() { return 0; } };
 

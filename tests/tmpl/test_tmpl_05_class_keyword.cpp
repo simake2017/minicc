@@ -15,6 +15,13 @@
 //     替换过程与 typename 完全一致——class 和 typename 只是语法差异
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_05_class_keyword) { minicc_gtest_body(); }
+#endif
 template<class T>
 class Wrapper {
 public:

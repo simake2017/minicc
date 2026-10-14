@@ -23,6 +23,13 @@
 //     这个缺口一直没被任何用例覆盖到。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_basics_03_virtual_with_params) { minicc_gtest_body(); }
+#endif
 class Shape {
 public:
     virtual int area(int k) { return k; }          // 带 1 参 ⇒ 符号 Shape_area_1

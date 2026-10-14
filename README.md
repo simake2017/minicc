@@ -126,17 +126,20 @@ ctest --test-dir build-linux --output-on-failure
 
 ### CLion 调试入口（单个测试逐行步进）
 
-- **调测试程序本身**：CMake target `integration_gtest` 把 tests/ 下**全部 125 个**
-  main 入口用例包成了 gtest 用例，CLion 底部 Test 面板逐条列出，点任一用例左侧
-  三角即可单独 Run/**Debug**：
-  - `Integration.*`（94 个）—— 正例，`-Dmain=` 改名 + 具名 namespace 包装后
-    编进同一二进制，**可真正断点步进**测试源码（返回值校验归 logdiff，这里只管
-    "能跑、可断点"，故 TEST 体不断言返回值）；
-  - `MiniccSubprocess.*`（31 个）—— 主机编译器编不过的用例（错误用例 + minicc
-    方言糖）：TEST 体以**子进程**调 minicc 编译该文件并核对退出码（期望值由 CMake
-    从 `.logbaseline` 解析，与 logdiff 同一 oracle；重刷基线后需 Reload CMake）。
-    点 Debug 步进到的只是包装层 —— 这批用例没有"程序语义"可步进（错误用例本就
-    编译不过），要断进编译器请用下面的 minicc 运行配置。
+- **调测试程序本身（入口就在测试文件里）**：94 个正例文件头部有一个
+  `#ifdef MINICC_GTEST_TEST` 块（6 行，minicc 编译时被条件编译整体抹掉、
+  语义零变化）——定义 `MINICC_GTEST_TEST` 时 `int main()` 改名为普通函数、
+  同文件挂出 `TEST(Integration, <文件名>)`。CMake 为每个测试建独立小目标
+  `itest_<文件名>`（EXCLUDE_FROM_ALL，点哪个才编哪个）。CLion 里打开任意
+  tests/ 源文件，`TEST()` 左侧绿色三角 → Run/**Debug** → 断点直接落在该文件。
+  ★ 块必须排在文件的自有 `#define`/`#include` 之前：对象式宏（如 pp 测试的
+  `#define C 0`）会把后到的 gtest 头文件毒化（template 参数名 C 被替换成 0）。
+- **错误用例与方言用例（31 个）**：文件本身是非法程序或含 minicc 方言糖
+  （v[i] 下标等），主机编译器编不过、没法在文件里挂 TEST —— 它们编进
+  `integration_gtest` 的 `MiniccSubprocess.*` 套件：TEST 体以**子进程**调
+  minicc 编译该文件并核对退出码（期望值由 CMake 从 `.logbaseline` 解析，
+  与 logdiff 同一 oracle；重刷基线后需 Reload CMake）。点 Debug 步进到的只是
+  包装层 —— 这批用例没有"程序语义"可步进。
 - **调编译器本身**：直接建 `minicc` 的运行配置，
   Program arguments 填 `tests/xxx/yyy.cpp -o /tmp/yyy`，断点打在 `src/*.cpp`。
 

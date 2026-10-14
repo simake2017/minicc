@@ -28,6 +28,13 @@
 //   回归红线：test_tmpl_52（引用折叠）的推导轨迹须在 zero-drift 意义下等价。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_73_partial_spec_ref_args) { minicc_gtest_body(); }
+#endif
 template <class T, class U> struct Duo { int v() { return 0; } };
 template <class T> struct Duo<T, int&>  { int v() { return 1; } };
 template <class T> struct Duo<T, int&&> { int v() { return 2; } };

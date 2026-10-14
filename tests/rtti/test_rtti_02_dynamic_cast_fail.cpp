@@ -12,6 +12,13 @@
 //   3. 成功的转型不受影响（Dog → Puppy2 的 upcast）
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_rtti_02_dynamic_cast_fail) { minicc_gtest_body(); }
+#endif
 class Animal {
 public:
     virtual int speak() { return 0; }

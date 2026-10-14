@@ -10,6 +10,13 @@
 // 预期行为：Phase 0 逐条打印 define/expand；退出码 = 0
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_pp_02_macros) { minicc_gtest_body(); }
+#endif
 #define ANSWER 42
 #define twice(x) ((x) + (x))
 #define add(a, b) ((a) + (b))

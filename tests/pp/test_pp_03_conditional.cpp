@@ -10,6 +10,13 @@
 // 预期行为：Phase 0 打印各分支 taken/skipped；退出码 = 0
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_pp_03_conditional) { minicc_gtest_body(); }
+#endif
 #define DEBUG
 #define MODE 2
 

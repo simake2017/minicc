@@ -14,6 +14,13 @@
 //   ./minicc tests/dump/dump_03_diamond.cpp --dump-layout
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, dump_03_diamond) { minicc_gtest_body(); }
+#endif
 class Base {
 public:
     int base_val;

@@ -13,6 +13,13 @@
 // 实验：./minicc tests/pp/test_pp_01_include.cpp -E  查看展开后全文
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_pp_01_include) { minicc_gtest_body(); }
+#endif
 #include "math_helper.h"     // 引号形式 ⇒ 先搜【当前文件所在目录】tests/pp/
 #include "math_helper.h"     // 第二次：应被 #pragma once 跳过
 

@@ -24,6 +24,13 @@
 //   │ Point
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_rtti_03_inheritance_graph) { minicc_gtest_body(); }
+#endif
 class Shape {
 public:
     virtual int area() { return 0; }

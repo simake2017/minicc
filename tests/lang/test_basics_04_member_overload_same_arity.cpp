@@ -21,6 +21,13 @@
 //   `minicc_o4.s:43: Error: symbol 'C_f_1' is already defined`。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_basics_04_member_overload_same_arity) { minicc_gtest_body(); }
+#endif
 struct S {
 public:
     int v;

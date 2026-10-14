@@ -37,6 +37,14 @@
 // =============================================================================
 
 // ── 接受"一个单形参类模板"的 wrapper ──
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_53_template_template_param) { minicc_gtest_body(); }
+#endif
 template <template <class> class C, class T>
 struct Wrap {
     C<T> inner;            // ★ C 是形参：这一行在实例化时被换成 Box<int> / Two<int>

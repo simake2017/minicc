@@ -35,6 +35,13 @@
 //   clang++-18 -std=c++20 tests/tmpl/test_tmpl_56_member_templates.cpp -o /tmp/t56c && /tmp/t56c; echo $?
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_56_member_templates) { minicc_gtest_body(); }
+#endif
 struct Acc {
     int base;
 

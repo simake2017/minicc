@@ -43,6 +43,14 @@
 // =============================================================================
 
 // ── ① 位数相同 + 逐位 kind 对上：内层表 [class, int] ← 实参 [class, int] ──
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_57_ttp_signature_match) { minicc_gtest_body(); }
+#endif
 template <template <class, int> class C>
 struct Wrap2 {
     C<int, 7> inner;

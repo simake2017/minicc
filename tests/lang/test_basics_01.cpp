@@ -23,6 +23,14 @@
 
 // ── ① struct 默认 public 继承 ────────────────────────────────────────────────
 // 不写 public：C++ 里 struct 的默认继承级别就是 public（class 才是 private）
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_basics_01) { minicc_gtest_body(); }
+#endif
 struct Base1 {
     int v;
 };

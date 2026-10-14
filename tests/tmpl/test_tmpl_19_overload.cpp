@@ -11,6 +11,13 @@
 // 预期行为：退出码 = 0；日志含 "partial ordering" 与 po 的 _Z...  实例化
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_19_overload) { minicc_gtest_body(); }
+#endif
 int twice(int x) {
     return x * 3;
 }

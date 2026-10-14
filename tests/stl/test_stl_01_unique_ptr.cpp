@@ -19,6 +19,13 @@
 // 预期：编译通过，运行退出码 0（v == 42 → 返回 0）
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_stl_01_unique_ptr) { minicc_gtest_body(); }
+#endif
 class Resource {
 public:
     int value;

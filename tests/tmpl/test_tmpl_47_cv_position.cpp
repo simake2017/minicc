@@ -46,6 +46,13 @@
 //     日志里搜 [spec:select] 可见每个使用点选中的是哪一条偏特化
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_47_cv_position) { minicc_gtest_body(); }
+#endif
 template <typename T> struct C { int tag() { return 0; } };            // 主模板
 template <typename T> struct C<T*>       { int tag() { return 1; } };  // 指针
 template <typename T> struct C<const T>  { int tag() { return 2; } };  // const 值/const 指针

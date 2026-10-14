@@ -29,6 +29,14 @@
 // ★ 判据在 Sema 层：写 `A<int*, int**>;`（无声明符）时既不该有 [spec:select]
 //   也不该有 [instantiate:class] —— 见单测 DeclaratorlessDecl.DoesNotInstantiateAnyTemplate。
 //   本文件只从"能编过、能跑对"这一层兜底。
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_basics_02_declaratorless) { minicc_gtest_body(); }
+#endif
 template<class a, class b>
 struct A {
     int primaryTag() { return 0; }

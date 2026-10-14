@@ -12,6 +12,13 @@
 //   3. 转型结果指向同一对象：读得到原字段、虚调用行为不变
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_rtti_01_dynamic_cast_ok) { minicc_gtest_body(); }
+#endif
 class Animal {
 public:
     int legs;

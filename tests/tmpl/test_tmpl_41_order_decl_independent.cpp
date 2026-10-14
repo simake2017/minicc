@@ -35,6 +35,13 @@
 //            （且与 test_tmpl_40 的退出码相同）。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_41_order_decl_independent) { minicc_gtest_body(); }
+#endif
 template <typename T>
 struct Box {
     int tag() { return 0; }   // 主模板

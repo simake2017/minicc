@@ -46,6 +46,14 @@
 //   而 clang 需要真实的 <type_traits>/<utility>。
 //   用条件编译对齐两边 —— minicc 不定义 __clang__，会跳过整个块，
 //   于是两边语义一致、可交叉验证。（见 docs/learn/20 的设计决策一节）
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_35_void_t_detect) { minicc_gtest_body(); }
+#endif
 #ifdef __clang__
 #include <type_traits>
 #include <utility>

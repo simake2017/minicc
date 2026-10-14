@@ -29,6 +29,13 @@
 //   且【不带 auto 的裸引用也一样】，与本修复无关。此处只钉"推导正确 + 能编过"。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_55_auto_cv_forms) { minicc_gtest_body(); }
+#endif
 int main() {
     int a = 5;
 

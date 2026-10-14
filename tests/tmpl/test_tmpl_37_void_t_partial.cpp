@@ -40,6 +40,14 @@
 
 // minicc 的 std 垫片由 registerBuiltins() 内建注入，无需头文件；
 // clang 需要真实头文件。条件编译对齐两边（minicc 不定义 __clang__）。
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_37_void_t_partial) { minicc_gtest_body(); }
+#endif
 #ifdef __clang__
 #include <type_traits>
 #include <utility>

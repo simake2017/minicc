@@ -25,6 +25,14 @@
 // =============================================================================
 
 // ① const T& 绑定右值（模板路径 —— deducePair 的引用分支）
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_basics_05_reference_binding) { minicc_gtest_body(); }
+#endif
 template<class T>
 int tmplConstRef(const T& x) { return x; }
 

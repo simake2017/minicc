@@ -148,32 +148,24 @@ endforeach()
 # include，必须配 -I 才合法），不是独立测试，整目录排除。
 list(FILTER ITEST_SOURCES EXCLUDE REGEX "/tests/search-path/")
 
-set(ITEST_N 0)
-set(ITEST_WRAPPERS "")
+# 正例：每测试一个 gtest 可执行目标。文件里的 #ifdef MINICC_GTEST_TEST 块
+# 此时生效（main 改名 + 同文件 TEST()）—— CLion 编辑器中绿色三角直接落在
+# tests/ 的源文件上，点 Debug 即单步该文件。
+# ★ EXCLUDE_FROM_ALL：点哪个才编哪个，不进 ctest/logdiff 账本，也不拖慢
+#   ./build.sh 全量构建（94 个小目标的链接开销只在点击时支付）。
+# ★ 每测试一个目标而非拼大二进制：不同文件里的同名自由函数（如 twice(int)）
+#   拼一起会 multiple definition（实测踩到）。
 foreach(src ${ITEST_SOURCES})
-    math(EXPR ITEST_N "${ITEST_N} + 1")
     get_filename_component(base ${src} NAME_WE)
-    set(ns itest_${ITEST_N})
-    set(sym minicc_itest_main_${ITEST_N})
-    # 每个测试包成【独立 TU】：文件体收进具名 namespace（全部符号转内部链接），
-    # main 由 -Dmain=${sym} 改名，同 TU 尾部落一个 TEST() 当注册器。
-    # ★ 不能把所有测试编进同一二进制再靠链接器去重 —— 不同文件里的同名
-    #   自由函数（如 twice(int)）会 multiple definition（实测踩到）。
-    set(wrapper ${CMAKE_CURRENT_BINARY_DIR}/itest_wrappers/${base}.cpp)
-    file(WRITE ${wrapper}
-        "// 本文件由 CMake 生成，勿手改。\n"
-        "// 包装 ${base}.cpp：文件体收进 namespace ${ns}（内部链接，杜绝跨文件撞符号）。\n"
-        "#include <gtest/gtest.h>\n"
-        "namespace ${ns} {\n"
-        "#include \"${src}\"\n"
-        "}  // namespace ${ns}\n"
-        "TEST(Integration, ${base}) { ${ns}::${sym}(); }\n")
-    set(ITEST_WRAPPERS ${ITEST_WRAPPERS} ${wrapper})
-    set_source_files_properties(${wrapper} PROPERTIES
-        COMPILE_DEFINITIONS "main=${sym}"
-        COMPILE_OPTIONS "-Wno-everything")   # 教学用例不按主机编译器的 -Wall 要求整改
+    add_executable(itest_${base} ${src})
+    set_target_properties(itest_${base} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    target_compile_definitions(itest_${base} PRIVATE MINICC_GTEST_TEST)
+    target_compile_options(itest_${base} PRIVATE -Wno-everything)
+    target_include_directories(itest_${base} PRIVATE tests)
+    target_link_libraries(itest_${base} GTest::gtest GTest::gtest_main)
 endforeach()
-message(STATUS "集成测试 gtest 包装：in-process ${ITEST_N} 个用例")
+list(LENGTH ITEST_SOURCES ITEST_N)
+message(STATUS "集成测试 gtest 包装：in-process ${ITEST_N} 个 → 每测试一个 itest_<名> 目标")
 
 # ── 剩余用例：子进程包装（MiniccSubprocess 套件）──────────────────────────
 # in-process 二进制之外的每一个 main 入口用例（错误用例 + minicc 方言用例，
@@ -184,6 +176,7 @@ message(STATUS "集成测试 gtest 包装：in-process ${ITEST_N} 个用例")
 file(GLOB_RECURSE ITEST_ALL CONFIGURE_DEPENDS tests/*.cpp)
 list(FILTER ITEST_ALL EXCLUDE REGEX "/tests/unit/")
 list(FILTER ITEST_ALL EXCLUDE REGEX "/tests/search-path/")
+set(ITEST_WRAPPERS "")
 set(ITEST_SUB_N 0)
 foreach(src ${ITEST_ALL})
     if(src IN_LIST ITEST_SOURCES)

@@ -26,6 +26,14 @@
 // =============================================================================
 
 // ① 具体类型 P=int&：修复前 "P='int' vs A='int&'" 死在这里
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_72_concrete_ref_param) { minicc_gtest_body(); }
+#endif
 template <class T>
 int f(int& x, T y) { return x + y; }
 

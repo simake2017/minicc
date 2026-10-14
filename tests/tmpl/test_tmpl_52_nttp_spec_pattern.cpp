@@ -50,6 +50,14 @@
 // =============================================================================
 
 // ── ① enable_if：值位 + 类型位混排，true/false 各一个偏特化 ──
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_52_nttp_spec_pattern) { minicc_gtest_body(); }
+#endif
 template <bool B, class T>
 struct enable_if { };                  // 主模板：B 为 true/false 时都已被偏特化覆盖
 

@@ -16,6 +16,13 @@
 //   - 对照 clang++-18：同样返回 121。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_ctor_03_raii_return) { minicc_gtest_body(); }
+#endif
 int g = 0;
 
 class Tracer {

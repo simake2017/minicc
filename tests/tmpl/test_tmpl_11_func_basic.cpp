@@ -22,6 +22,13 @@
 //   可见 FunctionTemplateDecl → FunctionDecl(twice) + TemplateTypeParmDecl(T)
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_11_func_basic) { minicc_gtest_body(); }
+#endif
 template<typename T>
 T twice(T x) {
     return x + x;

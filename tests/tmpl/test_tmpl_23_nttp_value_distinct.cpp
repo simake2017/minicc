@@ -24,6 +24,13 @@
 //   Buf<8>::size() → _ZN3BufILi8EE4sizeEv
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_23_nttp_value_distinct) { minicc_gtest_body(); }
+#endif
 template<int N>
 class Buf {
 public:

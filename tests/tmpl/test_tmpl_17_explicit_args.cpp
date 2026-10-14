@@ -12,6 +12,13 @@
 //   退出码 = 0（1 + 3 - 4）
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_17_explicit_args) { minicc_gtest_body(); }
+#endif
 template<typename T, typename U>
 T mix(T a, U b) {
     return a;

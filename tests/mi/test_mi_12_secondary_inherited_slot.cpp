@@ -22,6 +22,13 @@
 //   - 该文件现已改为真正的错误用例（私有继承），菱形正例搬到这里。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_mi_12_secondary_inherited_slot) { minicc_gtest_body(); }
+#endif
 class X {
 public:
     int x;

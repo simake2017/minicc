@@ -11,6 +11,13 @@
 //   - 通过 D 对象访问 A.a 和 B.b 得到正确值
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_mi_01_layout) { minicc_gtest_body(); }
+#endif
 class A {
 public:
     int a;

@@ -23,6 +23,13 @@
 //   0|tag 4|f(b1..b5 占 4..8) 12|tail  sizeof=16 align=4
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_mi_07_nested_class_field) { minicc_gtest_body(); }
+#endif
 class Five {
 public:
     bool b1; bool b2; bool b3; bool b4; bool b5;

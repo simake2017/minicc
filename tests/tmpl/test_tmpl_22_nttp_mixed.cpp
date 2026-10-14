@@ -25,6 +25,13 @@
 // mangling 已用 clang++-18 核对：_ZN4PairIiLi8EE5countEv
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_22_nttp_mixed) { minicc_gtest_body(); }
+#endif
 template<class T, int N>
 class Pair {
 public:

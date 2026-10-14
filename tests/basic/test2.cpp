@@ -3,6 +3,14 @@
 // =============================================================================
 
 // ─── 1. 基础函数（展示参数注册和符号决议）───
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test2) { minicc_gtest_body(); }
+#endif
 int add(int a, int b) {
     auto result = a + b;
     return result;

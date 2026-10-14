@@ -51,6 +51,14 @@
 // =============================================================================
 
 // ── ① 裸名依赖：U 的默认值就是前一个形参 T ──
+
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_53_dependent_default_template_arg) { minicc_gtest_body(); }
+#endif
 template <class T, class U = T>
 struct Box {
     T a;

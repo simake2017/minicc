@@ -20,6 +20,13 @@
 //     模板实例化不影响已注册的普通类
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_09_mixed) { minicc_gtest_body(); }
+#endif
 class Animal {
 public:
     int age;

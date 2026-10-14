@@ -27,6 +27,13 @@
 //   （p / bi 占 2 槽 / x / z / q / r / y）正好把帧撑到边界，于是暴露。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_48_class_type_aliases) { minicc_gtest_body(); }
+#endif
 struct Plain {
     using Int = int;        // [dcl.typedef] C++11 写法
     typedef int Int2;       // 老写法，语义相同

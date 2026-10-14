@@ -38,6 +38,13 @@
 //     这也正是实例名取 Box_double__double 而不是 Box_double 的原因。
 // =============================================================================
 
+// ── GoogleTest 入口（仅 CLion 单用例 Run/Debug；minicc 编译时本块被条件编译抹掉）──
+#ifdef MINICC_GTEST_TEST
+#include <gtest/gtest.h>
+#define main minicc_gtest_body
+static int minicc_gtest_body();
+TEST(Integration, test_tmpl_29_partial_spec) { minicc_gtest_body(); }
+#endif
 template<typename T, typename U = void>
 class Box {
 public:
