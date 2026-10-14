@@ -375,7 +375,14 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
             std::cout << std::format("  [deduction]   ✗ {}\n", out.failureReason);
             return false;
         }
-        return deducePair(P->referencedType, A, argIsLValue, paramNames, subst, out, structuralMatch);
+        // ★ structuralMatch：两侧【对称】剥壳 —— 偏特化匹配是模板实参表的类型对类型
+        //   结构等价（[temp.class.spec.match]/2），模板实参可以是引用类型，具体引用位
+        //   （如 Duo<T, int&> 的 int&）配 int& 实参必须命中。若拿 A=int& 原样递归，
+        //   内层落到"非依赖恒等"会比成 int vs int& 误拒（clang 判匹配，BUGS.md B28）。
+        //   安全性：structuralMatch 仅由 matchPattern 传入，其 refKind 预检已保证
+        //   P 是引用 ⇒ A 必是同种引用。
+        const TypePtr& innerA = structuralMatch ? A->referencedType : A;
+        return deducePair(P->referencedType, innerA, argIsLValue, paramNames, subst, out, structuralMatch);
     }
 
     // ── P = T&&：万能引用（forwarding reference，[temp.deduct.call]/3）──
@@ -398,7 +405,9 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
             return bind(paramKey(inner), Type::makeLValueReference(A),
                         subst, out, pStr, aStr);
         }
-        return deducePair(inner, A, argIsLValue, paramNames, subst, out, structuralMatch);
+        // structuralMatch：同左值引用分支对称剥壳（refKind 预检保证 A 是引用）。
+        const TypePtr& innerA = structuralMatch ? A->referencedType : A;
+        return deducePair(inner, innerA, argIsLValue, paramNames, subst, out, structuralMatch);
     }
 
     // ── P = T*：实参必须是指针，递归 pointee ──
@@ -418,10 +427,17 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
     // ── P = T（裸模板参数，值传递）──
     // [temp.deduct.call]：值传递调整 —— 实参的顶层引用/const 不参与推导。
     // demo: identity(x) 中 x 是 const int& ⇒ 剥顶层引用、再剥 const ⇒ T := int
+    // ★ 调整仅适用于【调用推导】：[expr.type]/1 说"表达式永远没有引用类型"，而偏特化
+    //   匹配（structuralMatch）里 A 是【模板实参类型】，本来就可以是引用 —— 剥了反而错：
+    //   Same<T,T> 配 Same<int&,int&>，剥壳后 T := int（clang 是 T := int&）；更糟的是
+    //   Same<T,T> 配 Same<int&,int>，逐位剥壳后"一致 ✓"误命中偏特化（clang 判 T 推导
+    //   冲突、不命中，回落主模板）—— 静默选错特化（BUGS.md B28）。
     if (isTemplateParamName(P, paramNames)) {
         TypePtr adjusted = A;
-        if (adjusted->isReference()) adjusted = adjusted->referencedType; // ① 剥顶层引用：值传递拷贝的是对象本身
-        if (adjusted->isConst())     adjusted = adjusted->innerType;      // ② 剥顶层 const：拷贝后副本可写，顶层 cv 丢失
+        if (!structuralMatch) {
+            if (adjusted->isReference()) adjusted = adjusted->referencedType; // ① 剥顶层引用：值传递拷贝的是对象本身
+            if (adjusted->isConst())     adjusted = adjusted->innerType;      // ② 剥顶层 const：拷贝后副本可写，顶层 cv 丢失
+        }
         if (adjusted != A) {
             std::cout << std::format("  [deduction]   P={:<12} A={:<12} ⇒ 值传递调整 A'={}\n",
                 pStr, aStr, adjusted->toString());

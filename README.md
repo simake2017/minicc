@@ -421,6 +421,8 @@ minicc 的一大特色是**每个编译阶段都输出详细的中文日志**，
 | `tests/lang/test_basics_07_member_call_arity_error.cpp` | 错误：个数不符 + **名字隐藏**（★ 回归 [B24](docs/BUGS.md)/[B25](docs/BUGS.md)） | [expr.call]/1 的 `too many arguments`（与 clang 逐字相同）。★ 隐藏与可行性是**两个正交的筛选**：先按名字砍掉基类整族，再按类型择优 —— 顺序反了就会"查到基类去" |
 | `tests/lang/test_basics_08_member_overload_no_viable_error.cpp` | 错误：候选集非空、可行集空（★ 回归 [B27](docs/BUGS.md)） | [overload.match]/1。★ 个数**对得上**（`f(int)`/`f(S)` 都是 1 位）⇒ 淘汰它的是类型 —— 旧实现在这里"退回声明序首个"，`c.f(p)` 静默调进 `f(int)`（编译全绿、运行算错） |
 | `tests/lang/test_basics_09_qualified_member.cpp` | **限定名访问成员数据** `Base::v` / `obj.Base::v`（★ 回归 [B21](docs/BUGS.md)） | [expr.prim.id.qual] + [class.member.lookup]/3：写限定名的唯一用途是**绕过名字隐藏**。★ 解析出的**偏移必须回填**给 CodeGen —— 按裸名查会命中派生类隐藏字段那条（"自身字段优先"），程序照跑但结果错 |
+| `tests/tmpl/test_tmpl_72_concrete_ref_param.cpp` | **具体引用形参** `f(int& x, T y)` 配 `int&` 实参（★ 回归 [B26 追补](docs/BUGS.md)） | [expr.type]/1：表达式没有引用类型 ⇒ 到达 deducePair 的 A 已是裸类型，入口按 `!structuralMatch` 剥壳。修复前模板参数位 T := int&（clang 是 int），靠"值传递调整"侥幸活命 |
+| `tests/tmpl/test_tmpl_73_partial_spec_ref_args.cpp` | **偏特化匹配里的引用类型位**（★ 回归 [B28](docs/BUGS.md)） | [temp.class.spec.match]/2：模板实参本来就是类型、可以带引用壳 ⇒ 调用推导的两条剥壳规则在这里都错。具体引用位 `Duo<T,int&>` 配 `int&` 旧版误拒（非依赖恒等比成 int vs int&）；`Same<T,T>` 配 `<int&,int>` 旧版逐位剥壳后"一致"**误命中偏特化**（clang 判推导冲突回落主模板）。structuralMatch 是两套语境的分界线 |
 
 ### 推荐的学习顺序
 

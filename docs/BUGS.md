@@ -40,6 +40,7 @@
 | [B25](#b25-成员调用实参个数不匹配无人认领一条静默接受一条只剩链接器) | 实参个数不匹配无人报错：无参方法那条**静默接受**，带参那条只剩 `undefined reference to 'C_f'` | `src/semantic_analyzer.cpp` inferCall 成员查找 BFS | 中（b **静默接受非法程序**；a/c 报错点落在链接器） | ✅ 已修 |
 | [B26](#b26-引用绑定判据只写了模板那一半) | 引用绑定判据只写在模板推导里 ⇒ `const T&` 拒右值（**拒收合法程序**）、`int&&` 收左值（**接受非法程序**） | `src/template_deduction.cpp` deducePair + `src/semantic_analyzer.cpp` inferCall（非模板路径**没有**） | 中（一个判据缺一半，两个方向都错） | ✅ 已修 |
 | [B27](#b27-无可行候选时静默退回候选集首个) | 候选集非空而无一可行 ⇒ 静默选第一个（`c.f(p)` 调进了 `f(int)`），编译全绿、运行算错 | `src/semantic_analyzer.cpp` pickBestByArgs | 中（**静默算错** + 接受非法程序） | ✅ 已修 |
+| [B28](#b28-偏特化匹配误用调用推导的剥壳规则structuralmatch-的另一半) | 偏特化匹配套用调用推导的剥壳规则 ⇒ 具体引用位 `Duo<T,int&>` 配 `int&` 误拒（**拒收合法程序**）、`Same<T,T>` 配 `<int&,int>` **静默选错特化** | `src/template_deduction.cpp` deducePair（引用分支递归 + 裸形参位调整两处漏网） | 中（三种症状各一） | ✅ 已修 |
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
 > B13/B14/B15 三条根因相同 —— 见文末[小结](#小结-字符串兼任-id-与路径)。
@@ -2033,3 +2034,44 @@ int main() { C c; int a = 1; int* p = &a; return c.f(p); }
 
 **文档**：docs/learn/36 §2.2。
 
+
+## B28. 偏特化匹配误用调用推导的剥壳规则（structuralMatch 的另一半）
+
+**来源**：排查 B26 追补时顺带核对 `matchPattern` 的 structuralMatch 路径，
+发现**调用推导的两条"剥壳"规则没有随 structuralMatch 一起关**：
+`deducePair` 的引用分支递归时把 A（模板实参，**可以**是引用类型）原样传下去、
+裸形参位的"值传递调整"无条件剥顶层引用/const。
+
+**复现**（两个文件，四种错法）
+
+| 程序 | minicc（修前） | clang++-18 `-std=c++20` |
+|---|---|---|
+| `Duo<T,int&>` 偏特化 + `Duo<int,int&> d;` | ❌ rc=1 `no match for non-dependent parameter: P='int' vs A='int&'` | ✅ rc=0 命中偏特化 |
+| `Same<T,T>` 偏特化 + `Same<int&,int&> s;` | ⚠️ rc=0 但 T := int（clang 是 `int&`），体内用 T 即错 | ✅ T := int& |
+| `Same<T,T>` 偏特化 + `Same<int&,int> m;` | ⚠️ **rc=0 误命中偏特化**（v()=4），clang 判 T 推导冲突回落主模板（v()=0），两版运行返回值不同 | ✅ 主模板 |
+
+**性质**：三种症状各一个 —— 拒收合法程序、绑定错（潜在算错）、**静默选错特化**。
+
+**根因**：`[expr.type]/1`（表达式没有引用类型）与 [temp.deduct.call] 的值传递调整
+都是**调用推导**的上下文假设；而偏特化匹配（[temp.class.spec.match]/2）比对的是
+**模板实参表**，实参本来就是类型、可以带引用壳。B26 追补给入口剥壳加了
+`!structuralMatch` 守卫、给万能引用分支加了跳过，但**引用分支的递归**与
+**裸形参位的调整**两处漏网 —— 同一个参数的三处用法只改了两处。
+
+**修法**（`src/template_deduction.cpp` deducePair，三处一致地以 structuralMatch 为界）：
+① 入口：A 的引用壳剥除仅 `!structuralMatch`（B26 追补已做）；
+② 引用分支（`P=T&` / `P=T&&`）：`structuralMatch` 下**对称剥壳**，
+   递归改传 `A->referencedType`（安全性：matchPattern 的 refKind 预检已保证
+   P 是引用 ⇒ A 是同种引用）⇒ 具体引用位 `int&` 配 `int&` 逐层合一命中；
+③ 裸形参位：值传递调整整段收进 `if (!structuralMatch)` ⇒ 绑定原样实参类型
+   （`Same<T,T>` 配 `<int&,int&>` ⇒ T := int&；配 `<int&,int>` ⇒ 冲突拒候选）。
+
+**回归用例**：`tests/tmpl/test_tmpl_73_partial_spec_ref_args.cpp`
+（5 实例组合，返回 0；与 clang 逐一核对）。**突变验证 2 条**：
+MUT-1 对称剥壳回退 ⇒ 运行 235（红）；MUT-2 调整恢复无条件 ⇒ 运行 64（红）。
+
+**日志漂移**：5 个既有文件（34/46/47/52/72）的推导轨迹行 ——
+全是"值传递调整 A'=…"消失或绑定行改写（绑定更贴近 clang），
+程序输出/退出码/汇编零变化，已重刷基线（124 → 125）。
+
+**文档**：tests/tmpl/test_tmpl_73 文件头（理论点全列）。
