@@ -110,6 +110,76 @@ target_link_libraries(unit_tests dl)
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
 
+# ─── 集成测试的 gtest 包装（调试入口：CLion 单用例断点）───────────────────
+# 动机：tests/*/*.cpp 都以 int main() 交付，由 logdiff.sh 统一跑；想在 CLion 里
+# 【单步进某一个测试的程序语义】时，没有 per-test 的调试配置可点。
+# 原理（不改任何测试文件）：
+#   每个正例 .cpp 生成一个包装 TU：文件体原样 #include 进具名 namespace（全部符号
+#   转内部链接，不同测试里的同名自由函数/类互不冲突），-Dmain=<符号> 把 main 改名
+#   成普通函数，同 TU 尾部落一个 TEST(Integration, <文件名>) 当注册器；
+#   所有包装 TU 链接进 integration_gtest（gtest_main 提供真正的 main）。
+#   CLion 识别 gtest 目标后，Test 面板列出每个用例 → 单独 Run/Debug。
+# ★ 职责边界：返回值校验归 logdiff（基线比对 run-rc），这里只保证"能跑、可断点"，
+#   所以 TEST 体不断言返回值（有些正例本就返回非 0，如 test_tmpl_61 返回 7）。
+# ★ 错误用例（*_error.cpp）是【非法程序】（本就被 clang/minicc 拒绝），
+#   主机编译器编不过，一律不进这个二进制 —— 它们只由 logdiff 管。
+# ★ 调试【编译器本身】不用这个目标：直接建 minicc 的运行配置，
+#   Program arguments 填 tests/xxx.cpp -o /tmp/xxx，断点打在 src/*.cpp 即可。
+file(GLOB_RECURSE ITEST_SOURCES CONFIGURE_DEPENDS tests/*.cpp)
+list(FILTER ITEST_SOURCES EXCLUDE REGEX "/tests/unit/")
+# 错误用例（*_error*，本就是【非法程序】，被 clang/minicc 双双拒绝）不进这个
+# 二进制 —— 主机编译器编不过，它们只由 logdiff 管。
+list(FILTER ITEST_SOURCES EXCLUDE REGEX "_error")
+# 命名没带 _error、但基线 rc=1 的【预期编译失败】用例（以 .logbaseline 的 rc 为准）：
+set(ITEST_EXCLUDES
+    tests/mi/test_mi_03_dynamic_cast.cpp      # 跨转型 B*→A* 未实现，预期 rc=1
+    tests/mi/test_mi_11_ambiguous_member.cpp  # [class.member.lookup]/8 歧义报错用例
+    tests/stl/test_stl_06_builtins.cpp        # 内建边界探测，预期 rc=1
+    tests/tmpl/test_tmpl_42_order_ambiguous.cpp # [temp.class.order] 歧义，预期 rc=1
+    tests/stl/test_stl_02_subscript.cpp       # minicc 的 v[i] 下标糖（无 operator[]），主机编译器不认
+    tests/stl/test_stl_04_map.cpp             # 同上：m[k] 下标糖
+    tests/tmpl/test_tmpl_15_deduce_forms.cpp  # return x（左值）按 T&& 返回：minicc 宽松放行，
+                                              # clang 拒（rvalue ref 不能绑左值）——主机编译器编不过
+)
+foreach(rel ${ITEST_EXCLUDES})
+    list(REMOVE_ITEM ITEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/${rel})
+endforeach()
+# tests/search-path/ 是 -I 搜索路径特性的【具材目录】（probe_angle.cpp 用 <angled>
+# include，必须配 -I 才合法），不是独立测试，整目录排除。
+list(FILTER ITEST_SOURCES EXCLUDE REGEX "/tests/search-path/")
+
+set(ITEST_N 0)
+set(ITEST_WRAPPERS "")
+foreach(src ${ITEST_SOURCES})
+    math(EXPR ITEST_N "${ITEST_N} + 1")
+    get_filename_component(base ${src} NAME_WE)
+    set(ns itest_${ITEST_N})
+    set(sym minicc_itest_main_${ITEST_N})
+    # 每个测试包成【独立 TU】：文件体收进具名 namespace（全部符号转内部链接），
+    # main 由 -Dmain=${sym} 改名，同 TU 尾部落一个 TEST() 当注册器。
+    # ★ 不能把所有测试编进同一二进制再靠链接器去重 —— 不同文件里的同名
+    #   自由函数（如 twice(int)）会 multiple definition（实测踩到）。
+    set(wrapper ${CMAKE_CURRENT_BINARY_DIR}/itest_wrappers/${base}.cpp)
+    file(WRITE ${wrapper}
+        "// 本文件由 CMake 生成，勿手改。\n"
+        "// 包装 ${base}.cpp：文件体收进 namespace ${ns}（内部链接，杜绝跨文件撞符号）。\n"
+        "#include <gtest/gtest.h>\n"
+        "namespace ${ns} {\n"
+        "#include \"${src}\"\n"
+        "}  // namespace ${ns}\n"
+        "TEST(Integration, ${base}) { ${ns}::${sym}(); }\n")
+    set(ITEST_WRAPPERS ${ITEST_WRAPPERS} ${wrapper})
+    set_source_files_properties(${wrapper} PROPERTIES
+        COMPILE_DEFINITIONS "main=${sym}"
+        COMPILE_OPTIONS "-Wno-everything")   # 教学用例不按主机编译器的 -Wall 要求整改
+endforeach()
+message(STATUS "集成测试 gtest 包装：${ITEST_N} 个用例 → integration_gtest")
+
+add_executable(integration_gtest ${ITEST_WRAPPERS})
+target_include_directories(integration_gtest PRIVATE include tests)
+target_link_libraries(integration_gtest GTest::gtest GTest::gtest_main)
+gtest_discover_tests(integration_gtest)
+
 # ─── ministl 测试 ───────────────────────────────────────────────────────────
 # ministl 本身是可以独立配置的 CMake 项目，这里 add_subdirectory 进来，
 # 这样 CLion 打开 mycompiler 时能一并看到它的 5 个测试目标、

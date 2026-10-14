@@ -124,6 +124,15 @@ done
 ctest --test-dir build-linux --output-on-failure
 ```
 
+### CLion 调试入口（单个测试逐行步进）
+
+- **调测试程序本身**：CMake target `integration_gtest` 把 94 个正例集成测试
+  （`-Dmain=` 改名 + 具名 namespace 包装，错误用例不在其中）包成了 gtest 用例 ——
+  CLion 底部 Test 面板逐条列出，点任一用例左侧三角即可单独 Run/**Debug**，
+  断点设在 tests/ 的测试源码里。返回值校验归 logdiff，这里只管"能跑、可断点"。
+- **调编译器本身**：直接建 `minicc` 的运行配置，
+  Program arguments 填 `tests/xxx/yyy.cpp -o /tmp/yyy`，断点打在 `src/*.cpp`。
+
 ### 重构安全网：日志基线对比
 
 本项目的「全阶段中文日志」是交付物之一 —— 单测靠子串匹配日志原文，
