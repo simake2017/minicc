@@ -449,6 +449,24 @@ minicc 兼容性探针结论：第一堵墙是系统头链 `<cstddef>` → `<ini
 全量 323 → **327** 单测；既有集成用例**逐字节零漂移**，基线重刷（+1 新文件）。
 clang 对照：`InitPreprocessor` 注册一族版本/target 宏 → 本实现两行、值恒 1。
 
+✅ **主线 C 首批（for / break / continue / 三元 ?:）已完成（docs/learn/38）** ——
+AST 四节点（ForStmt/BreakStmt/ContinueStmt/ConditionalExpr，accept 虚分派全链路：
+AstDumper/CodeGen/Sema/cloneExpr/cloneStmt/estimateBlockSize 七处落点）；
+Parser：parseExpression 顶层包 ?: 层（右结合、中支全表达式）、parseForStmt
+（声明式/表达式式/空 init，cond/incr 可空）；★ 语法边界处置：本语言赋值是
+【语句】，`for(...;...;i=i+1)` 的 init/incr 两格**局部放宽**为"表达式或赋值"
+（这两格 AST 槽因此是 StmtPtr）——不放宽会把最普通的教学示例拒之门外。
+Sema：m_loopDepth 循环深度栈，break/continue 出循环报错文案与 clang **逐字相同**
+（break 带 "or switch"，给未来 switch 提前留位，免漂基线）；for-init 作用域
+贯穿 cond/incr/body（enterScope 包全程）。CodeGen：for 五标签降级 +
+m_loopStack 循环上下文栈——★ continue 落【增量步】不落条件式（`for(;;)` 里
+落条件式就是死循环），while 入栈 continue 落点=条件式；?: 短路靠两行条件跳转
+实现（落选支整体跳过，非算完再选）。测试 tests/flow/ 四件（01 正例 7 检查点 /
+02 正例含短路副作用全局计数器钉扎 + 模板体内 ?: 走 cloneExpr Conditional 分支 /
+03、04 负例 rc=1 文案逐字同 clang）；ctest 340 → **342**，集成日志基线
+126 → **130** 份，既有日志**逐字节零漂移**。边界与剩余（switch、do-while、
+逗号表达式、区间 for、赋值表达式化）见 docs/learn/38 §8。
+
 ✅ **ministl::set + 红黑树分层抽取已完成（STL 覆盖第 2 轮）** ——
 把 map.h 里的树核心抽成 `detail/rb_tree.h`（对齐 libc++ `__tree` 分层），
 `map` 重构为薄适配器、`set` 为新适配器。**没复制粘贴第二份删除修正**——

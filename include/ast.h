@@ -58,8 +58,10 @@ enum class NodeKind : uint8_t {
     // 表达式
     IntLiteral, CharLiteral, BoolLiteral, StringLiteral, NullptrLiteral,
     Var, Binary, Unary, Call, Member, New, This, Delete, DynamicCast, Index,
+    Conditional,
     // 语句
     ExprStmt, VarDecl, Return, If, While, Block, Assign, DeleteStmt, Empty,
+    For, Break, Continue,
     // 声明
     Function, Class, Template, GlobalVar, Enum, Namespace, TypeAlias,
     Constructor, Destructor, DeductionGuide,
@@ -196,6 +198,24 @@ struct BinaryExpr : Expression {
     BinaryExpr(BinaryOp o, ExprPtr l, ExprPtr r)
         : Expression(NodeKind::Binary), op(o),
           left(std::move(l)), right(std::move(r)) {}
+
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
+// ─── 条件（三元）表达式 ───────────────────────────────────────────────────────
+// 对应 [expr.cond]；clang: ConditionalOperator。
+// demo：int m = a > b ? a : b;
+//   → ConditionalExpr{ condition=BinaryExpr{Gt,a,b}, thenExpr=Var(a), elseExpr=Var(b) }
+// ★ 短路语义：condition 为假时 thenExpr【不求值】（副作用不触发），
+//   为真时 elseExpr 不求值 —— 代码生成用条件跳转实现，不是先算两个再选。
+// ★ 类型：两支必须同型（教学级不做 [expr.cond]/3 的合成类型规则）。
+struct ConditionalExpr : Expression {
+    ExprPtr condition;
+    ExprPtr thenExpr;
+    ExprPtr elseExpr;
+    ConditionalExpr(ExprPtr cond, ExprPtr t, ExprPtr e)
+        : Expression(NodeKind::Conditional), condition(std::move(cond)),
+          thenExpr(std::move(t)), elseExpr(std::move(e)) {}
 
     void accept(AstVisitor& v) override { v.visit(*this); }
 };
@@ -506,6 +526,42 @@ struct WhileStmt : Statement {
         : Statement(NodeKind::While), condition(std::move(cond)),
           body(std::move(b)) {}
 
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
+// ─── for 语句 ─────────────────────────────────────────────────────────────────
+// 对应 [stmt.iter]/[stmt.for]；clang: ForStmt。
+// demo：for (int i = 0; i < n; i = i + 1) { sum = sum + i; }
+//   → ForStmt{ init=VarDeclStmt{i=0}, condition=BinaryExpr{Lt,i,n},
+//              increment=AssignStmt{i, i+1}, body=BlockStmt[...] }
+// init 可以是 VarDeclStmt（声明式）或 ExprStmt（表达式式），`for(;;)` 时是 EmptyStmt；
+// condition 可空（`for(;;)` 恒真）；increment 是【语句】而非表达式 ——
+// 本语言里赋值是语句（AssignStmt），`for (...; ...; i = i + 1)` 的第三格
+// 只此一家以无分号形式出现，故 increment 收 StmtPtr（ExprStmt 或 AssignStmt）。
+struct ForStmt : Statement {
+    StmtPtr init;            // 进入循环前恰好执行一次
+    ExprPtr condition;       // 每次迭代前求值；nullptr ⇒ 恒真
+    StmtPtr increment;       // 每次迭代体结束后执行；nullptr ⇒ 无
+    StmtPtr body;
+    ForStmt(StmtPtr i, ExprPtr cond, StmtPtr incr, StmtPtr b)
+        : Statement(NodeKind::For), init(std::move(i)),
+          condition(std::move(cond)), increment(std::move(incr)),
+          body(std::move(b)) {}
+
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
+// ─── break / continue 语句 ────────────────────────────────────────────────────
+// 对应 [stmt.jump]/[stmt.break]/[stmt.cont]；clang: BreakStmt / ContinueStmt。
+// 语义：break 跳出最近一层循环；continue 跳过本轮、跳到循环的"增量步"
+// （while 就是条件式）。能不能用由 Sema 的循环上下文栈裁决——
+// 栈空 ⇒ "not in loop" 报错（两节点本身不带任何数据，跳转目标是生成期的事）。
+struct BreakStmt : Statement {
+    BreakStmt() : Statement(NodeKind::Break) {}
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+struct ContinueStmt : Statement {
+    ContinueStmt() : Statement(NodeKind::Continue) {}
     void accept(AstVisitor& v) override { v.visit(*this); }
 };
 

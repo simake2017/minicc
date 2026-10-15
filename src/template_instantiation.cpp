@@ -1159,6 +1159,18 @@ ExprPtr TemplateInstantiator::cloneExpr(
             return cloned;
         }
 
+        // 条件（三元）表达式（主线 C）：三支全递归克隆。
+        // demo: "return a > b ? x : y;" ⇒ 结构不变、内部 T 已替换
+        case NodeKind::Conditional: {
+            auto& e = static_cast<ConditionalExpr&>(*expr);
+            auto cloned = std::make_shared<ConditionalExpr>(
+                cloneExpr(e.condition, subst),
+                cloneExpr(e.thenExpr, subst),
+                cloneExpr(e.elseExpr, subst));
+            cloned->location = e.location;
+            return cloned;
+        }
+
         case NodeKind::Call: {
             auto& e = static_cast<CallExpr&>(*expr);
             std::vector<ExprPtr> clonedArgs;
@@ -1329,6 +1341,36 @@ StmtPtr TemplateInstantiator::cloneStmt(
             auto cloned = std::make_shared<WhileStmt>(
                 cloneExpr(s.condition, subst),
                 cloneStmt(s.body, subst));
+            cloned->location = s.location;
+            return cloned;
+        }
+
+        // ── for / break / continue 语句（主线 C）──
+        // for：init/condition/increment/body 四个子节点全递归（init 是语句——
+        // 声明式 init 里的 T 要走 substituteType，必须过 cloneStmt 不能跳过）；
+        // break/continue 是叶子，但【必须显式列】：落到 default 返回 nullptr
+        // 会被静默丢弃（同下方 Empty 分支的教训）。
+        // demo: "for (T i = 0; i < n; i = i + 1) { sum = sum + i; }"
+        //    ⇒  "for (int i = 0; i < n; i = i + 1) { sum = sum + i; }"
+        case NodeKind::For: {
+            auto& s = static_cast<ForStmt&>(*stmt);
+            auto cloned = std::make_shared<ForStmt>(
+                cloneStmt(s.init, subst),
+                cloneExpr(s.condition, subst),
+                cloneStmt(s.increment, subst),
+                cloneStmt(s.body, subst));
+            cloned->location = s.location;
+            return cloned;
+        }
+        case NodeKind::Break: {
+            auto& s = static_cast<BreakStmt&>(*stmt);
+            auto cloned = std::make_shared<BreakStmt>();
+            cloned->location = s.location;
+            return cloned;
+        }
+        case NodeKind::Continue: {
+            auto& s = static_cast<ContinueStmt&>(*stmt);
+            auto cloned = std::make_shared<ContinueStmt>();
             cloned->location = s.location;
             return cloned;
         }

@@ -909,6 +909,30 @@ uint32_t CodeGen::estimateBlockSize(std::shared_ptr<BlockStmt> block) {
                     total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(w->body));
                 break;
             }
+            case NodeKind::For: {
+                // for-init 若是声明（`for (int i = ...)`），变量作用域覆盖整个
+                // 循环体，栈槽属于本帧：展开 init 与 body 两个块。
+                // ★ 不能只算 body —— init 的 VarDeclStmt 才是最常见的帧占用来源。
+                auto f = std::static_pointer_cast<ForStmt>(stmt);
+                if (f->init && f->init->kind == NodeKind::Block)
+                    total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(f->init));
+                if (f->init && f->init->kind == NodeKind::VarDecl) {
+                    auto v = std::static_pointer_cast<VarDeclStmt>(f->init);
+                    uint32_t size = 8;
+                    if (v->declaredType && !v->declaredType->isPointer() && m_classTypes) {
+                        auto cit = m_classTypes->find(v->declaredType->name);
+                        if (cit != m_classTypes->end() && cit->second->isClass()) {
+                            size = cit->second->classLayout.totalSize;
+                            if (size < 8) size = 8;
+                            size = (size + 7) / 8 * 8;
+                        }
+                    }
+                    total += size;
+                }
+                if (f->body && f->body->kind == NodeKind::Block)
+                    total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(f->body));
+                break;
+            }
             default:
                 break;   // 其余语句（表达式/return/delete…）不占栈槽
         }
@@ -1445,6 +1469,9 @@ void CodeGen::visit(WhileStmt& stmt) {
     std::string beginLabel = newLabel("while_begin");
     std::string endLabel = newLabel("while_end");
 
+    // 循环上下文入栈：continue 跳回条件式（while 的"增量步"就是它）
+    m_loopStack.push_back({endLabel, beginLabel});
+
     emit(std::format("{}:                        # while 循环开始标签", beginLabel));
     emitComment("while condition");
     emitExpr(stmt.condition);
@@ -1456,6 +1483,63 @@ void CodeGen::visit(WhileStmt& stmt) {
     emit(std::format("jmp {}                    # 无条件跳回循环开始（回边）", beginLabel));
 
     emit(std::format("{}:                        # while 循环结束标签", endLabel));
+    m_loopStack.pop_back();
+}
+
+// for 循环降级（[stmt.for] 的结构化翻译，对照 clang CodeGenFunction::EmitForStmt）：
+//   init 恰好一次 → cond 测试（假则去 end）→ body → incr → 回边 jmp cond。
+// 五个标签各司其职，continue 落 incr（不是 cond ——  incr 还没跑），break 落 end。
+void CodeGen::visit(ForStmt& stmt) {
+    std::string initLabel  = newLabel("for_init");
+    std::string condLabel  = newLabel("for_cond");
+    std::string bodyLabel  = newLabel("for_body");
+    std::string incrLabel  = newLabel("for_incr");
+    std::string endLabel   = newLabel("for_end");
+
+    m_loopStack.push_back({endLabel, incrLabel});
+
+    emit(std::format("{}:                        # for 初始化（只执行一次）", initLabel));
+    emitStmt(stmt.init);
+
+    emit(std::format("{}:                        # for 条件测试", condLabel));
+    if (stmt.condition) {
+        emitExpr(stmt.condition);
+        emit("testq %rax, %rax             # 条件值与自身按位与，设置 ZF 标志位");
+        emit(std::format("je {}                     # 条件为假（ZF=1）跳出循环", endLabel));
+    } else {
+        emitComment("for(;;)：无条件 —— 死循环，只能靠 break 出口");
+    }
+
+    emit(std::format("{}:                        # for 循环体", bodyLabel));
+    emitStmt(stmt.body);
+
+    emit(std::format("{}:                        # for 增量步（continue 落点）", incrLabel));
+    if (stmt.increment && stmt.increment->kind != NodeKind::Empty) emitStmt(stmt.increment);
+    emit(std::format("jmp {}                    # 回边：无条件跳回条件测试", condLabel));
+
+    emit(std::format("{}:                        # for 循环结束标签（break 落点）", endLabel));
+    m_loopStack.pop_back();
+}
+
+// break [stmt.jump]：跳最近一层循环的出口。栈空不可能出现 —— Sema 已
+// 把"not in loop" 拦在编译期；这里再守一次（防御 Sema 守卫被意外绕过的
+// UB 场景：栈空时 back() 是未定义行为，宁可响亮报错不可静默崩）。
+void CodeGen::visit(BreakStmt&) {
+    if (m_loopStack.empty()) {
+        throw std::runtime_error(
+            "[CodeGen Error] 'break' 无匹配的循环上下文（Sema 的循环守卫未生效？）");
+    }
+    emit(std::format("jmp {}                    # break：跳出最近一层循环", m_loopStack.back().breakLabel));
+}
+
+// continue [stmt.cont]：跳过本轮剩余体代码，跳到循环的"增量步"
+// （for 的 incr 标签；while 那里是条件式标签 —— 由入栈时的约定区分）。
+void CodeGen::visit(ContinueStmt&) {
+    if (m_loopStack.empty()) {
+        throw std::runtime_error(
+            "[CodeGen Error] 'continue' 无匹配的循环上下文（Sema 的循环守卫未生效？）");
+    }
+    emit(std::format("jmp {}                    # continue：跳转到循环增量步", m_loopStack.back().continueLabel));
 }
 
 // 表达式语句：只求值、结果（rax）丢弃；价值在求值过程产生的副作用
@@ -1682,6 +1766,30 @@ void CodeGen::visit(BinaryExpr& expr) {
             break;
     }
 }
+
+// 条件（三元）表达式 [expr.cond] 的降级 —— ★ 短路语义就藏在这两行跳转里：
+// 先算条件、testq；假则【跳过 then 支】（它的副作用不会发生），真则跳过 else 支。
+// 两支的值都落在 rax（Sema 已保证同型），用 end 标签汇合 ——
+// 这是 if-else 的表达式版（clang CodeGenFunction::EmitConditionalOperator）。
+void CodeGen::visit(ConditionalExpr& expr) {
+    std::string elseLabel = newLabel("cond_else");
+    std::string endLabel  = newLabel("cond_end");
+
+    emitComment("?: condition");
+    emitExpr(expr.condition);
+    emit("testq %rax, %rax             # 条件值与自身按位与，设置 ZF 标志位");
+    emit(std::format("je {}                     # 假 ⇒ 走 else 支（then 支不求值）", elseLabel));
+
+    emitComment("?: then-branch");
+    emitExpr(expr.thenExpr);
+    emit(std::format("jmp {}                    # then 支算完，跳过 else 支", endLabel));
+
+    emit(std::format("{}:                        # else 支", elseLabel));
+    emitExpr(expr.elseExpr);
+
+    emit(std::format("{}:                        # ?: 汇合点（rax = 被选中的值）", endLabel));
+}
+
 
 // 做什么：一元运算。Neg 直接 negq 取负（先求值再原地取负）；
 //       Not 用 testq + sete 实现"等于 0 则为 1"的逻辑非。

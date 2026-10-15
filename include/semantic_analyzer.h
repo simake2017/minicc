@@ -255,6 +255,12 @@ private:
     // ── 符号表管理 ──
     SymbolTable m_symbolTable;
 
+    // 循环嵌套深度（break/continue 合法性裁决）：for/while 体进入 +1、
+    // 退出 -1；栈空时遇到 break/continue ⇒ "not in loop" 报错
+    // （对照 clang：ActOnBreak/ActOnContinue 查 CurContext 是否在循环里，
+    //  文案 'break statement not in loop statement' 逐字沿用）。
+    int m_loopDepth = 0;
+
     // ── 全局注册表 ──
     std::unordered_map<std::string, TypePtr>      m_classTypes;    // 类名 → Type
     std::unordered_map<std::string, FuncDeclPtr>   m_functionMap;   // 函数名 → 声明
@@ -426,6 +432,9 @@ private:
     void visit(IfStmt& stmt) override;
     // while：条件类型检查，循环体建作用域
     void visit(WhileStmt& stmt) override;
+    void visit(ForStmt& stmt) override;
+    void visit(BreakStmt& stmt) override;
+    void visit(ContinueStmt& stmt) override;
     // return：返回值与声明返回类型兼容性检查 [stmt.return]
     void visit(ReturnStmt& stmt) override;
     // 赋值：推导左右类型（教学级不查左值可赋值性）
@@ -598,6 +607,7 @@ private:
     // 下标 v[i]（读值）：类必须提供 at() 约定方法 → 返回 at() 的返回类型
     // （[expr.sub] 的糖化：operator[] 重载降级为成员方法调用）
     TypePtr inferIndex(IndexExpr& expr);
+    TypePtr inferConditional(ConditionalExpr& expr);
 
     // ── 类内存布局计算 ──
     // 逐字段对齐排布，算 offset/size/totalSize（_vptr 恒在偏移 0）

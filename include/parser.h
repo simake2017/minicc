@@ -197,6 +197,9 @@ private:
     StmtPtr parseIfStmt();
     // while-stmt := 'while' '(' expr ')' stmt
     StmtPtr parseWhileStmt();
+    StmtPtr parseForStmt();
+    StmtPtr parseBreakStmt();
+    StmtPtr parseContinueStmt();
     // return-stmt := 'return' [expr] ';'
     StmtPtr parseReturnStmt();
     // delete-stmt := 'delete' ['[' ']'] expr ';'

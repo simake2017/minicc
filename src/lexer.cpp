@@ -41,7 +41,9 @@ const char* tokenTypeName(TokenType t) {
         case TokenType::KwBool:        return "bool";
         case TokenType::KwChar:        return "char";
         case TokenType::KwClass:       return "class";
+        case TokenType::KwBreak:       return "break";
         case TokenType::KwConst:       return "const";
+        case TokenType::KwContinue:    return "continue";
         case TokenType::KwDecltype:    return "decltype";
         case TokenType::KwDelete:      return "delete";
         case TokenType::KwDouble:      return "double";
@@ -94,6 +96,7 @@ const char* tokenTypeName(TokenType t) {
         case TokenType::Semicolon:     return ";";
         case TokenType::Arrow:         return "->";
         case TokenType::ColonColon:    return "::";
+        case TokenType::Question:      return "?";
         case TokenType::EqualEqual:    return "==";
         case TokenType::BangEqual:     return "!=";
         case TokenType::LessEqual:     return "<=";
@@ -477,6 +480,7 @@ Token Lexer::scanOperator() {
         case ':':
             if (n == ':') { advance(); return makeToken(TokenType::ColonColon, "::", loc); }
             return makeToken(TokenType::Colon, ":", loc);
+        case '?': return makeToken(TokenType::Question, "?", loc);
         default:
             break;
     }

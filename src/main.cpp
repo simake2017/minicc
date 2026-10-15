@@ -205,6 +205,16 @@ public:
     void visit(ThisExpr&) override {
         printNode(m_prefix, m_isLast, "ThisExpr");
     }
+    void visit(ConditionalExpr& e) override {
+        printNode(m_prefix, m_isLast, "ConditionalExpr (?:)");
+        std::string cp = childPrefix();
+        std::cout << cp << "├── condition\n";
+        dumpExpr(e.condition, cp + "│   ", true);
+        std::cout << cp << "├── then\n";
+        dumpExpr(e.thenExpr, cp + "│   ", true);
+        std::cout << cp << "└── else\n";
+        dumpExpr(e.elseExpr, cp + "    ", true);
+    }
     void visit(BinaryExpr& e) override {
         std::string opStr;
         switch (e.op) {
@@ -315,6 +325,28 @@ public:
         dumpExpr(s.condition, cp + "│   ", true);
         std::cout << cp << "└── body\n";
         dumpStmt(s.body, cp + "    ", true);
+    }
+    void visit(ForStmt& s) override {
+        printNode(m_prefix, m_isLast, "ForStmt");
+        std::string cp = childPrefix();
+        std::cout << cp << "├── init\n";
+        dumpStmt(s.init, cp + "│   ", true);
+        if (s.condition) {
+            std::cout << cp << "├── condition\n";
+            dumpExpr(s.condition, cp + "│   ", true);
+        }
+        if (s.increment && s.increment->kind != NodeKind::Empty) {
+            std::cout << cp << "├── increment\n";
+            dumpStmt(s.increment, cp + "│   ", true);
+        }
+        std::cout << cp << "└── body\n";
+        dumpStmt(s.body, cp + "    ", true);
+    }
+    void visit(BreakStmt&) override {
+        printNode(m_prefix, m_isLast, "BreakStmt");
+    }
+    void visit(ContinueStmt&) override {
+        printNode(m_prefix, m_isLast, "ContinueStmt");
     }
     void visit(BlockStmt& s) override {
         printNode(m_prefix, m_isLast, "BlockStmt");

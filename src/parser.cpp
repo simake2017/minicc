@@ -2008,6 +2008,9 @@ StmtPtr Parser::parseStatement() {
     if (check(TokenType::LBrace))    return parseBlockStmt();
     if (check(TokenType::KwIf))      return parseIfStmt();
     if (check(TokenType::KwWhile))   return parseWhileStmt();
+    if (check(TokenType::KwFor))     return parseForStmt();
+    if (check(TokenType::KwBreak))   return parseBreakStmt();
+    if (check(TokenType::KwContinue)) return parseContinueStmt();
     if (check(TokenType::KwReturn))  return parseReturnStmt();
     if (check(TokenType::KwDelete))  return parseDeleteStmt();
 
@@ -2228,6 +2231,97 @@ StmtPtr Parser::parseWhileStmt() {
     return stmt;
 }
 
+// ─── for 语句 ─────────────────────────────────────────────────────────────────
+// 文法：for-stmt := 'for' '(' for-init ';' [cond] ';' [incr] ')' stmt
+//   for-init := 声明（int i = 0）| 表达式（i = 0）| 空 —— C++98 起允许声明
+//   cond / incr 都可缺省（`for(;;)` 两个都空 ⇒ 死循环，靠 break 出）
+// 对照 clang：ParseForStatement（ParseStmt.cpp）。
+// 入参 demo：Token 流 [for][(][int][i][=][0][;][i][<][n][;][i][=][i][+][1][)][{]...
+//   → ForStmt{ init=VarDeclStmt{i=0}, condition=BinaryExpr{Lt,i,n},
+//              increment=AssignExpr..., body=BlockStmt }
+StmtPtr Parser::parseForStmt() {
+    auto loc = current().location;
+    expect(TokenType::KwFor, "Expected 'for'");
+    expect(TokenType::LParen, "Expected '(' after 'for'");
+
+    // init：空（;) / 声明式（类型开头，自带结尾分号）/ 表达式式或赋值式
+    // （赋值在本语言是语句，for 头局部放宽 —— 与 incr 同款的处置）
+    StmtPtr init;
+    if (check(TokenType::Semicolon)) {
+        advance();
+        init = std::make_shared<EmptyStmt>();
+    } else if (current().isTypeKeyword()) {
+        TypePtr type = parseType();
+        init = parseVarDeclStmt(type);           // 吃掉自己的 ';'
+    } else {
+        ExprPtr target = parseExpression();
+        if (check(TokenType::Assign)) {
+            auto aloc = current().location;
+            advance();
+            auto asgn = std::make_shared<AssignStmt>(target, parseExpression());
+            asgn->location = aloc;
+            init = asgn;
+        } else {
+            init = std::make_shared<ExprStmt>(target);
+        }
+        expect(TokenType::Semicolon, "Expected ';' after for-init");
+    }
+
+    // cond：可空（for(;;)）
+    ExprPtr cond;
+    if (!check(TokenType::Semicolon)) {
+        cond = parseExpression();
+    }
+    expect(TokenType::Semicolon, "Expected ';' after for condition");
+
+    // incr：可空。本语言赋值是语句，但 for 头第三格允许无分号的赋值
+    // （`i = i + 1`）—— 故这里产出【语句】（AssignStmt/ExprStmt），与 init 同构。
+    StmtPtr incr = std::make_shared<EmptyStmt>();
+    if (!check(TokenType::RParen)) {
+        ExprPtr target = parseExpression();
+        if (check(TokenType::Assign)) {
+            auto loc = current().location;
+            advance();
+            ExprPtr value = parseExpression();
+            auto asgn = std::make_shared<AssignStmt>(target, value);
+            asgn->location = loc;
+            incr = asgn;
+        } else {
+            incr = std::make_shared<ExprStmt>(target);
+        }
+    }
+    expect(TokenType::RParen, "Expected ')' after for clauses");
+
+    StmtPtr body = parseStatement();
+
+    auto stmt = std::make_shared<ForStmt>(init, cond, incr, body);
+    stmt->location = loc;
+    return stmt;
+}
+
+// ─── break / continue 语句 ────────────────────────────────────────────────────
+// 文法：break-stmt := 'break' ';'    continue-stmt := 'continue' ';'
+// 对照 clang：ParseBreakStatement / ParseContinueStatement。
+// 合法性（在不在循环里）不在语法层判 —— 交 Sema 的循环上下文栈（像 clang 的
+// ContinueJumpChecker / BreakJumpChecker 在 SemaAct 阶段报错）。
+StmtPtr Parser::parseBreakStmt() {
+    auto loc = current().location;
+    expect(TokenType::KwBreak, "Expected 'break'");
+    expect(TokenType::Semicolon, "Expected ';' after break");
+    auto stmt = std::make_shared<BreakStmt>();
+    stmt->location = loc;
+    return stmt;
+}
+
+StmtPtr Parser::parseContinueStmt() {
+    auto loc = current().location;
+    expect(TokenType::KwContinue, "Expected 'continue'");
+    expect(TokenType::Semicolon, "Expected ';' after continue");
+    auto stmt = std::make_shared<ContinueStmt>();
+    stmt->location = loc;
+    return stmt;
+}
+
 // ─── return 语句 ──────────────────────────────────────────────────────────────
 // 文法：return-stmt := 'return' [expr] ';'
 //   返回值可选：前瞻到 ';' 即为裸 return（void 函数）。
@@ -2318,8 +2412,26 @@ StmtPtr Parser::parseExprOrAssignStmt() {
 // 对照 clang：ParseExpression / ParseRHSOfBinaryExpression —— clang 用优先级表迭代处理，
 //   本实现用函数嵌套链，原理相同。
 
+// ─── 条件（三元）表达式 ──────────────────────────────────────────────────────
+// 文法：conditional := or-expr ['?' expression ':' expression]   右结合
+// 优先级：比 || 低（整个条件表达式的入口在此包一层）、比赋值类高。
+// demo：Token 流 [a][>][b][?][x][:][y]
+//   cond=parseOrExpr → BinaryExpr{Gt,a,b}；见 '?'，中支 parseExpression → Var(x)，
+//   ':'，else 支 parseExpression → Var(y)（右结合：`a?b:c?d:e` = a?b:(c?d:e)）
+// 对照 clang：ParseConditionalExpression（ParseExpr.cpp）。
 ExprPtr Parser::parseExpression() {
-    return parseOrExpr();
+    ExprPtr cond = parseOrExpr();
+    if (!check(TokenType::Question)) return cond;
+
+    auto loc = current().location;
+    advance();                                     // 吃掉 '?'
+    ExprPtr thenExpr = parseExpression();          // 中支是全表达式（可再含 ?:）
+    expect(TokenType::Colon, "Expected ':' in conditional expression");
+    ExprPtr elseExpr = parseExpression();          // 右结合挂在这一支
+
+    auto expr = std::make_shared<ConditionalExpr>(cond, thenExpr, elseExpr);
+    expr->location = loc;
+    return expr;
 }
 
 // ─── || ──────────────────────────────────────────────────────────────────────

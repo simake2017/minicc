@@ -37,6 +37,7 @@ struct StringLiteralExpr;
 struct NullptrLiteralExpr;
 struct VarExpr;
 struct BinaryExpr;
+struct ConditionalExpr;
 struct UnaryExpr;
 struct CallExpr;
 struct MemberExpr;
@@ -52,6 +53,9 @@ struct AssignStmt;
 struct ReturnStmt;
 struct IfStmt;
 struct WhileStmt;
+struct ForStmt;
+struct BreakStmt;
+struct ContinueStmt;
 struct BlockStmt;
 struct DeleteStmt;
 struct EmptyStmt;
@@ -79,6 +83,7 @@ public:
     virtual void visit(NullptrLiteralExpr&) {}
     virtual void visit(VarExpr&) {}
     virtual void visit(BinaryExpr&) {}
+    virtual void visit(ConditionalExpr&) {}
     virtual void visit(UnaryExpr&) {}
     virtual void visit(CallExpr&) {}
     virtual void visit(MemberExpr&) {}
@@ -95,6 +100,9 @@ public:
     virtual void visit(ReturnStmt&) {}
     virtual void visit(IfStmt&) {}
     virtual void visit(WhileStmt&) {}
+    virtual void visit(ForStmt&) {}
+    virtual void visit(BreakStmt&) {}
+    virtual void visit(ContinueStmt&) {}
     virtual void visit(BlockStmt&) {}
     virtual void visit(DeleteStmt&) {}
     virtual void visit(EmptyStmt&) {}

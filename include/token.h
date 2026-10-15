@@ -44,9 +44,11 @@ enum class TokenType : uint8_t {
     // ── 关键字 ──
     KwAuto,           // auto
     KwBool,           // bool
+    KwBreak,          // break      —— 跳出最近一层循环（主线 C）
     KwChar,           // char        —— 整型家族（[basic.fundamental]/2）
     KwClass,          // class
     KwConst,          // const
+    KwContinue,       // continue   —— 跳转到最近一层循环的增量步（主线 C）
     KwDecltype,       // decltype
     KwDelete,         // delete
     KwDouble,         // double
@@ -98,6 +100,7 @@ enum class TokenType : uint8_t {
     Dot,              // .
     Comma,            // ,
     Colon,            // :
+    Question,         // ?   —— 三元运算符 a ? b : c 的前半（主线 C）
     Semicolon,        // ;
     Arrow,            // ->
     ColonColon,       // ::
@@ -133,9 +136,11 @@ enum class TokenType : uint8_t {
 inline const std::unordered_map<std::string_view, TokenType> kKeywordMap = {
     {"auto",      TokenType::KwAuto},
     {"bool",      TokenType::KwBool},
+    {"break",     TokenType::KwBreak},
     {"char",      TokenType::KwChar},
     {"class",     TokenType::KwClass},
     {"const",     TokenType::KwConst},
+    {"continue",  TokenType::KwContinue},
     {"decltype",  TokenType::KwDecltype},
     {"delete",    TokenType::KwDelete},
     {"double",    TokenType::KwDouble},

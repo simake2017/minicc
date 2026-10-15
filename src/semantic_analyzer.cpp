@@ -3037,9 +3037,93 @@ void SemanticAnalyzer::visit(WhileStmt& stmt) {
     std::cout << std::format("  [while] condition type: {}\n",
         condType ? condType->toString() : "?");
 
+    m_loopDepth++;                               // break/continue 的合法性范围
     m_symbolTable.enterScope("while-body");
     processStmt(stmt.body);
     m_symbolTable.exitScope();
+    m_loopDepth--;
+}
+
+// for 语句 [stmt.for]：init → cond → body → incr 的静态检查各来一遍。
+// init 的【作用域贯穿整个循环体】（C++ 里 for-init 声明的名字在 cond、incr、
+// body 里都可见），所以 enterScope 包全程而非只包 init；
+// incr 是表达式不是语句（`i++` 写成 `i = i + 1`），走 inferType 定型即可。
+void SemanticAnalyzer::visit(ForStmt& stmt) {
+    std::cout << std::format("  [for] init:\n");
+    m_symbolTable.enterScope("for-init");
+
+    processStmt(stmt.init);
+
+    if (stmt.condition) {
+        std::cout << std::format("  [for] condition:\n");
+        m_inferDepth++;
+        TypePtr condType = inferType(stmt.condition);
+        m_inferDepth--;
+        std::cout << std::format("  [for] condition type: {}\n",
+            condType ? condType->toString() : "?");
+    } else {
+        std::cout << std::format("  [for] condition: <empty> (for(;;))\n");
+    }
+
+    if (stmt.increment && stmt.increment->kind != NodeKind::Empty) {
+        std::cout << std::format("  [for] increment:\n");
+        processStmt(stmt.increment);             // 语句（AssignStmt/ExprStmt）
+    }
+
+    m_loopDepth++;                               // break/continue 的合法性范围
+    m_symbolTable.enterScope("for-body");
+    processStmt(stmt.body);
+    m_symbolTable.exitScope();
+    m_loopDepth--;
+
+    m_symbolTable.exitScope();
+}
+
+// break 语句 [stmt.break]：只能在循环（或 switch，本项目无 switch）里出现。
+// 判据 = m_loopDepth > 0 —— 语法层不判，语义层查上下文栈（对照 clang ActOnBreak：
+// 查 CurContext 是否迭代语句，文案逐字沿用）。
+void SemanticAnalyzer::visit(BreakStmt& stmt) {
+    if (m_loopDepth == 0) {
+        // 文案逐字沿用 clang（含 "or switch" —— minicc 尚无 switch，但 oracle
+        // 文本以 clang 为准，免得将来做 switch 时再漂一次基线）
+        error("'break' statement not in loop or switch statement", stmt.location);
+    }
+    std::cout << std::format("  [break] loop-depth={} ✓\n", m_loopDepth);
+}
+
+// continue 语句 [stmt.cont]：同 break，跳到最近一层循环的"增量步"。
+void SemanticAnalyzer::visit(ContinueStmt& stmt) {
+    if (m_loopDepth == 0) {
+        error("'continue' statement not in loop statement", stmt.location);
+    }
+    std::cout << std::format("  [continue] loop-depth={} ✓\n", m_loopDepth);
+}
+
+// 条件（三元）表达式 [expr.cond]：三支分别定型。
+// 教学级简化：两支必须同型（[expr.cond]/3 的合成类型规则不做——
+// int/double 混排、左值合并那些等主线 D 常量折叠时再说）。
+// resolvedType = 分支共同类型；短路（不选的那支不求值）是生成期的实现语义。
+TypePtr SemanticAnalyzer::inferConditional(ConditionalExpr& expr) {
+    std::cout << std::format("{}[cond] condition:\n", inferIndent());
+    m_inferDepth++;
+    TypePtr condType = inferType(expr.condition);
+    TypePtr thenType = inferType(expr.thenExpr);
+    TypePtr elseType = inferType(expr.elseExpr);
+    m_inferDepth--;
+
+    if (!thenType || !elseType) return nullptr;
+    if (!typeCompatible(thenType, elseType)) {
+        error(std::format("incompatible operand types in conditional expression: '{}' and '{}'",
+                          thenType->toString(), elseType->toString()),
+              expr.location);
+    }
+    TypePtr t = thenType;
+    std::cout << std::format("{}[cond] {} ? {} : {} → {}\n",
+        inferIndent(),
+        condType ? condType->toString() : "?",
+        thenType->toString(), elseType->toString(),
+        t->toString());
+    return t;
 }
 
 // return 语句 [stmt.return]：返回值类型必须与函数声明的返回类型兼容（typeCompatible
@@ -3189,6 +3273,9 @@ TypePtr SemanticAnalyzer::inferType(ExprPtr expr) {
         // ⑭ 数据事例：v[0] ⇒ [index] IntVec[int] → int    (sugar for IntVec.at(i))
         case NodeKind::Index:
             type = inferIndex(static_cast<IndexExpr&>(*expr)); break;
+        // ⑭.5 数据事例：a > b ? a : b ⇒ [cond] int ? int : int → int
+        case NodeKind::Conditional:
+            type = inferConditional(static_cast<ConditionalExpr&>(*expr)); break;
         // ⑮ 数据事例：delete nb ⇒ 先 [resolve] 'nb' → Base*，再 [delete] delete Base*；
         //    前 14 支都满足"返回值 = 该节点的类型"（inferXxx 直传），只有本支不是。
         case NodeKind::Delete: {

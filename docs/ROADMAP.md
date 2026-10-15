@@ -164,6 +164,14 @@ ctor 初始化列表嵌套构造调用）。
 **任务**：ForStmt/SwitchStmt/Break/Continue AST 节点 → sema 标签栈校验（break 在循环外报错）→ codegen 标签
 **验收/产物**：tests/test_flow_01..NN + docs/learn/10
 
+**✅ 首批已完成（2026-10，docs/learn/38）**：for（声明式/表达式式/空 init）、
+break、continue、三元 ?:（含短路语义）。Sema 循环深度栈（m_loopDepth，
+报错文案与 clang 逐字相同）；CodeGen 五标签降级 + 循环上下文栈
+（continue 落增量步——`for(;;)` 不死循环的关键）；for 头局部放宽
+「赋值是语句」的边界（init/incr 两格收 StmtPtr）。
+**剩余**：switch（break 文案已预留 "or switch"）、do-while、逗号表达式、
+区间 for、赋值表达式化。
+
 ## 主线 D：常量折叠 / constexpr（P2）
 
 **理论点**：编译期求值 = 解释器（部分求值/抽象解释入门）；常量传播与折叠代数规则；constexpr 的"必须可折叠"约束

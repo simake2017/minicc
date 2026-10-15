@@ -78,6 +78,11 @@ private:
     std::ostringstream m_rodata;    // .rodata 段（只读数据）
     // 标签计数器：保证汇编标签全局唯一（else_0、while_begin_1 …）
     int                m_labelCounter = 0;
+    // 循环上下文栈（break/continue 的跳转目标）：进入 for/while 压一对
+    // {break 出口标签, continue 落点标签}，退出时弹。continue 的落点
+    // for 是"增量步"、while 是"条件式"（while 没有独立的增量步）。
+    struct LoopLabels { std::string breakLabel; std::string continueLabel; };
+    std::vector<LoopLabels> m_loopStack;
 
     // 当前函数的局部变量偏移量追踪
     // 名字 → 相对 %rbp 的负偏移（如 "x" → -32）；隐式参数 "this" 也登记在此表
@@ -169,6 +174,11 @@ private:
     void visit(IfStmt& stmt) override;
     // while：条件跳出 + 回边 jmp 的循环降级
     void visit(WhileStmt& stmt) override;
+    // for：init + cond + body + incr + 回边 的五标签降级
+    void visit(ForStmt& stmt) override;
+    // break/continue：跳循环上下文栈顶记录的出口/增量标签
+    void visit(BreakStmt& stmt) override;
+    void visit(ContinueStmt& stmt) override;
     // 表达式语句：只求值（价值在副作用），结果 rax 丢弃
     void visit(ExprStmt& stmt) override;
 
@@ -187,6 +197,8 @@ private:
     void visit(VarExpr& expr) override;
     // 左值压栈 → 右值 → 运算
     void visit(BinaryExpr& expr) override;
+    // 三元表达式 ?:：条件跳转选值（短路——落选支不求值）
+    void visit(ConditionalExpr& expr) override;
     // negq / 逻辑非
     void visit(UnaryExpr& expr) override;
     // 普通/方法/虚调用三路分发

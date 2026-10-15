@@ -746,7 +746,7 @@ MyClass::foo(int)   → _ZN7MyClass3fooEi (类方法)
       `L...E` 编码（文档 docs/learn/18）
 - [x] 模板类型：T\*, T\*\*, T&, T&&, const T&
 - [x] 引用折叠（Reference Collapsing）
-- [x] 控制流：if/else, while
+- [x] 控制流：if/else, while, **for, break, continue, 三元 ?:**（主线 C 首批，文档 docs/learn/38）
 - [x] 算术/逻辑/比较运算符
 - [x] 成员访问（. 和 ->）
 - [x] Name Mangling（GCC ABI 风格）
