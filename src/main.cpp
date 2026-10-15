@@ -345,6 +345,36 @@ public:
     void visit(BreakStmt&) override {
         printNode(m_prefix, m_isLast, "BreakStmt");
     }
+    void visit(SwitchStmt& s) override {
+        printNode(m_prefix, m_isLast, "SwitchStmt");
+        std::string cp = childPrefix();
+        std::cout << cp << "├── condition\n";
+        dumpExpr(s.condition, cp + "│   ", true);
+        std::cout << cp << "└── body\n";
+        dumpStmt(s.body, cp + "    ", true);
+    }
+    void visit(CaseStmt& s) override {
+        printNode(m_prefix, m_isLast, "CaseStmt");
+        std::string cp = childPrefix();
+        std::cout << cp << "├── value\n";
+        dumpExpr(s.value, cp + "│   ", true);
+        std::cout << cp << "└── body\n";
+        dumpStmt(s.body, cp + "    ", true);
+    }
+    void visit(DefaultStmt& s) override {
+        printNode(m_prefix, m_isLast, "DefaultStmt");
+        std::string cp = childPrefix();
+        std::cout << cp << "└── body\n";
+        dumpStmt(s.body, cp + "    ", true);
+    }
+    void visit(DoWhileStmt& s) override {
+        printNode(m_prefix, m_isLast, "DoWhileStmt");
+        std::string cp = childPrefix();
+        std::cout << cp << "├── body\n";
+        dumpStmt(s.body, cp + "│   ", true);
+        std::cout << cp << "└── condition\n";
+        dumpExpr(s.condition, cp + "    ", true);
+    }
     void visit(ContinueStmt&) override {
         printNode(m_prefix, m_isLast, "ContinueStmt");
     }

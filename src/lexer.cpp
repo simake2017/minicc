@@ -43,7 +43,12 @@ const char* tokenTypeName(TokenType t) {
         case TokenType::KwClass:       return "class";
         case TokenType::KwBreak:       return "break";
         case TokenType::KwConst:       return "const";
+        case TokenType::KwConstexpr:   return "constexpr";
         case TokenType::KwContinue:    return "continue";
+        case TokenType::KwSwitch:      return "switch";
+        case TokenType::KwCase:        return "case";
+        case TokenType::KwDefault:     return "default";
+        case TokenType::KwDo:          return "do";
         case TokenType::KwDecltype:    return "decltype";
         case TokenType::KwDelete:      return "delete";
         case TokenType::KwDouble:      return "double";

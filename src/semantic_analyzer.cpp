@@ -815,6 +815,24 @@ static bool containsTemplateParam(const TypePtr& t) {
 TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
     if (!type) return nullptr;
 
+    // ── 数组类型（主线 E，[dcl.array]）──
+    if (type->isArray()) {
+        TypePtr resolvedElem = resolveType(type->elementType);
+        int64_t sz = type->arraySize;
+        if (type->arraySizeExpr) {
+            auto val = m_constantFolder.evaluateIntegral(type->arraySizeExpr);
+            if (!val.has_value()) {
+                error("array size is not a constant expression", SourceLocation{});
+            }
+            if (val->value <= 0) {
+                error(std::format("array size must be greater than zero, got {}", val->value),
+                      SourceLocation{});
+            }
+            sz = val->value;
+        }
+        return Type::makeArray(resolvedElem, sz);
+    }
+
     // ── decltype(expr)：非依赖上下文的立即求值（依赖上下文见 substituteType Case 1.5）──
     if (type->isDecltype()) {
         std::cout << "  [decltype] resolveType 遇到 decltype 节点，尝试立即求值\n";
@@ -897,11 +915,31 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
             if (m_aliasTemplates.count(type->name)) {
                 std::vector<TemplateArg> args;
                 args.reserve(type->templateArgs.size());
-                for (auto& arg : type->templateArgs) {
+                for (size_t i = 0; i < type->templateArgs.size(); i++) {
+                    auto& arg = type->templateArgs[i];
                     // 同一套按 kind 分派：类型实参递归解析（可为内层模板 id），
                     // NTTP 值实参原样带过。
-                    if (arg.isType())
+                    if (arg.isType()) {
+                        // ── 主线 D 二批：NTTP 位裸名字 ⇒ 编译期常量重解 ──
+                        // 与类模板分支同款（`BufA<k>`）；别名蓝图自己的形参表定 kind。
+                        const auto& aParams = m_aliasTemplates[type->name]->templateParams;
+                        const TemplateParam* fp =
+                            (i < aParams.size()) ? aParams[i].get() : nullptr;
+                        if (fp && fp->kind == TemplateParamKind::NonType
+                            && arg.type && arg.type->isClass()
+                            && arg.type->templateArgs.empty()
+                            && !arg.type->isNestedName()
+                            && lookupConstValue(arg.type->name).has_value()) {
+                            auto cv = *lookupConstValue(arg.type->name);
+                            std::cout << std::format(
+                                "  [sema:targ]   ⤷ 别名第 {} 位是 NTTP：'{}' 按"
+                                "编译期常量重解 ⇒ {}（{}）\n",
+                                i + 1, arg.type->name, cv.value, cv.type->toString());
+                            args.push_back(TemplateArg::ofValue(cv.value, cv.type));
+                            continue;
+                        }
                         args.push_back(TemplateArg::ofType(resolveType(arg.type)));
+                    }
                     else
                         args.push_back(arg);
                 }
@@ -977,6 +1015,31 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
                             tid->templateArgs.push_back(
                                 TemplateArg::ofTemplate(arg.type ? arg.type->name : ""));
                             continue;
+                        }
+                        // ── ★ 主线 D 二批：NTTP 位收到【裸名字】—— 类型还是常量？──
+                        // `Buf<k>` 里 Parser 没有符号表，只能把 k 建成 Class("k")
+                        // 类型节点；而 [temp.arg.nontype] 允许常量表达式
+                        // id-expression。该位形参是 NTTP、且名字在编译期
+                        // 常量表里时，改写成值实参与 `Buf<4>` 完全同形。
+                        // 查不到 ⇒ 维持原路径（resolveType 响亮报
+                        // unknown type name，docs/learn/22 ⑦）。
+                        // 对照 clang：Parser 靠 Sema::isTypeName 在解析期
+                        // 消歧；本实现推迟到语义期用「形参 kind + 常量表」
+                        // 近似（[stmt.ambig] 的同款"解析期没符号表"边界）。
+                        if (fp && fp->kind == TemplateParamKind::NonType
+                            && arg.type && arg.type->isClass()
+                            && arg.type->templateArgs.empty()
+                            && !arg.type->isNestedName()) {
+                            if (auto cv = lookupConstValue(arg.type->name)) {
+                                std::cout << std::format(
+                                    "  [sema:targ]   ⤷ 第 {} 位是 NTTP：'{}' 不是类型"
+                                    " —— 按编译期常量重解 ⇒ {}（{}）\n",
+                                    i + 1, arg.type->name,
+                                    cv->value, cv->type->toString());
+                                tid->templateArgs.push_back(
+                                    TemplateArg::ofValue(cv->value, cv->type));
+                                continue;
+                            }
                         }
                         tid->templateArgs.push_back(
                             TemplateArg::ofType(resolveType(arg.type)));
@@ -1169,6 +1232,12 @@ SemanticAnalyzer::SemanticAnalyzer() {
     m_instantiator.setDecltypeEvaluator(this);
     m_instantiator.setMemberTypeResolver(this);
     m_instantiator.setAliasTemplateResolver(this);
+
+    // 主线 D 二批：常量折叠器的"这个名字是不是编译期常量"也住在 Sema
+    // （常量表随声明增长）—— 注入查询回调，保持 ConstantFolder 不依赖
+    // 符号表（与上面三个求值器同一分层形状：能力住 Sema，回调注入引擎）。
+    m_constantFolder.setConstResolver(
+        [this](const std::string& name) { return lookupConstValue(name); });
 }
 
 // ─── 推导缩进辅助 ───────────────────────────────────────────────────────────
@@ -1379,8 +1448,49 @@ void SemanticAnalyzer::printInheritanceGraph() {
     }
 }
 
+void SemanticAnalyzer::registerConstVar(
+    const std::string& name, const TypePtr& type,
+    ExprPtr& initializer, bool isConstexpr, const SourceLocation& loc) {
+    // 只收 const（constexpr 隐含 const，见 parseType 前缀处理）的整型家族。
+    if (!type || !type->isConst() || !type->stripConst()->isInteger()) return;
+
+    // 初始化式此刻已经过 fold（registerConstVar 的调用点保证）；
+    // evaluateIntegral 再折一遍是幂等的（已折好的树无 [fold] 新日志）。
+    auto val = initializer ? m_constantFolder.evaluateIntegral(initializer)
+                           : std::nullopt;
+
+    if (!val.has_value()) {
+        if (isConstexpr) {
+            // clang++-18 原文：constexpr variable 'm' must be initialized by
+            // a constant expression（[dcl.constexpr]/9 的强制义务）
+            error(std::format(
+                "constexpr variable '{}' must be initialized by a constant "
+                "expression", name), loc);
+        }
+        // 普通 const 变量初始化式非常量：合法（运行期初始化），
+        // 只是不能进编译期常量表 —— 不登记，传播/NTTP 重解都查不到它。
+        return;
+    }
+
+    // 形态取【声明类型】（剥 const）：`constexpr long k = 4;` 的 k 是
+    // long —— K<k> 必须是 K<4:long>（docs/learn/35 的撞键教训）。
+    m_constValues[name] = ConstantFolder::IntegralValue{
+        val->value, type->stripConst()};
+    std::cout << std::format(
+        "  [const] ★ '{}' = {}（{}）登记为编译期常量{}\n",
+        name, val->value, type->stripConst()->toString(),
+        isConstexpr ? "（constexpr）" : "");
+}
+
 void SemanticAnalyzer::processGlobalVarDecl(GlobalVarDeclPtr decl) {
     decl->declaredType = resolveType(decl->declaredType);
+    // 主线 D 二批：全局初始化式也过一遍常量折叠（此前只有局部变量折），
+    // 随后登记编译期常量表 —— `constexpr int k = 2+3;` 的全局 k 由此
+    // 可在 main 体内传播 / 作 NTTP 实参。
+    if (decl->initializer)
+        decl->initializer = m_constantFolder.fold(std::move(decl->initializer));
+    registerConstVar(decl->name, decl->declaredType, decl->initializer,
+                     decl->isConstexpr, decl->location);
     if (decl->initializer) {
         TypePtr initType = inferType(decl->initializer);
         if (decl->declaredType->isAuto()) {
@@ -2306,6 +2416,8 @@ uint32_t SemanticAnalyzer::alignTo(uint32_t offset, uint32_t alignment) {
 uint32_t SemanticAnalyzer::alignOf(const TypePtr& type) {
     if (!type) return 1;
     switch (type->kind) {
+        case TypeKind::Array:
+            return type->elementType ? alignOf(type->elementType) : 1;
         case TypeKind::Const:
             return type->innerType ? alignOf(type->innerType) : 1;
         case TypeKind::Class: {
@@ -2878,6 +2990,14 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
     // 初始化式先做静态常量折叠（Cls<Args>::value → 字面量），必须在 inferType 之前。
     if (decl.initializer) decl.initializer = foldStaticConst(decl.initializer);
 
+    // 主线 D：常量折叠（foldStaticConst 管"类内静态常量"，这里管纯字面量算术）
+    if (decl.initializer) decl.initializer = m_constantFolder.fold(std::move(decl.initializer));
+
+    // 主线 D 二批：const/constexpr 整型变量登记编译期常量表
+    // （常量传播源 + NTTP 实参重解的查询目标；constexpr 强制可求值）
+    registerConstVar(decl.name, decl.declaredType, decl.initializer,
+                     decl.isConstexpr, decl.location);
+
     if (decl.initializer) {
         // ── 推导初始化表达式的类型 ──
         std::cout << std::format("  [var decl] {} : {} = ",
@@ -3004,6 +3124,7 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
 // if 语句：条件必须可语境转换为 bool（[stmt.select]），教学级简化为只接受 bool | int。
 // then / else 分支各自进入独立作用域（[basic.scope.block]），分支内声明的变量互不可见。
 void SemanticAnalyzer::visit(IfStmt& stmt) {
+    stmt.condition = m_constantFolder.fold(std::move(stmt.condition));
     std::cout << std::format("  [if] condition:\n");
     m_inferDepth++;
     TypePtr condType = inferType(stmt.condition);
@@ -3030,6 +3151,7 @@ void SemanticAnalyzer::visit(IfStmt& stmt) {
 // while 语句：推导条件类型（教学级未强制 bool|int，比 if 宽松），循环体进入独立作用域。
 // 循环体只静态分析一遍 —— 动态的反复执行是运行期的事，语义分析只保证"每一遍都类型合法"。
 void SemanticAnalyzer::visit(WhileStmt& stmt) {
+    stmt.condition = m_constantFolder.fold(std::move(stmt.condition));
     std::cout << std::format("  [while] condition:\n");
     m_inferDepth++;
     TypePtr condType = inferType(stmt.condition);
@@ -3055,6 +3177,7 @@ void SemanticAnalyzer::visit(ForStmt& stmt) {
     processStmt(stmt.init);
 
     if (stmt.condition) {
+        stmt.condition = m_constantFolder.fold(std::move(stmt.condition));
         std::cout << std::format("  [for] condition:\n");
         m_inferDepth++;
         TypePtr condType = inferType(stmt.condition);
@@ -3079,16 +3202,67 @@ void SemanticAnalyzer::visit(ForStmt& stmt) {
     m_symbolTable.exitScope();
 }
 
-// break 语句 [stmt.break]：只能在循环（或 switch，本项目无 switch）里出现。
-// 判据 = m_loopDepth > 0 —— 语法层不判，语义层查上下文栈（对照 clang ActOnBreak：
-// 查 CurContext 是否迭代语句，文案逐字沿用）。
+// ── 以下 visit 属主线 C 二批（switch/do-while，[stmt.switch]/[stmt.do]）──
+// switch [stmt.switch]：条件定型 + 体访问（case 值的常量性/重复检测在 visit(CaseStmt)）。
+// m_switchDepth 只管 break 合法性；continue 仍只看 m_loopDepth —— switch 里
+// 写 continue 照旧是 clang 的 "'continue' statement not in loop statement"。
+void SemanticAnalyzer::visit(SwitchStmt& stmt) {
+    m_inferDepth++;
+    TypePtr condType = inferType(stmt.condition);
+    m_inferDepth--;
+    std::cout << std::format("  [switch] condition: {} —— 进入 switch 体\n",
+                             condType ? condType->toString() : "?");
+    m_switchDepth++;
+    m_caseValueSets.emplace_back();
+    stmt.body->accept(*this);
+    m_caseValueSets.pop_back();
+    m_switchDepth--;
+    std::cout << "  [switch] 退出 switch 体\n";
+}
+
+// case 标号：值必须折叠成整数字面量（clang 文案逐字），重复值响亮报错。
+void SemanticAnalyzer::visit(CaseStmt& stmt) {
+    if (m_caseValueSets.empty()) {
+        error("'case' statement not in switch statement", stmt.location);
+    }
+    stmt.value = m_constantFolder.fold(std::move(stmt.value));
+    auto val = m_constantFolder.evaluateIntegral(stmt.value);
+    if (!val.has_value()) {
+        error("case value is not a constant expression", stmt.location);
+    }
+    if (!m_caseValueSets.back().insert(val->value).second) {
+        error(std::format("duplicate case value '{}'", val->value), stmt.location);
+    }
+    stmt.constValue = val->value;
+    stmt.resolved   = true;
+    std::cout << std::format("  [case] case {} ⇒ 标号成立\n", val->value);
+    stmt.body->accept(*this);
+}
+
+void SemanticAnalyzer::visit(DefaultStmt& stmt) {
+    stmt.body->accept(*this);
+}
+
+// do-while [stmt.do]：体先于条件执行一轮；continue 落条件式（同 while）。
+void SemanticAnalyzer::visit(DoWhileStmt& stmt) {
+    m_loopDepth++;
+    stmt.body->accept(*this);
+    stmt.condition = m_constantFolder.fold(std::move(stmt.condition));
+    m_inferDepth++;
+    TypePtr condType = inferType(stmt.condition);
+    m_inferDepth--;
+    m_loopDepth--;
+    std::cout << std::format("  [do-while] 体先执行，条件 {} 在末尾测试\n",
+                             condType ? condType->toString() : "?");
+}
+
 void SemanticAnalyzer::visit(BreakStmt& stmt) {
-    if (m_loopDepth == 0) {
-        // 文案逐字沿用 clang（含 "or switch" —— minicc 尚无 switch，但 oracle
-        // 文本以 clang 为准，免得将来做 switch 时再漂一次基线）
+    if (m_loopDepth == 0 && m_switchDepth == 0) {
+        // 文案逐字沿用 clang（"or switch" 现在名副其实：switch 已实装）。
         error("'break' statement not in loop or switch statement", stmt.location);
     }
-    std::cout << std::format("  [break] loop-depth={} ✓\n", m_loopDepth);
+    std::cout << std::format("  [break] loop-depth={} switch-depth={} ✓\n",
+                             m_loopDepth, m_switchDepth);
 }
 
 // continue 语句 [stmt.cont]：同 break，跳到最近一层循环的"增量步"。
@@ -3126,6 +3300,18 @@ TypePtr SemanticAnalyzer::inferConditional(ConditionalExpr& expr) {
     return t;
 }
 
+// 逗号表达式 [expr.comma]：类型取【右】操作数；左操作数照常定型（副作用成立性）。
+TypePtr SemanticAnalyzer::inferComma(CommaExpr& expr) {
+    m_inferDepth++;
+    inferType(expr.left);
+    TypePtr rightType = inferType(expr.right);
+    m_inferDepth--;
+    std::cout << std::format("{}[comma] , {} → {}（值取右操作数）\n",
+        inferIndent(), rightType ? rightType->toString() : "?",
+        rightType ? rightType->toString() : "?");
+    return rightType;
+}
+
 // return 语句 [stmt.return]：返回值类型必须与函数声明的返回类型兼容（typeCompatible
 // 负责剥引用/顶层 const、int→double 提升）。demo: int f() 中 `return x;`（x:int&）✓；
 // `return 3.14;` ✗ 报 Return type mismatch；void 函数带返回值也被拦下。
@@ -3133,6 +3319,7 @@ TypePtr SemanticAnalyzer::inferConditional(ConditionalExpr& expr) {
 // CheckReturnVal 之外还有 CFG 流敏感检查，此处为教学级简化）。
 void SemanticAnalyzer::visit(ReturnStmt& stmt) {
     if (stmt.value) {
+        stmt.value = m_constantFolder.fold(std::move(stmt.value));
         m_inferDepth++;
         TypePtr retType = inferType(stmt.value);
         m_inferDepth--;
@@ -3165,6 +3352,7 @@ void SemanticAnalyzer::visit(AssignStmt& stmt) {
     TypePtr targetType = inferType(stmt.target);
     m_inferDepth--;
 
+    stmt.value = m_constantFolder.fold(std::move(stmt.value));
     std::cout << "  [assign] rhs:\n";
     m_inferDepth++;
     TypePtr valueType = inferType(stmt.value);
@@ -3178,6 +3366,7 @@ void SemanticAnalyzer::visit(AssignStmt& stmt) {
 // 表达式语句：只求类型不求值 —— 值被丢弃，语句的意义在副作用（典型如 `foo();`）。
 // 推导本身会触发符号决议与类型检查。
 void SemanticAnalyzer::visit(ExprStmt& stmt) {
+    stmt.expr = m_constantFolder.fold(std::move(stmt.expr));
     m_inferDepth++;
     inferType(stmt.expr);
     m_inferDepth--;
@@ -3276,6 +3465,8 @@ TypePtr SemanticAnalyzer::inferType(ExprPtr expr) {
         // ⑭.5 数据事例：a > b ? a : b ⇒ [cond] int ? int : int → int
         case NodeKind::Conditional:
             type = inferConditional(static_cast<ConditionalExpr&>(*expr)); break;
+        case NodeKind::Comma:
+            type = inferComma(static_cast<CommaExpr&>(*expr)); break;
         // ⑮ 数据事例：delete nb ⇒ 先 [resolve] 'nb' → Base*，再 [delete] delete Base*；
         //    前 14 支都满足"返回值 = 该节点的类型"（inferXxx 直传），只有本支不是。
         case NodeKind::Delete: {
@@ -4638,6 +4829,32 @@ TypePtr SemanticAnalyzer::getOrInstantiateClass(
         error(std::format("'{}' is not a class template", templateIdType->name), loc);
     }
 
+    // ── 主线 D：常量表达式形态的 NTTP 实参（Buf<2+2>）在【算缓存键之前】求值 ──
+    // ★ 次序不可换：键与实例名都吃实参的无损串，不归一的话 Buf<2+2> 与 Buf<4>
+    //   会各建一份实例（更糟：键里值位是占位 0，先来的把缓存占了）。
+    // Parser 只解析不评价（[expr.const] 的裁决权在语义期，那里有折叠器）；
+    // 成功 ⇒ 归一成普通值实参（value/valueType 落槽、valueExpr 清空），
+    // checkTemplateArguments 的 ②③ 各判据与下游 mangling 全部无感；
+    // 失败 ⇒ 当场报错（clang：Sema::CheckTemplateArgument 的
+    // "non-type template argument ... is not a constant expression"）。
+    // 对照 clang：Parser 把表达式存进 TemplateArgument（Expression 形态），
+    //   Sema::CheckTemplateArgument 里 EvaluateAsInt 求值后转 Value 形态。
+    for (auto& a : templateIdType->templateArgs) {
+        if (a.kind != TemplateArgKind::Integral || !a.valueExpr) continue;
+        auto folded = m_constantFolder.evaluateIntegral(a.valueExpr);
+        if (!folded.has_value()) {
+            error(std::format(
+                "non-type template argument is not a constant "
+                "expression"), loc);
+        }
+        std::cout << std::format(
+            "  [sema:targ] ⤷ 常量表达式实参求值（[temp.arg.nontype]/1）：{} ⇒ {}（{}）\n",
+            a.valueExpr ? "<expr>" : "?", folded->value, folded->type->toString());
+        a.value     = folded->value;
+        a.valueType = folded->type;
+        a.valueExpr = nullptr;
+    }
+
     // ── 缓存键：模板名 + 实参无损串，如 "Box<int>" / "Buf<4>" / "K<4:long>" ──
     // ★ 键必须【单射】—— 这是本函数与 TemplateInstantiator 共用的同一份构造
     //   （NameMangler::losslessArgumentsKey），不是就地拼一遍。
@@ -5177,8 +5394,30 @@ TypePtr SemanticAnalyzer::inferIndex(IndexExpr& expr) {
         error("Cannot subscript expression of null type", expr.location);
     }
 
-    // 支持容器指针：p[i] ≡ (*p)[i]（与 MemberExpr 的 -> 解引用同一约定）
     TypePtr actualType = objType;
+    if (actualType && actualType->isReference()) {
+        actualType = actualType->referencedType;
+    }
+
+    // ── 原生数组与指针下标运算（主线 E，[expr.sub]）──
+    // a[i] ≡ *(a + i) —— 如果目标是真数组（Array）或指针（Pointer），直接寻址！
+    if (actualType && (actualType->isArray() || actualType->isPointer())) {
+        m_inferDepth++;
+        TypePtr idxType = inferType(expr.index);
+        m_inferDepth--;
+        if (!idxType || !idxType->isInteger()) {
+            error(std::format("array subscript is not an integer (got '{}')",
+                              idxType ? idxType->toString() : "?"), expr.location);
+        }
+        TypePtr elemType = actualType->isArray() ? actualType->elementType
+                                                 : actualType->pointeeType;
+        std::cout << std::format("  [index] raw array/pointer subscript: {}[{}] → {}\n",
+            actualType->toString(), idxType ? idxType->toString() : "?",
+            elemType ? elemType->toString() : "?");
+        return elemType;
+    }
+
+    // 支持容器指针：p[i] ≡ (*p)[i]（与 MemberExpr 的 -> 解引用同一约定）
     if (objType->isPointer()) {
         actualType = objType->pointeeType;
     }

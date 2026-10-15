@@ -76,6 +76,7 @@ enum class TypeKind : uint8_t {
     TemplateParam,  // 模板参数占位符（如 T）
     Auto,           // auto 占位符（等待推导）
     Decltype,       // decltype(expr) —— 半成品类型，替换后才求值（见下方"两段式"说明）
+    Array,          // T[N] —— 数组类型（主线 E，[dcl.array]）
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,6 +217,14 @@ struct TemplateArg {
     TemplateArgKind kind = TemplateArgKind::Type;
     TypePtr         type  = nullptr; // kind == Type     时有效
     int64_t         value = 0;       // kind == Integral 时有效
+    // ── 主线 D：常量表达式形态的 NTTP 实参（Buf<2+2>）────────────────────
+    // Parser 只把它解析成表达式树【存下来】（字面量 fast path 值是现成的，
+    // 不走这里），求值发生在 Sema 的 checkTemplateArguments —— 那里才有
+    // 折叠器与"是不是常量"的裁决权。求值成功后归一成 value/valueType
+    // （与 ③-c 形态归一同点写回），下游（缓存键/mangling/替换）无感。
+    // 对照 clang：Parser 把表达式存进 TemplateArgument（Expression 形态），
+    //   CheckTemplateTemplateArgument / CheckTemplateArgument 里 ConvertToValue。
+    DecltypeExprPtr valueExpr = nullptr;
 
     // ── 模板模板实参（[temp.arg.template]）────────────────────────────────
     // `Wrap<Box, int>` 里 Box 位的是【一个模板】，不是类型也不是值。
@@ -385,6 +394,11 @@ struct Type {
     TypeKind kind;
     std::string name;           // 类型名称（如 "int", "MyClass", "T"）
 
+    // ── 数组类型特有（TypeKind::Array，[dcl.array]）──
+    TypePtr         elementType;     // 元素类型 T
+    int64_t         arraySize = 0;   // 元素个数 N（编译期已知正整数）
+    DecltypeExprPtr arraySizeExpr;   // 待求值的表达式（语义期折叠成 arraySize）
+
     // ── 指针类型特有 ──
     TypePtr pointeeType;        // 指向的类型（仅 Pointer 类型使用）
 
@@ -471,6 +485,9 @@ struct Type {
     static TypePtr makeRValueReference(TypePtr referenced);   // T&&
     static TypePtr makeConst(TypePtr inner);                  // const T
     static TypePtr makeClass(const std::string& name);
+    // 数组类型工厂（主线 E）
+    static TypePtr makeArray(TypePtr elem, int64_t size);
+    static TypePtr makeArray(TypePtr elem, DecltypeExprPtr sizeExpr);
     static TypePtr makeTemplateParam(const std::string& paramName);
     static TypePtr makeAuto();
     // decltype(expr)：paren 表示原文是否写成 decltype((e))，见 [dcl.type.decltype]
@@ -534,6 +551,7 @@ struct Type {
             default: return 0;
         }
     }
+    bool isArray()            const { return kind == TypeKind::Array; }
     bool isPointer()          const { return kind == TypeKind::Pointer; }
     bool isLValueReference()  const { return kind == TypeKind::LValueReference; }
     bool isRValueReference()  const { return kind == TypeKind::RValueReference; }

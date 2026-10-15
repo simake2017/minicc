@@ -154,6 +154,22 @@ private:
     //   （Sema::ActOnNonTypeTemplateArgument）。本项目教学简化：只认整数字面量，
     //   不做常量折叠（如 Buf<2+2> 不支持，见 ROADMAP 主线 D）。
     std::vector<TemplateArg> parseTemplateArgumentList();
+    // 该 token 是否会继续一个（以字面量开头的）表达式 —— 用于区分
+    // 「裸字面量实参 Buf<4>」与「常量表达式实参 Buf<4+1>」（主线 D）。
+    static bool isExprContinuation(TokenType t);
+
+    // ── 主线 D：模板实参里的 `>` 歧义（[stmt.ambig] 的实参表版）────────────
+    // 解析 NTTP 常量表达式实参（Buf<2+2>）期间置真：comparison 层遇裸 '>'
+    // 必须【停】——它是实参表的收尾，不是大于号。括号分组内解除
+    // （Buf<(2>1)> 里的是真比较）。对照 clang：ParseUnqualifiedId 后按
+    // [temp.arg] 做 tentative parse，C++11 起 '>' 一律当收尾。
+    bool m_stopAtGreater = false;
+
+    // ── 主线 D 二批：constexpr 前缀的搬运 ────────────────────────────────
+    // parseType 吃到 constexpr 时置真（并把它当 const 处理），紧随其后的
+    // parseVarDeclStmt / parseGlobalVarDecl 读走并写进节点的 isConstexpr。
+    // 只应出现在变量声明处；出现在形参表等其它位置会被静默当 const（已知边界）。
+    bool m_pendingConstexpr = false;
 
     // ── 声明解析 ──
     // declaration := template-decl | class-decl | enum-decl | namespace-decl
@@ -197,7 +213,14 @@ private:
     StmtPtr parseIfStmt();
     // while-stmt := 'while' '(' expr ')' stmt
     StmtPtr parseWhileStmt();
+    // 数组声明符后缀解析：在变量名后收可选的 `[ 常量表达式 ]`（主线 E）
+    TypePtr parseArrayDeclaratorSuffix(TypePtr baseType);
+
     StmtPtr parseForStmt();
+    StmtPtr parseSwitchStmt();   // 主线 C 二批（[stmt.switch]）
+    StmtPtr parseCaseStmt();
+    StmtPtr parseDefaultStmt();
+    StmtPtr parseDoWhileStmt();  // [stmt.do]
     StmtPtr parseBreakStmt();
     StmtPtr parseContinueStmt();
     // return-stmt := 'return' [expr] ';'

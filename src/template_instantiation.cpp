@@ -60,6 +60,8 @@ std::string NameMangler::encodeType(TypePtr type,
         case TypeKind::ULongLong: return "y";
         case TypeKind::Pointer:
             return "P" + encodeType(type->pointeeType, typeParams);
+        case TypeKind::Array:
+            return std::format("A{}_{}", type->arraySize, encodeType(type->elementType, typeParams));
         case TypeKind::LValueReference:
             return "R" + encodeType(type->referencedType, typeParams); // GCC ABI: R = lvalue ref
         case TypeKind::RValueReference:
@@ -716,6 +718,15 @@ TypePtr TemplateInstantiator::substituteType(
         return result;
     }
 
+    // ── Case 2.1: 数组 T[N] → 递归替换 elementType ──
+    if (type->isArray() && type->elementType) {
+        TypePtr newElem = substituteType(type->elementType, subst);
+        if (newElem != type->elementType) {
+            auto result = Type::makeArray(newElem, type->arraySize);
+            return result;
+        }
+    }
+
     // ── Case 2: 指针 T* → 递归替换 pointee ──
     // demo: T* 配 {T := int} ⇒ int*；pointee 无变化则复用原节点（结构共享）
     if (type->isPointer() && type->pointeeType) {
@@ -1170,6 +1181,14 @@ ExprPtr TemplateInstantiator::cloneExpr(
             cloned->location = e.location;
             return cloned;
         }
+        case NodeKind::Comma: {
+            auto& e = static_cast<CommaExpr&>(*expr);
+            auto cloned = std::make_shared<CommaExpr>(
+                cloneExpr(e.left, subst),
+                cloneExpr(e.right, subst));
+            cloned->location = e.location;
+            return cloned;
+        }
 
         case NodeKind::Call: {
             auto& e = static_cast<CallExpr&>(*expr);
@@ -1371,6 +1390,38 @@ StmtPtr TemplateInstantiator::cloneStmt(
         case NodeKind::Continue: {
             auto& s = static_cast<ContinueStmt&>(*stmt);
             auto cloned = std::make_shared<ContinueStmt>();
+            cloned->location = s.location;
+            return cloned;
+        }
+        case NodeKind::Switch: {
+            auto& s = static_cast<SwitchStmt&>(*stmt);
+            auto cloned = std::make_shared<SwitchStmt>(
+                cloneExpr(s.condition, subst),
+                cloneStmt(s.body, subst));
+            cloned->location = s.location;
+            return cloned;
+        }
+        case NodeKind::Case: {
+            auto& s = static_cast<CaseStmt&>(*stmt);
+            auto cloned = std::make_shared<CaseStmt>(
+                cloneExpr(s.value, subst),
+                cloneStmt(s.body, subst));
+            cloned->location = s.location;
+            cloned->constValue = s.constValue;
+            cloned->resolved   = s.resolved;
+            return cloned;
+        }
+        case NodeKind::Default: {
+            auto& s = static_cast<DefaultStmt&>(*stmt);
+            auto cloned = std::make_shared<DefaultStmt>(cloneStmt(s.body, subst));
+            cloned->location = s.location;
+            return cloned;
+        }
+        case NodeKind::DoWhile: {
+            auto& s = static_cast<DoWhileStmt&>(*stmt);
+            auto cloned = std::make_shared<DoWhileStmt>(
+                cloneStmt(s.body, subst),
+                cloneExpr(s.condition, subst));
             cloned->location = s.location;
             return cloned;
         }

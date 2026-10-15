@@ -22,6 +22,9 @@ namespace minicc {
 std::string TemplateArg::toString() const {
     if (kind == TemplateArgKind::Type)     return type ? type->toString() : "?";
     if (kind == TemplateArgKind::Template) return templateName;   // 模板名本身就是可读形态
+    // 主线 D：常量表达式形态的实参（Buf<2+2>）此时尚未求值（语义期才归一），
+    // value 槽是占位 0 —— 打印可读形态而不是撒谎的 "0"。
+    if (valueExpr) return "<constant expression>";
     return std::to_string(value); // 对于none type类型，这里直接透传了
 }
 
@@ -81,6 +84,22 @@ TypePtr Type::makeDouble()    { return makeBuiltin(TypeKind::Double,    "double"
 // 指针类型 T*。入参 pointee = 被指向的内层类型。
 // demo：makePointer(Int) → Pointer(Int)，toString="int*"，encodeType→"Pi"
 //       makePointer(Pointer(Int)) → int**，encodeType→"PPi"
+TypePtr Type::makeArray(TypePtr elem, int64_t size) {
+    auto t = std::make_shared<Type>();
+    t->kind = TypeKind::Array;
+    t->elementType = std::move(elem);
+    t->arraySize = size;
+    return t;
+}
+
+TypePtr Type::makeArray(TypePtr elem, DecltypeExprPtr sizeExpr) {
+    auto t = std::make_shared<Type>();
+    t->kind = TypeKind::Array;
+    t->elementType = std::move(elem);
+    t->arraySizeExpr = std::move(sizeExpr);
+    return t;
+}
+
 TypePtr Type::makePointer(TypePtr pointee) {
     auto t = std::make_shared<Type>();
     t->kind = TypeKind::Pointer;
@@ -241,6 +260,8 @@ bool Type::canRepresentValue(int64_t v) const {
 //   "int=4" 的口子正是这类漂移的温床）。
 std::uint32_t Type::sizeInBytes() const {
     switch (kind) {
+        case TypeKind::Array:
+            return elementType ? elementType->sizeInBytes() * arraySize : 0;
         case TypeKind::Void:   return 0;
         case TypeKind::Double: return 8;
         case TypeKind::Pointer: return 8;
@@ -290,6 +311,11 @@ bool Type::equals(const TypePtr& other) const {
         case TypeKind::Long:  case TypeKind::ULong:
         case TypeKind::LongLong: case TypeKind::ULongLong:
             return true; // 基础类型只比较 kind
+
+        case TypeKind::Array:
+            return elementType && other->elementType
+                && elementType->equals(other->elementType)
+                && arraySize == other->arraySize;
 
         case TypeKind::Pointer:
             return pointeeType && other->pointeeType
@@ -354,6 +380,9 @@ std::string Type::toString() const {
         case TypeKind::ULong: return "unsigned long";
         case TypeKind::LongLong: return "long long";
         case TypeKind::ULongLong: return "unsigned long long";
+        case TypeKind::Array:
+            return (elementType ? elementType->toString() : "?") + "[" +
+                   (arraySizeExpr ? "<expr>" : std::to_string(arraySize)) + "]";
         case TypeKind::Pointer:
             return pointeeType ? pointeeType->toString() + "*" : "?*";
         case TypeKind::LValueReference:

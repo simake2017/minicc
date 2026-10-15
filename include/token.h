@@ -48,7 +48,12 @@ enum class TokenType : uint8_t {
     KwChar,           // char        —— 整型家族（[basic.fundamental]/2）
     KwClass,          // class
     KwConst,          // const
+    KwConstexpr,      // constexpr  —— 编译期常量（主线 D 二批：[dcl.constexpr]）
     KwContinue,       // continue   —— 跳转到最近一层循环的增量步（主线 C）
+    KwSwitch,         // switch     —— 多路分支（主线 C 二批：[stmt.switch]）
+    KwCase,           // case
+    KwDefault,        // default
+    KwDo,             // do         —— do-while 循环（体先于条件执行）
     KwDecltype,       // decltype
     KwDelete,         // delete
     KwDouble,         // double
@@ -140,7 +145,12 @@ inline const std::unordered_map<std::string_view, TokenType> kKeywordMap = {
     {"char",      TokenType::KwChar},
     {"class",     TokenType::KwClass},
     {"const",     TokenType::KwConst},
+    {"constexpr", TokenType::KwConstexpr},
     {"continue",  TokenType::KwContinue},
+    {"switch",    TokenType::KwSwitch},
+    {"case",      TokenType::KwCase},
+    {"default",   TokenType::KwDefault},
+    {"do",        TokenType::KwDo},
     {"decltype",  TokenType::KwDecltype},
     {"delete",    TokenType::KwDelete},
     {"double",    TokenType::KwDouble},
@@ -237,6 +247,7 @@ struct Token {
             || type == TokenType::KwVoid
             || type == TokenType::KwAuto
             || type == TokenType::KwConst      // const int x; —— [dcl.type] 类型说明符
+            || type == TokenType::KwConstexpr  // constexpr int k —— 同为说明符序列开头 [dcl.type]
             || type == TokenType::KwDecltype;   // decltype(e) 也是类型说明符 [dcl.type.decltype]
     }
 

@@ -487,6 +487,77 @@ map 重构零回退：16 用例全绿 + 5000 步对拍照旧。
 （+13 Set），既有集成日志**逐字节零漂移**，基线重刷。汇总头 ministl.h 补上
 map/set 两行（之前漏了）。
 
+✅ **主线 D 首批（常量折叠 + NTTP 常量表达式实参）已完成（docs/learn/39）** ——
+新模块 `include/constant_folder.h` + `src/constant_folder.cpp`（`ConstantFolder`：
+fold 自底向上递归折二元/一元/三元，除零与含变量【不折】——折叠只许变快不许变语义；
+`evaluateIntegral` 求值返回 (值, 形态) —— auto 形参 K<2+2> 与 K<4L> 是两个实例，
+形态丢了就静默撞键）。Sema 6 个 fold 钩子（初始化式/return/表达式语句/三处条件），
+折叠结果写回 AST ⇒ 下游零感知。恒定条件三元 = 死分支消除最小形态
+（`true ? 11 : touch()` ⇒ touch() 从 AST 消失，运行期 g_side_effect 真的是 0）。
+**NTTP `Buf<2+2>`**：Parser 字面量 fast path 逐字节保留（仅当字面量后紧跟
+运算符时 `isExprContinuation` 前瞻回退解析完整常量表达式——★ 该判据【刻意不收】
+Less/Greater：`Buf<4>` 的收尾 `>` 与大于号同 token，收进来 tmpl 21..26 全线漂移），
+表达式实参存 `TemplateArg::valueExpr`（Parser 只存树不评价，[expr.const] 裁决权
+在语义期，与 clang 的 TemplateArgument Expression→Value 形态转换同构）；
+求值归一发生在 `getOrInstantiateClass` **算缓存键之前**（塞在 checkTemplateArguments
+会太晚：键里值位是占位 0，Buf<2+2> 与 Buf<4> 撞/分键都错）——归一后下游
+（形态归一/可表示性/缓存键/mangling）一行未动，既有用例零漂移。
+**模板实参表的 `>` 歧义**（[stmt.ambig] 实参表版）：`m_stopAtGreater` 罩住常量
+实参表达式解析，comparison 层遇裸 `>` 停；括号分组内豁免（`Buf<(2>1)>` 是真比较）。
+负向 `Buf<1/0>`：除零不折 + 求值器见非字面量树 ⇒ "not a constant expression"，
+与 clang 逐字同。已知边界：`Buf<x>`（变量）走类型 fast path 报 "unknown type
+name"（响亮拒收但文案不同，根治需解析期符号表）。
+测试 tests/fold/test_fold_01_basic.cpp + tests/tmpl/test_tmpl_74..75；
+有意漂移仅 flow__02（fold 行替换 infer 树，运行结果不变），已重刷基线。
+全量 ctest **343** 全绿（logdiff 收集的集成文件 **154** 个，基线零差异）。
+
+✅ **主线 D 二批（constexpr + 常量传播 + 常量变量作 NTTP 实参）已完成（docs/learn/40）** ——
+`constexpr` 关键字（token/parseType 前缀【隐含 const】+ `m_pendingConstexpr` 搬进
+VarDeclStmt/GlobalVarDecl::isConstexpr）。Sema 新增**编译期常量表**
+`m_constValues`（判据单点 `registerConstVar`：const/constexpr 整型家族 + 初始化式
+可常量求值；形态取声明类型——`constexpr long k=5` 的 k 是 long，K<k> ⇒ K<5:long>），
+两条消费路径：① **常量传播**——ConstantFolder 经 `setConstResolver` 回调（与
+Instantiator 三个求值器【第四次同一分层形状】）把 VarExpr 替换成字面量，
+`int x = c*2;` ⇒ 8，`[fold] k → 5 （常量传播…）`；② **NTTP 实参重解**——
+`Buf<k>` 裸名字实参在 resolveType 该位形参是 NTTP 时查表改写成值实参
+（类模板 + 别名模板两个分支），与 `Buf<5>` 完全同形同缓存键；查不到维持
+unknown type name 响亮报错。constexpr 初始化式不可求值 ⇒ 报错与 clang **逐字同**
+（"constexpr variable 'm' must be initialized by a constant expression"，
+[dcl.constexpr]/9 是强制义务非优化）。★ **地址边界**：Unary 折叠只收 Neg/Not，
+`&b`/`*p` 子树原样保留（折成字面量会生成野地址）；只登记整型家族 ⇒ 指针 const
+不进表。已修一个本轮自造小瑕疵：Binary 折叠先回写孩子再 describe（否则传播替换后
+日志打 `( <expr> + 1 )`）。边界：裸名常量表无作用域链（内层覆盖外层，同命名空间
+回退取舍）；未做 constexpr 函数 / if constexpr。
+测试 tests/fold/test_fold_02 + tests/tmpl/test_tmpl_76..77（与 clang 对拍）；
+有意漂移 3 处（flow__02 首批已有、fold__01 describe 修复后显示折后孩子、
+basics_02 的 const b 触发传播），已重刷基线。全量 ctest **344** / 0 警告 /
+logdiff 零差异。
+
+✅ **主线 C 二批（switch / case / default / do-while / 逗号表达式）已完成（docs/learn/41）** ——
+AST 五节点（SwitchStmt/CaseStmt/DefaultStmt/DoWhileStmt/CommaExpr，accept 虚分派
+全链路：AstDumper/CodeGen/Sema/cloneExpr/cloneStmt/estimateBlockSize 七处落点）；
+Token + Parser：四个新语句解析函数 + 括号内开放逗号表达式（`match(TokenType::Comma)`，
+调用实参表等处的 `,` 仍为分隔符，避免语法上下文推导）；Sema：m_switchDepth
+使 break 在 switch 内合法（`'break' statement not in loop or switch statement`
+至此名副其实），m_caseValueSets 栈保证 case 值的常量性与防重（文案与 clang 逐字同）；
+CodeGen：switch 比较链降级（条件压栈，逐条 cmp-je，无匹配落 default 或出口，
+无 break 自然 fall-through）；do-while 体先于条件执行，continue 落条件式；
+逗号表达式纯字面量在 ConstantFolder 消除（`[fold] (1, 2) → 2`）。
+测试 tests/flow/test_flow_05..07（正例 + 负例，与 clang 对拍全绿）；
+有意漂移仅 flow__01 的 break 日志追加 switch-depth=0，已重刷基线。
+全量 ctest **345** / 0 警告 / logdiff 零差异。
+
+✅ **主线 E 首批（原生数组与下标寻址）已完成（docs/learn/42）** ——
+原生数组类型系统地基引入（`TypeKind::Array`，持 `elementType`、`arraySize`、`arraySizeExpr`，
+`sizeInBytes()` 正确递归求得 `elemSize * arraySize`，`equals()` 精确比对元素与大小）；
+Parser：`parseArrayDeclaratorSuffix` 提取声明符后缀 `[ expr ]`，挂接到局部变量、全局变量与类成员字段三处声明点；
+Sema：`resolveType` 借助常量折叠器将 `arraySizeExpr` 求值为正整数；`inferIndex` 建立原生数组/指针寻址与容器类 at/set 糖的双轨制；
+CodeGen：局部数组栈分配与零初始化，全局数组 `.data` 节发射 `.zero <size>`；
+数组名向首元素地址退化（array-to-pointer decay）：`VarExpr`（局部 `leaq -off(%rbp)`、全局 `leaq sym(%rip)`、成员 `leaq off(%rax)`）与 `MemberExpr` 统一产出首地址；
+下标寻址 `IndexExpr`（读）与 `AssignStmt`（写）利用 x86-64 SIB 寻址模式（`leaq (%rcx, %rax, scale), %rcx`）按 1/2/4/8 字节做标量读写。
+测试 tests/lang/test_basics_10_array.cpp（五项全通，与 clang++-18 对拍一致）；
+全量 ctest **345** 全绿 / 0 警告 / logdiff 140 个集成测试逐字节零差异。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

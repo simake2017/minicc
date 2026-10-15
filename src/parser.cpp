@@ -269,12 +269,21 @@ TypePtr Parser::parseBuiltinTypeSpecifierSeq() {
 }
 
 TypePtr Parser::parseType() {
-    // ── Step 1: 处理 const 前缀（例如 const int, const Vec&）──
+    // ── Step 1: 处理 const / constexpr 前缀（例如 const int, constexpr int）──
     bool isConst = false;
     if (check(TokenType::KwConst)) {
         isConst = true;
         advance();
         std::cout << std::format("  [parse:type] ✦ const prefix detected\n");
+    }
+    // constexpr：[dcl.constexpr] —— 隐含 const（"implies const"），且初始化式
+    // 必须可常量求值。类型层面按 const 处理；constexpr 性本身经
+    // m_pendingConstexpr 交给声明节点（Sema 强制求值并登记常量表）。
+    if (check(TokenType::KwConstexpr)) {
+        advance();
+        isConst = true;
+        m_pendingConstexpr = true;
+        std::cout << std::format("  [parse:type] ✦ constexpr prefix detected (implies const)\n");
     }
 
     // ── Step 1.5: typename 前缀（依赖限定名消歧，[temp.res]/5）──
@@ -666,6 +675,26 @@ static std::string escapeCharText(const std::string& raw) {
     return out;
 }
 
+// 表达式延续判据：二元/逻辑运算符、三元 '?' 都会把「字面量」扩展成
+// 「常量表达式」。 '(' 不算 —— `4(x)` 不是合法表达式，别贪心。
+// ★ Less/Greater【刻意不收】：`Buf<4>` 的收尾 `>` 在词法上与小于/大于
+//   同 token，收进来会让每条裸字面量实参都误走表达式路径（基线漂移）。
+//   要比较就加括号：`Buf<(1<2)>`（'(' 开头的分支不受此限）。
+bool Parser::isExprContinuation(TokenType t) {
+    switch (t) {
+        case TokenType::Plus:       case TokenType::Minus:
+        case TokenType::Star:       case TokenType::Slash:
+        case TokenType::Percent:
+        case TokenType::EqualEqual: case TokenType::BangEqual:
+        case TokenType::LessEqual:  case TokenType::GreaterEqual:
+        case TokenType::AmpAmp:     case TokenType::PipePipe:
+        case TokenType::Question:
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
     expect(TokenType::Less, "Expected '<' before template arguments");
 
@@ -681,6 +710,12 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
             // 「Buf<-3>」（负实参）与「Buf<a-b>」（表达式，本函数不支持）。
             if (check(TokenType::Minus) && m_pos + 1 < m_tokens.size()
                 && m_tokens[m_pos + 1].is(TokenType::IntLiteral)) {
+                // ★ 主线 D 增补：字面量后还跟着运算符（Buf<-3+10>）⇒ 不是裸字面量，
+                //   回退到【完整常量表达式】分支统一处理（与正字面量同款判据）。
+                if (m_pos + 2 < m_tokens.size()
+                    && isExprContinuation(m_tokens[m_pos + 2].type)) {
+                    goto parseConstExprArg;
+                }
                 // ★ 严格说 -3 不是字面量，而是「一元减 + 字面量」构成的常量表达式
                 //   （[expr.unary.op] + [expr.const]）。完整实现要解析任意常量表达式
                 //   再求值（Buf<2+2> 也应支持）—— 那属于常量折叠，见 ROADMAP 主线 D。
@@ -698,6 +733,12 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
                 args.push_back(TemplateArg::ofValue(lv.value, lv.type));
             }
             else if (check(TokenType::IntLiteral)) {
+                // ★ 主线 D：字面量后紧跟运算符（Buf<2+2>）⇒ 完整常量表达式，
+                //   跳到下方统一处理。裸字面量维持本分支（日志逐字节不变）。
+                if (m_pos + 1 < m_tokens.size()
+                    && isExprContinuation(m_tokens[m_pos + 1].type)) {
+                    goto parseConstExprArg;
+                }
                 const Token& tok = advance();
                 IntLiteralValue lv = parseIntLiteral(tok.text, tok.location);
                 std::cout << std::format(
@@ -734,7 +775,33 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
                 args.push_back(TemplateArg::ofValue(val, Type::makeChar()));
             }
             else {
-                args.push_back(TemplateArg::ofType(parseType()));
+                // 主线 D：完整常量表达式实参（Buf<2+2> / Buf<(1+2)*3> / Flag<1 > 0>）。
+                // 走到这说明不是裸字面量/布尔/字符 —— 类型实参（标识符/关键字开头）
+                // 维持走 parseType 的老路（日志逐字节不变）；表达式只能以
+                // '(' 或 '!' 开头（其余值类开头都在上面的 fast path 收走了）。
+                if (check(TokenType::LParen) || check(TokenType::Bang)) {
+                parseConstExprArg:
+                    size_t exprStart = m_pos;
+                    // '>' 停止规则只罩住这个实参表达式本身（括号内已豁免）
+                    bool savedStop = m_stopAtGreater;
+                    m_stopAtGreater = true;
+                    ExprPtr e = parseExpression();
+                    m_stopAtGreater = savedStop;
+                    std::string srcText;
+                    for (size_t ti = exprStart; ti < m_pos; ti++) {
+                        if (!srcText.empty()) srcText += " ";
+                        srcText += m_tokens[ti].text;
+                    }
+                    std::cout << std::format(
+                        "  [parse:targ] ★ non-type argument (NTTP): constant expression '{}' "
+                        "（求值推迟到语义期）\n", srcText);
+                    TemplateArg a;
+                    a.kind      = TemplateArgKind::Integral;
+                    a.valueExpr = e;
+                    args.push_back(a);
+                } else {
+                    args.push_back(TemplateArg::ofType(parseType()));
+                }
             }
         } while (match(TokenType::Comma));
     }
@@ -848,6 +915,10 @@ GlobalVarDeclPtr Parser::parseGlobalVarDecl() {
     decl->declaredType = parseType();
     const Token& nameTok = expect(TokenType::Identifier, "Expected global variable name");
     decl->name = nameTok.text;
+    decl->declaredType = parseArrayDeclaratorSuffix(decl->declaredType);
+    // 主线 D 二批：接走 parseType 留下的 constexpr 前缀（读走即清，防串味）
+    decl->isConstexpr = m_pendingConstexpr;
+    m_pendingConstexpr = false;
     if (match(TokenType::Assign)) {
         decl->initializer = parseExpression();
     }
@@ -1805,6 +1876,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             // 字段声明
             TypePtr fieldType = parseType();
             const Token& fieldName = expect(TokenType::Identifier, "Expected field name");
+            fieldType = parseArrayDeclaratorSuffix(fieldType);
             expect(TokenType::Semicolon, "Expected ';' after field declaration");
 
             FieldInfo field;
@@ -2011,6 +2083,10 @@ StmtPtr Parser::parseStatement() {
     if (check(TokenType::KwFor))     return parseForStmt();
     if (check(TokenType::KwBreak))   return parseBreakStmt();
     if (check(TokenType::KwContinue)) return parseContinueStmt();
+    if (check(TokenType::KwSwitch))  return parseSwitchStmt();
+    if (check(TokenType::KwCase))    return parseCaseStmt();
+    if (check(TokenType::KwDefault)) return parseDefaultStmt();
+    if (check(TokenType::KwDo))      return parseDoWhileStmt();
     if (check(TokenType::KwReturn))  return parseReturnStmt();
     if (check(TokenType::KwDelete))  return parseDeleteStmt();
 
@@ -2151,9 +2227,20 @@ StmtPtr Parser::parseBlockStmt() {
 // 对应 clang：ParseSimpleDeclaration（ParseDecl.cpp）
 // 入参 demo：入参 type=int；Token 流 [x][=][42][;]
 //   → 产出 VarDeclStmt{ name="x", type=int, init=IntLiteral(42) }
+TypePtr Parser::parseArrayDeclaratorSuffix(TypePtr baseType) {
+    while (check(TokenType::LBracket)) {
+        advance();
+        ExprPtr sizeExpr = parseExpression();
+        expect(TokenType::RBracket, "Expected ']' after array size");
+        baseType = Type::makeArray(baseType, sizeExpr);
+    }
+    return baseType;
+}
+
 StmtPtr Parser::parseVarDeclStmt(TypePtr type) {
     auto loc = current().location;
     const Token& nameToken = expect(TokenType::Identifier, "Expected variable name");
+    type = parseArrayDeclaratorSuffix(type);
 
     ExprPtr init = nullptr;
     std::vector<ExprPtr> ctorArgs;
@@ -2178,6 +2265,81 @@ StmtPtr Parser::parseVarDeclStmt(TypePtr type) {
 
     auto stmt = std::make_shared<VarDeclStmt>(nameToken.text, type, init);
     stmt->ctorArgs = std::move(ctorArgs);
+    // 主线 D 二批：接走 parseType 留下的 constexpr 前缀（读走即清，防串味）
+    stmt->isConstexpr = m_pendingConstexpr;
+    m_pendingConstexpr = false;
+    stmt->location = loc;
+    return stmt;
+}
+
+// ─── switch 语句（主线 C 二批，[stmt.switch]）─────────────────────────────────
+// 文法：switch-stmt := 'switch' '(' expr ')' stmt
+//   体通常是 { case 常量 ':' 语句 ... default ':' 语句 }；case/default 是
+//   【语句位置】的标号（parseStatement 按首 token 分派到 parseCaseStmt），
+//   可以穿插其它语句 —— C++ 允许，落到哪个分支由比较链的 fall-through 决定。
+// 对照 clang：ParseSwitchStatement（ParseStmt.cpp）。
+// 入参 demo：Token 流 [switch][(][x][)][{][case][1][:][s1][}][;]
+//   → SwitchStmt{ cond=Var(x), body=Block[CaseStmt{1, s1}] }
+StmtPtr Parser::parseSwitchStmt() {
+    auto loc = current().location;
+    expect(TokenType::KwSwitch, "Expected 'switch'");
+    expect(TokenType::LParen, "Expected '(' after 'switch'");
+    ExprPtr cond = parseExpression();
+    expect(TokenType::RParen, "Expected ')' after switch condition");
+    StmtPtr body = parseStatement();
+    std::cout << "  [parse:stmt] switch (...)  <body>\n";
+    auto stmt = std::make_shared<SwitchStmt>(std::move(cond), std::move(body));
+    stmt->location = loc;
+    return stmt;
+}
+
+// ─── case 标号 ────────────────────────────────────────────────────────────────
+// 文法：case-label := 'case' 常量表达式 ':' stmt
+// 标号后必须是语句；`case 1: }` 这种空标号用 EmptyStmt 补齐
+// （`case 1:;` 的裸分号也一样 —— parseStatement 的 Semicolon 分支）。
+StmtPtr Parser::parseCaseStmt() {
+    auto loc = current().location;
+    expect(TokenType::KwCase, "Expected 'case'");
+    ExprPtr value = parseExpression();
+    expect(TokenType::Colon, "Expected ':' after case value");
+    StmtPtr body = check(TokenType::RBrace)
+                       ? StmtPtr(std::make_shared<EmptyStmt>())
+                       : parseStatement();
+    auto stmt = std::make_shared<CaseStmt>(std::move(value), std::move(body));
+    stmt->location = loc;
+    return stmt;
+}
+
+// ─── default 标号 ─────────────────────────────────────────────────────────────
+// 文法：default-label := 'default' ':' stmt
+StmtPtr Parser::parseDefaultStmt() {
+    auto loc = current().location;
+    expect(TokenType::KwDefault, "Expected 'default'");
+    expect(TokenType::Colon, "Expected ':' after 'default'");
+    StmtPtr body = check(TokenType::RBrace)
+                       ? StmtPtr(std::make_shared<EmptyStmt>())
+                       : parseStatement();
+    auto stmt = std::make_shared<DefaultStmt>(std::move(body));
+    stmt->location = loc;
+    return stmt;
+}
+
+// ─── do-while 循环（[stmt.do]）───────────────────────────────────────────────
+// 文法：do-stmt := 'do' stmt 'while' '(' expr ')' ';'
+// ★ 体先于条件执行 —— codegen 把条件测试放在体代码【之后】；
+//   continue 落条件式（同 while，与 for 的增量步不同）。
+// 对照 clang：ParseDoStatement。
+StmtPtr Parser::parseDoWhileStmt() {
+    auto loc = current().location;
+    expect(TokenType::KwDo, "Expected 'do'");
+    StmtPtr body = parseStatement();
+    expect(TokenType::KwWhile, "Expected 'while' after do-while body");
+    expect(TokenType::LParen, "Expected '(' after 'while'");
+    ExprPtr cond = parseExpression();
+    expect(TokenType::RParen, "Expected ')' after do-while condition");
+    expect(TokenType::Semicolon, "Expected ';' after do-while");
+    std::cout << "  [parse:stmt] do <body> while (...)\n";
+    auto stmt = std::make_shared<DoWhileStmt>(std::move(body), std::move(cond));
     stmt->location = loc;
     return stmt;
 }
@@ -2503,8 +2665,11 @@ ExprPtr Parser::parseEqualityExpr() {
 ExprPtr Parser::parseComparisonExpr() {
     ExprPtr left = parseAdditiveExpr();
 
+    // m_stopAtGreater：模板实参表内裸 '>' 是收尾不是大于号（见 parser.h 注释）。
+    // '>=' 不受此限 —— 收尾永远是裸 '>'（<= 亦是真比较，照常吃）。
     while (check(TokenType::Less) || check(TokenType::Greater)
            || check(TokenType::LessEqual) || check(TokenType::GreaterEqual)) {
+        if (m_stopAtGreater && check(TokenType::Greater)) break;
         auto loc = current().location;
         BinaryOp op;
         switch (current().type) {
@@ -2863,7 +3028,21 @@ ExprPtr Parser::parsePrimaryExpr() {
 
     // 括号表达式
     if (match(TokenType::LParen)) {
+        // 括号内是独立的表达式世界：模板实参表的 '>' 停止规则不带进来
+        // （`Buf<(2>1)>` 里括号内的是真比较）。save/restore 保嵌套安全。
+        bool savedStop = m_stopAtGreater;
+        m_stopAtGreater = false;
         ExprPtr inner = parseExpression();
+        // ── 逗号表达式（[expr.comma]，优先级全语言最低）──
+        // 只在括号内开放：调用实参表 / 初始化列表里的 ',' 仍是分隔符，
+        // 若在顶层开放它们全得做上下文区分（已知边界，docs/learn/41）。
+        while (match(TokenType::Comma)) {
+            ExprPtr right = parseExpression();
+            auto comma = std::make_shared<CommaExpr>(std::move(inner), std::move(right));
+            comma->location = loc;
+            inner = std::move(comma);
+        }
+        m_stopAtGreater = savedStop;
         expect(TokenType::RParen, "Expected ')' after expression");
         return inner;
     }

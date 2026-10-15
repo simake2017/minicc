@@ -21,6 +21,7 @@ TARGET=minicc
 SRCS=(
     preprocessor.cpp
     sfinae.cpp
+    constant_folder.cpp
     lexer.cpp
     parser.cpp
     type.cpp

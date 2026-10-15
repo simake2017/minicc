@@ -27,9 +27,12 @@
 
 #include "ast.h"
 #include "ast_visitor.h"
+#include "constant_folder.h"
 #include "type.h"
 #include "template_instantiation.h"
 #include <string>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -255,11 +258,45 @@ private:
     // ── 符号表管理 ──
     SymbolTable m_symbolTable;
 
+    // 常量折叠器（主线 D）：语句访问点先 fold 再定型，折叠结果写回 AST
+    ConstantFolder m_constantFolder;
+
+    // ── 主线 D 二批：编译期常量表（constexpr / const 整型变量）──────────
+    // 声明时登记（值 + 形态），两条消费路径：
+    //   ① 常量传播 —— ConstantFolder 经 setConstResolver 回调查它，
+    //      `const int c = 4; int x = c * 2;` 的 c 在折叠期替换成字面量；
+    //   ② NTTP 实参重解 —— resolveType 见 `Buf<k>` 的裸名字实参、该位
+    //      形参是 NTTP 时，按名字查表改写成值实参（[temp.arg.nontype]）。
+    // 键是裸名（无作用域链，内层声明覆盖外层同名 —— 与命名空间回退同款的
+    // "只记最近一层"取舍，见 processNamespaceDecl 注释）。
+    std::map<std::string, ConstantFolder::IntegralValue> m_constValues;
+
+    // 查编译期常量表（无 ⇒ nullopt）。供本类各处与 resolveType 的
+    // NTTP 重解共用，保证"这个名字此刻是不是常量"只有一个判据。
+    std::optional<ConstantFolder::IntegralValue> lookupConstValue(
+        const std::string& name) const {
+        auto it = m_constValues.find(name);
+        if (it == m_constValues.end()) return std::nullopt;
+        return it->second;
+    }
+
+    // 登记一条编译期常量（visit(VarDeclStmt) / processGlobalVarDecl 共用）。
+    // 只收【const/constexpr 的整型家族】；constexpr 的初始化式不可常量
+    // 求值时按 clang 文案报错（[dcl.constexpr]/9 的强制）。
+    void registerConstVar(const std::string& name, const TypePtr& type,
+                          ExprPtr& initializer, bool isConstexpr,
+                          const SourceLocation& loc);
+
     // 循环嵌套深度（break/continue 合法性裁决）：for/while 体进入 +1、
     // 退出 -1；栈空时遇到 break/continue ⇒ "not in loop" 报错
     // （对照 clang：ActOnBreak/ActOnContinue 查 CurContext 是否在循环里，
     //  文案 'break statement not in loop statement' 逐字沿用）。
     int m_loopDepth = 0;
+    int m_switchDepth = 0;   // 主线 C 二批：break 在 switch 内同样合法
+
+    // 每个开着的 switch 一张 case 值集合（进 SwitchStmt 压栈、出弹栈），
+    // visit(CaseStmt) 向栈顶插入 —— 插不进 ⇒ "duplicate case value"。
+    std::vector<std::set<int64_t>> m_caseValueSets;
 
     // ── 全局注册表 ──
     std::unordered_map<std::string, TypePtr>      m_classTypes;    // 类名 → Type
@@ -433,6 +470,10 @@ private:
     // while：条件类型检查，循环体建作用域
     void visit(WhileStmt& stmt) override;
     void visit(ForStmt& stmt) override;
+    void visit(SwitchStmt& stmt) override;
+    void visit(CaseStmt& stmt) override;
+    void visit(DefaultStmt& stmt) override;
+    void visit(DoWhileStmt& stmt) override;
     void visit(BreakStmt& stmt) override;
     void visit(ContinueStmt& stmt) override;
     // return：返回值与声明返回类型兼容性检查 [stmt.return]
@@ -608,6 +649,7 @@ private:
     // （[expr.sub] 的糖化：operator[] 重载降级为成员方法调用）
     TypePtr inferIndex(IndexExpr& expr);
     TypePtr inferConditional(ConditionalExpr& expr);
+    TypePtr inferComma(CommaExpr& expr);
 
     // ── 类内存布局计算 ──
     // 逐字段对齐排布，算 offset/size/totalSize（_vptr 恒在偏移 0）

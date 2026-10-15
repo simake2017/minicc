@@ -58,10 +58,10 @@ enum class NodeKind : uint8_t {
     // 表达式
     IntLiteral, CharLiteral, BoolLiteral, StringLiteral, NullptrLiteral,
     Var, Binary, Unary, Call, Member, New, This, Delete, DynamicCast, Index,
-    Conditional,
+    Conditional, Comma,
     // 语句
     ExprStmt, VarDecl, Return, If, While, Block, Assign, DeleteStmt, Empty,
-    For, Break, Continue,
+    For, Break, Continue, Switch, Case, Default, DoWhile,
     // 声明
     Function, Class, Template, GlobalVar, Enum, Namespace, TypeAlias,
     Constructor, Destructor, DeductionGuide,
@@ -460,6 +460,10 @@ struct VarDeclStmt : Statement {
     // 空 ⇒ 零参构造，CodeGen 回退 `Name_Name`。
     std::string ctorSymbol;
 
+    // ── 主线 D 二批：constexpr 局部变量（[dcl.constexpr]）──
+    // 语义同 GlobalVarDecl::isConstexpr：初始化式必须可常量求值。
+    bool isConstexpr = false;
+
     VarDeclStmt(std::string n, TypePtr t, ExprPtr init)
         : Statement(NodeKind::VarDecl), name(std::move(n)),
           declaredType(std::move(t)), initializer(std::move(init)) {}
@@ -556,6 +560,67 @@ struct ForStmt : Statement {
 // 语义：break 跳出最近一层循环；continue 跳过本轮、跳到循环的"增量步"
 // （while 就是条件式）。能不能用由 Sema 的循环上下文栈裁决——
 // 栈空 ⇒ "not in loop" 报错（两节点本身不带任何数据，跳转目标是生成期的事）。
+// ─── 逗号表达式 ───────────────────────────────────────────────────────────────
+// 对应 [expr.comma]：先求左操作数（只为副作用），值与类型取右操作数。
+// `f(), g()` / `(touch(5), 42)`。优先级全语言最低 —— 本实现只在【括号内】
+// 开放（parsePrimaryExpr 的 '(' 分支），调用实参表等其它地方的 ',' 仍是
+// 分隔符，不用上下文区分（已知边界，docs/learn/41）。
+// 对照 clang：BinaryOperator(BO_Comma) —— 它确实就是一棵二元表达式树。
+struct CommaExpr : Expression {
+    ExprPtr left;   // 只求副作用
+    ExprPtr right;  // 整个表达式的值与类型
+    CommaExpr(ExprPtr l, ExprPtr r)
+        : Expression(NodeKind::Comma), left(std::move(l)), right(std::move(r)) {}
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
+// ─── switch / case / default（主线 C 二批）───────────────────────────────────
+// 对应 [stmt.switch]：[stmt.stmt]/1 的 selection-statement 第三种。
+// 值匹配的多路分支；case 标号可以出现在 switch 体的【任意语句位置】
+// （C++ 允许穿插声明等），本实现的 codegen 用"比较链"降级：条件值存栈顶，
+// 逐条 cmp-je 到各 case 标号，无匹配落 default 或出口 —— 对照 clang 的
+// 两种下沉（小密值跳表 / 大稀疏比较链，SelectionDAG 决定），教学版恒用比较链。
+struct SwitchStmt : Statement {
+    ExprPtr condition;
+    StmtPtr body;   // 通常是 BlockStmt；case/default 是它的直接子语句
+    SwitchStmt(ExprPtr c, StmtPtr b)
+        : Statement(NodeKind::Switch), condition(std::move(c)), body(std::move(b)) {}
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
+// case 标号：[stmt.switch]/1 的 case 常量表达式。value 在 Sema 折叠后
+// 必须是整数字面量（clang："case value is not a constant expression"），
+// 整数值回填进 constValue 供 codegen 的比较链取用。
+struct CaseStmt : Statement {
+    ExprPtr  value;
+    StmtPtr  body;
+    int64_t  constValue = 0;   // Sema 回填
+    bool     resolved   = false;
+    std::string asmLabel;      // CodeGen 第一遍收集 case 时分配的标号
+    CaseStmt(ExprPtr v, StmtPtr b)
+        : Statement(NodeKind::Case), value(std::move(v)), body(std::move(b)) {}
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
+struct DefaultStmt : Statement {
+    StmtPtr body;
+    std::string asmLabel;      // 同 CaseStmt
+    DefaultStmt(StmtPtr b)
+        : Statement(NodeKind::Default), body(std::move(b)) {}
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
+// ─── do-while 循环 ───────────────────────────────────────────────────────────
+// 对应 [stmt.do]：体【先执行一次】，再每轮结束测条件；continue 落在条件式
+// （与 while 相同，与 for 的增量步不同）。空条件不合法（do-while 必须有条件）。
+struct DoWhileStmt : Statement {
+    StmtPtr body;
+    ExprPtr condition;
+    DoWhileStmt(StmtPtr b, ExprPtr c)
+        : Statement(NodeKind::DoWhile), body(std::move(b)), condition(std::move(c)) {}
+    void accept(AstVisitor& v) override { v.visit(*this); }
+};
+
 struct BreakStmt : Statement {
     BreakStmt() : Statement(NodeKind::Break) {}
     void accept(AstVisitor& v) override { v.visit(*this); }
@@ -684,6 +749,11 @@ struct GlobalVarDecl : Declaration {
     std::string name;
     TypePtr     declaredType;
     ExprPtr     initializer; // 可为 nullptr
+
+    // ── 主线 D 二批：constexpr 全局变量（[dcl.constexpr]）──
+    // 初始化式必须可常量求值（Sema 强制，clang 文案逐字同），
+    // 同时登记进编译期常量表 ⇒ 可作 NTTP 实参与传播源。
+    bool isConstexpr = false;
 
     GlobalVarDecl() : Declaration(NodeKind::GlobalVar) {}
 

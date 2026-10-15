@@ -37,6 +37,7 @@ endif()
 set(SOURCES
     src/preprocessor.cpp
     src/sfinae.cpp
+    src/constant_folder.cpp
     src/lexer.cpp
     src/parser.cpp
     src/type.cpp
@@ -89,6 +90,7 @@ add_executable(unit_tests
     tests/unit/test_arg_binding.cpp
     src/preprocessor.cpp
     src/sfinae.cpp
+    src/constant_folder.cpp
     src/lexer.cpp
     src/parser.cpp
     src/semantic_analyzer.cpp

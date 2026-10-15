@@ -50,6 +50,7 @@
 #include <string>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace minicc {
@@ -100,6 +101,9 @@ private:
         uint32_t size = 0;  // 对象尺寸（alloc 与清零都用它）
     };
     std::unordered_map<std::string, ClassLocalInfo> m_classLocals;
+    // 数组变量追踪（主线 E，[dcl.array]）
+    std::unordered_map<std::string, int> m_arrayLocals;  // 局部数组 -> 栈偏移
+    std::unordered_set<std::string>     m_arrayGlobals; // 全局数组名字
 
     // 块作用域析构栈：每进一个 BlockStmt 压一层，块内声明的类局部追加进
     // 当前层；块结束时逆序发射本层析构后弹层（LIFO → 逆声明序析构，
@@ -176,6 +180,10 @@ private:
     void visit(WhileStmt& stmt) override;
     // for：init + cond + body + incr + 回边 的五标签降级
     void visit(ForStmt& stmt) override;
+    void visit(SwitchStmt& stmt) override;
+    void visit(CaseStmt& stmt) override;
+    void visit(DefaultStmt& stmt) override;
+    void visit(DoWhileStmt& stmt) override;
     // break/continue：跳循环上下文栈顶记录的出口/增量标签
     void visit(BreakStmt& stmt) override;
     void visit(ContinueStmt& stmt) override;
@@ -199,6 +207,7 @@ private:
     void visit(BinaryExpr& expr) override;
     // 三元表达式 ?:：条件跳转选值（短路——落选支不求值）
     void visit(ConditionalExpr& expr) override;
+    void visit(CommaExpr& expr) override;
     // negq / 逻辑非
     void visit(UnaryExpr& expr) override;
     // 普通/方法/虚调用三路分发

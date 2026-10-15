@@ -196,11 +196,14 @@ break、continue、三元 ?:（含短路语义）。Sema 循环深度栈（m_loo
 > | 值位整型转换 [temp.arg.nontype]/1（`Flag<1>` / `A<4L>`，**回归 B17**） | ✅ `test_tmpl_64` |
 > | 窄化拒绝（`F<2>` / `U<-1>` / `D<300>`，文案与 clang 逐字同） | ✅ `test_tmpl_65/66/67` |
 > | `template<auto V>`（类型由实参反推，[temp.param]/6） | ✅ `test_tmpl_68` |
-> | **任意常量表达式** `Buf<2+2>` / `Buf<k>` | ❌ **仍然是 Parse Error —— 主线 D 的全部剩余工作** |
+> | **任意常量表达式** `Buf<2+2>` | ✅ `test_tmpl_74/75`（主线 D 首批，docs/learn/39） |
+> | `Buf<k>`（const/constexpr 变量作实参） | ✅ `test_tmpl_76/77`（主线 D 二批，docs/learn/40） |
 >
-> 换句话说：主线 D 现在只需在 `parseTemplateArgumentList` 里把
-> "字面量分支"换成"完整常量表达式分支"，**下游（形态归一 / 可表示性检查 /
-> 缓存键 / mangling）已经全部就绪**，不必再动。
+> ★ **已兑现（主线 D 首批，docs/learn/39）**：字面量 fast path 逐字节保留
+> （仅当字面量后紧跟运算符时回退解析完整常量表达式），`TemplateArg` 加
+> `valueExpr` 载荷，求值发生在【算缓存键之前】的归一预处理 —— 下游
+> （形态归一 / 可表示性检查 / 缓存键 / mangling）确实一行没动。
+> 剩余：constexpr **函数**（需可解释器的求值器）、`if constexpr`、浮点折叠。
 > mangling 的 `TnDa`（`<template-param-decl>`，只用于**函数**模板的 `auto` NTTP）
 > 仍未实现 —— 函数模板的显式 NTTP 实参目前直接报
 > `explicit non-type template argument … for function template … is not supported yet`，

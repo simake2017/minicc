@@ -218,8 +218,12 @@ std::string CodeGen::generate(
                 emitData(std::format("    .globl {}             # 导出全局变量符号", sym));
                 emitData("    .align 8                # 8 字节对齐");
                 emitData(std::format("{}:                    # 全局变量标签", sym));
-                // 初始化式只支持整型/布尔字面量，其余零初始化
-                if (gvar->initializer &&
+                if (gvar->declaredType && gvar->declaredType->isArray()) {
+                    uint32_t asz = gvar->declaredType->sizeInBytes();
+                    emitData(std::format("    .zero {}              # 全局数组零初始化 ({} 字节)",
+                                         asz, asz));
+                    m_arrayGlobals.insert(gvar->name);
+                } else if (gvar->initializer &&
                     gvar->initializer->kind == NodeKind::IntLiteral) {
                     auto lit = std::static_pointer_cast<IntLiteralExpr>(gvar->initializer);
                     emitData(std::format("    .quad {}              # 初始化值：{}",
@@ -476,6 +480,7 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
     // 复位每函数状态：局部变量表、栈分配指针、所属类上下文
     m_localVars.clear();
     m_classLocals.clear();
+    m_arrayLocals.clear();
     m_blockDtorStack.clear();
     m_currentStackOffset = 0;
     m_currentClassName = func->ownerClassName;
@@ -881,7 +886,11 @@ uint32_t CodeGen::estimateBlockSize(std::shared_ptr<BlockStmt> block) {
             case NodeKind::VarDecl: {
                 auto v = std::static_pointer_cast<VarDeclStmt>(stmt);
                 uint32_t size = 8;
-                if (v->declaredType && !v->declaredType->isPointer() && m_classTypes) {
+                if (v->declaredType && v->declaredType->isArray()) {
+                    uint32_t asz = v->declaredType->sizeInBytes();
+                    if (asz < 8) asz = 8;
+                    size = (asz + 7) / 8 * 8;
+                } else if (v->declaredType && !v->declaredType->isPointer() && m_classTypes) {
                     auto cit = m_classTypes->find(v->declaredType->name);
                     if (cit != m_classTypes->end() && cit->second->isClass()) {
                         size = cit->second->classLayout.totalSize;
@@ -931,6 +940,30 @@ uint32_t CodeGen::estimateBlockSize(std::shared_ptr<BlockStmt> block) {
                 }
                 if (f->body && f->body->kind == NodeKind::Block)
                     total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(f->body));
+                break;
+            }
+            case NodeKind::DoWhile: {
+                auto d = std::static_pointer_cast<DoWhileStmt>(stmt);
+                if (d->body && d->body->kind == NodeKind::Block)
+                    total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(d->body));
+                break;
+            }
+            case NodeKind::Switch: {
+                auto sw = std::static_pointer_cast<SwitchStmt>(stmt);
+                if (sw->body && sw->body->kind == NodeKind::Block)
+                    total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(sw->body));
+                break;
+            }
+            case NodeKind::Case: {
+                auto c = std::static_pointer_cast<CaseStmt>(stmt);
+                if (c->body && c->body->kind == NodeKind::Block)
+                    total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(c->body));
+                break;
+            }
+            case NodeKind::Default: {
+                auto d = std::static_pointer_cast<DefaultStmt>(stmt);
+                if (d->body && d->body->kind == NodeKind::Block)
+                    total += estimateBlockSize(std::static_pointer_cast<BlockStmt>(d->body));
                 break;
             }
             default:
@@ -1107,6 +1140,24 @@ void CodeGen::visit(VarDeclStmt& decl) {
         }
     }
 
+    // ── 路径①-arr：数组 —— 按元素总尺寸对齐分配 ──
+    if (decl.declaredType && decl.declaredType->isArray()) {
+        uint32_t asz = decl.declaredType->sizeInBytes();
+        if (asz < 8) asz = 8;
+        asz = (asz + 7) / 8 * 8;
+        m_currentStackOffset -= asz;
+        int offset = m_currentStackOffset;
+        m_localVars[decl.name] = offset;
+        m_arrayLocals[decl.name] = offset;
+        emitComment(std::format("stack array {} : {} ({} bytes)",
+            decl.name, decl.declaredType->toString(), asz));
+        for (uint32_t i = 0; i < asz; i += 8) {
+            emit(std::format("movq $0, {}(%rbp)    # 零初始化数组 {} +{}",
+                offset + static_cast<int>(i), decl.name, i));
+        }
+        return;
+    }
+
     // ── 路径①：标量 —— 8 字节槽 ──
     m_currentStackOffset -= 8;
     m_localVars[decl.name] = m_currentStackOffset;
@@ -1192,13 +1243,50 @@ void CodeGen::visit(AssignStmt& stmt) {
         } break;
         case NodeKind::Index: {
             auto idx = std::static_pointer_cast<IndexExpr>(stmt.target);
+            TypePtr objType = idx->object->resolvedType;
+            if (objType && objType->isReference()) objType = objType->referencedType;
+            bool isRaw = objType && (objType->isArray() || objType->isPointer());
+
+            if (isRaw) {
+                // 原生数组/指针下标赋值：a[i] = rhs
+                emitComment("raw array/pointer assign a[i] = rhs");
+                emit("pushq %rax                  # 暂存右值到栈上");
+                emitExpr(idx->object);
+                emit("pushq %rax                  # 暂存基址到栈上");
+                emitExpr(idx->index);
+                emit("popq %rcx                   # 弹出基址到 rcx");
+                TypePtr elemType = objType->isArray() ? objType->elementType : objType->pointeeType;
+                uint32_t elemSize = elemType ? elemType->sizeInBytes() : 8;
+                if (elemSize == 1) {
+                    emit("leaq (%rcx, %rax, 1), %rcx # 目标地址 = base + i * 1");
+                } else if (elemSize == 2) {
+                    emit("leaq (%rcx, %rax, 2), %rcx # 目标地址 = base + i * 2");
+                } else if (elemSize == 4) {
+                    emit("leaq (%rcx, %rax, 4), %rcx # 目标地址 = base + i * 4");
+                } else if (elemSize == 8) {
+                    emit("leaq (%rcx, %rax, 8), %rcx # 目标地址 = base + i * 8");
+                } else {
+                    emit(std::format("imulq ${}, %rax               # i * elemSize", elemSize));
+                    emit("addq %rax, %rcx                 # 目标地址 = base + 偏移");
+                }
+                emit("popq %rax                   # 弹出右值到 rax");
+                if (elemSize <= 1) {
+                    emit("movb %al, (%rcx)             # 写入 1 字节");
+                } else if (elemSize <= 4) {
+                    emit("movl %eax, (%rcx)            # 写入 4 字节");
+                } else {
+                    emit("movq %rax, (%rcx)            # 写入 8 字节");
+                }
+                break;
+            }
+
             // ─── 下标赋值（写形态）→ 糖化为 v.set(i, value) ───
             // 读走 at()、写走 set()，是 at()/set() 约定的另一半
             // （[expr.ass] 左值语义的降级：赋值目标必须是函数调用形态）。
             // 此刻 rax 已是右值（函数开头统一求值）：压栈保序，
             // 依次取 this 与下标，再按 System V 装参 rdi/rsi/rdx。
             emitComment("subscript assign v[i] = ... → desugar to v.set(i, value)");
-            TypePtr objType = idx->object->resolvedType;
+            objType = idx->object->resolvedType;
             if (objType && objType->isPointer()) {
                 objType = objType->pointeeType;
             }
@@ -1521,6 +1609,93 @@ void CodeGen::visit(ForStmt& stmt) {
     m_loopStack.pop_back();
 }
 
+// do-while [stmt.do]：体【先于条件执行一轮】 —— 条件测试代码放在体之后。
+// continue 落条件式（与 while 相同；for 的增量步约定不适用）。
+void CodeGen::visit(DoWhileStmt& stmt) {
+    std::string bodyLabel = newLabel("do_body");
+    std::string condLabel = newLabel("do_cond");
+    std::string endLabel  = newLabel("do_end");
+
+    // continue → 条件式；break → 出口
+    m_loopStack.push_back({endLabel, condLabel});
+
+    emit(std::format("{}:                        # do-while 体（无条件先执行一轮）", bodyLabel));
+    emitStmt(stmt.body);
+
+    emit(std::format("{}:                        # do-while 条件测试（continue 落点）", condLabel));
+    emitExpr(stmt.condition);
+    emit("testq %rax, %rax             # 条件值与自身按位与，设置 ZF 标志位");
+    emit(std::format("jne {}                    # 条件为真回边继续循环", bodyLabel));
+
+    emit(std::format("{}:                        # do-while 出口（break 落点）", endLabel));
+    m_loopStack.pop_back();
+}
+
+// switch [stmt.switch]：比较链降级。条件值压栈保存，逐条 cmp-je 分发到
+// 各 case 标号；无匹配落 default（无 default 直落出口）。case 标号按体
+// 内语句顺序【顺序放置】—— 不穿 break 的 case 自然贯穿到下一条 case 的
+// 代码（这正是 C 的 fall-through 语义，对照 clang 的 LowerSwitch 之
+// 比较链形态；跳表形态见 ROADMAP 选做）。
+void CodeGen::visit(SwitchStmt& stmt) {
+    std::string endLabel = newLabel("sw_end");
+
+    // ── 第一遍：收集体里【直接子语句】层的 case/default，分配标号 ──
+    // 嵌套块里的 case 属于内层 switch（若那里没有 switch 则是 C++ 里
+    // 把外层标号写进了嵌套块 —— 罕见写法，本实现不支持分发到它，文档注明）。
+    std::vector<CaseStmt*>  cases;
+    DefaultStmt*            def    = nullptr;
+    auto collect = [&](StmtPtr& s) {
+        if (s && s->kind == NodeKind::Case) {
+            auto c = std::static_pointer_cast<CaseStmt>(s).get();
+            c->asmLabel = newLabel("sw_case");
+            cases.push_back(c);
+        } else if (s && s->kind == NodeKind::Default) {
+            auto d = std::static_pointer_cast<DefaultStmt>(s).get();
+            d->asmLabel = newLabel("sw_def");
+            def = d;
+        }
+    };
+    if (stmt.body->kind == NodeKind::Block) {
+        for (auto& s : std::static_pointer_cast<BlockStmt>(stmt.body)->statements)
+            collect(s);
+    } else {
+        collect(stmt.body);
+    }
+
+    // ── 条件求值 → 栈顶暂存（比较链要反复取用）──
+    emitExpr(stmt.condition);
+    emit("pushq %rax                # switch 条件值暂存栈顶");
+
+    // ── 分发链：cmp-je 逐条比对 ──
+    for (auto* c : cases) {
+        emit("movq (%rsp), %rax         # 取回条件值");
+        emit(std::format("cmpq ${}, %rax          # 与 case 常量比对", c->constValue));
+        emit(std::format("je {}                  # 命中 ⇒ 落入该 case", c->asmLabel));
+    }
+    if (def) emit(std::format("jmp {}                    # 无匹配 ⇒ default", def->asmLabel));
+    else     emit(std::format("jmp {}                    # 无匹配且无 default ⇒ 出口", endLabel));
+
+    // break 在 switch 内合法：压 {end, end}。continue 到不了这里
+    // （Sema 只在 m_loopDepth>0 时放行 continue，内层循环自管自的栈）。
+    m_loopStack.push_back({endLabel, endLabel});
+    emitStmt(stmt.body);
+    m_loopStack.pop_back();
+
+    emit(std::format("{}:                        # switch 出口（先清暂存再落点）", endLabel));
+    emit("addq $8, %rsp             # 释放条件值暂存槽");
+}
+
+void CodeGen::visit(CaseStmt& stmt) {
+    // 标号在 visit(SwitchStmt) 第一遍已分配（asmLabel）
+    emit(std::format("{}:                        # case {}", stmt.asmLabel, stmt.constValue));
+    emitStmt(stmt.body);
+}
+
+void CodeGen::visit(DefaultStmt& stmt) {
+    emit(std::format("{}:                        # default", stmt.asmLabel));
+    emitStmt(stmt.body);
+}
+
 // break [stmt.jump]：跳最近一层循环的出口。栈空不可能出现 —— Sema 已
 // 把"not in loop" 拦在编译期；这里再守一次（防御 Sema 守卫被意外绕过的
 // UB 场景：栈空时 back() 是未定义行为，宁可响亮报错不可静默崩）。
@@ -1630,6 +1805,14 @@ void CodeGen::visit(VarExpr& expr) {
         return;
     }
 
+    // 局部数组：decay 为首元素地址
+    auto ai = m_arrayLocals.find(expr.name);
+    if (ai != m_arrayLocals.end()) {
+        emit(std::format("leaq {}(%rbp), %rax    # 局部数组 {} decay 为首元素地址",
+            ai->second, expr.name));
+        return;
+    }
+
     // 先查局部变量
     auto it = m_localVars.find(expr.name);
     if (it != m_localVars.end()) {
@@ -1655,11 +1838,26 @@ void CodeGen::visit(VarExpr& expr) {
             // 通过 this 指针访问字段
             if (thisIt != m_localVars.end()) {
                 emit(std::format("movq {}(%rbp), %rax    # 加载 this 指针", thisIt->second));
-                emit(std::format("movl {}(%rax), %eax    # 读取字段 .{}（偏移 +{} 字节）",
-                    field->offset, expr.name, field->offset));
+                if (field->type && field->type->isArray()) {
+                    emit(std::format("leaq {}(%rax), %rax    # 数组字段 .{} 取首地址（偏移 +{} 字节）",
+                        field->offset, expr.name, field->offset));
+                } else if (field->type && field->type->isClass()) {
+                    emit(std::format("leaq {}(%rax), %rax    # 嵌套类字段 .{} 取地址（偏移 +{} 字节）",
+                        field->offset, expr.name, field->offset));
+                } else {
+                    emit(std::format("movl {}(%rax), %eax    # 读取字段 .{}（偏移 +{} 字节）",
+                        field->offset, expr.name, field->offset));
+                }
                 return;
             }
         }
+    }
+
+    // 全局数组：decay 为首元素地址
+    if (m_arrayGlobals.count(expr.name)) {
+        emit(std::format("leaq {}(%rip), %rax    # 全局数组 {} decay 为首元素地址（RIP 相对寻址）",
+            asmSymbol(expr.name), expr.name));
+        return;
     }
 
     // 查全局变量或常量符号（RIP 寻址；asmSymbol 净化 :: 等非法标签字符）
@@ -1771,6 +1969,14 @@ void CodeGen::visit(BinaryExpr& expr) {
 // 先算条件、testq；假则【跳过 then 支】（它的副作用不会发生），真则跳过 else 支。
 // 两支的值都落在 rax（Sema 已保证同型），用 end 标签汇合 ——
 // 这是 if-else 的表达式版（clang CodeGenFunction::EmitConditionalOperator）。
+// 逗号表达式 [expr.comma]：左操作数只求副作用（结果丢弃），值与类型取右操作数。
+void CodeGen::visit(CommaExpr& expr) {
+    emitComment(", ：左操作数只求副作用");
+    emitExpr(expr.left);
+    emitComment(", ：值取右操作数");
+    emitExpr(expr.right);
+}
+
 void CodeGen::visit(ConditionalExpr& expr) {
     std::string elseLabel = newLabel("cond_else");
     std::string endLabel  = newLabel("cond_end");
@@ -2137,6 +2343,11 @@ void CodeGen::visit(MemberExpr& expr) {
                 // ★ 走 movq 取值会把子对象头 8 字节当指针解引用 ⇒ 段错误（踩坑史 C5）。
                 // 对照 clang：链式访问折叠为常量总偏移（GEP 求和），
                 // minicc 教学版保留逐层 leaq，便于观察每一跳。
+                if (field->type && field->type->isArray()) {
+                    emit(std::format("leaq {}(%rax), %rax    # 数组字段 .{} 取首地址（偏移 +{}）",
+                        field->offset, expr.memberName, field->offset));
+                    return;
+                }
                 if (field->type && field->type->isClass()) {
                     emit(std::format("leaq {}(%rax), %rax    # 嵌套类字段 .{} 取地址（子对象偏移 +{}）",
                         field->offset, expr.memberName, field->offset));
@@ -2175,10 +2386,44 @@ void CodeGen::visit(MemberExpr& expr) {
 //       leaq -24(%rbp),%rax / pushq %rax / movq -16(%rbp),%rax / pushq %rax /
 //       popq %rsi / popq %rdi / callq Vector_at_1
 void CodeGen::visit(IndexExpr& expr) {
+    TypePtr objType = expr.object->resolvedType;
+    if (objType && objType->isReference()) objType = objType->referencedType;
+    bool isRaw = objType && (objType->isArray() || objType->isPointer());
+
+    if (isRaw) {
+        emitComment("raw array/pointer subscript a[i]");
+        emitExpr(expr.object);
+        emit("pushq %rax                  # 暂存基址");
+        emitExpr(expr.index);
+        emit("popq %rcx                   # 弹出基址到 rcx");
+        TypePtr elemType = objType->isArray() ? objType->elementType : objType->pointeeType;
+        uint32_t elemSize = elemType ? elemType->sizeInBytes() : 8;
+        if (elemSize == 1) {
+            emit("leaq (%rcx, %rax, 1), %rcx");
+        } else if (elemSize == 2) {
+            emit("leaq (%rcx, %rax, 2), %rcx");
+        } else if (elemSize == 4) {
+            emit("leaq (%rcx, %rax, 4), %rcx");
+        } else if (elemSize == 8) {
+            emit("leaq (%rcx, %rax, 8), %rcx");
+        } else {
+            emit(std::format("imulq ${}, %rax", elemSize));
+            emit("addq %rax, %rcx");
+        }
+        if (elemSize <= 1) {
+            emit("movzbq (%rcx), %rax         # 按 1 字节读 + 零扩展");
+        } else if (elemSize <= 4) {
+            emit("movl (%rcx), %eax           # 按 4 字节读");
+        } else {
+            emit("movq (%rcx), %rax           # 按 8 字节读");
+        }
+        return;
+    }
+
     emitComment("subscript v[i] → desugar to v.at(i)");
 
     // 容器类名：resolvedType 由语义阶段填充（指针容器先解引用一层）
-    TypePtr objType = expr.object->resolvedType;
+    objType = expr.object->resolvedType;
     if (objType && objType->isPointer()) {
         objType = objType->pointeeType;
     }

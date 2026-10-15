@@ -589,6 +589,12 @@ mycompiler/
 │   ├── test_tmpl_61..63_*.cpp      # NTTP 类型域：整型家族 / 字面量进制后缀 / 字符字面量
 │   ├── test_tmpl_64..67_*.cpp      # 值位整型转换正例（回归 B17）+ 三条窄化负例
 │   ├── test_tmpl_68_*.cpp          # template<auto V>：形态即类型，各自成实例
+│   ├── test_tmpl_69..71_*.cpp      # 类模板里的成员模板 / static 说明符位置 / 负向 virtual
+│   ├── test_tmpl_72..73_*.cpp      # 具体引用形参 / 偏特化匹配里的引用类型位（回归 B28）
+│   ├── test_tmpl_74..75_*.cpp      # NTTP 常量表达式实参 Buf<2+2>（正 + 负向）
+│   ├── test_tmpl_76..77_*.cpp      # 常量变量作 NTTP 实参 Buf<k>（正 + constexpr 负向）
+│   ├── flow/                       # for/break/continue/三元（主线 C 首批）+ switch/do-while/逗号（二批）+ switch/do-while/逗号（二批）
+│   ├── fold/                       # 常量折叠（主线 D 首批）+ constexpr/常量传播（二批）
 │   └── unit/                       # 单元测试（ctest 驱动）
 │       ├── test_template_deduction.cpp  # 推导 / 替换 / 偏特化匹配 / NTTP
 │       ├── test_decltype_sfinae.cpp     # Decltype.* / Sfinae.* / PartialOrder.* / SfinaeProtocol.*
@@ -743,10 +749,18 @@ MyClass::foo(int)   → _ZN7MyClass3fooEi (类方法)
 - [x] 模板多参数：`template<typename T, typename U>`
 - [x] **非类型模板参数（NTTP）**：`template<int N>` + `Buf<4>`，含类型/值混排
       `template<class T, int N>`、负数实参 `Buf<-3>`、形态校验与 ITanium
-      `L...E` 编码（文档 docs/learn/18）
+      `L...E` 编码（文档 docs/learn/18）；**常量表达式实参** `Buf<2+2>`
+      （Parser 存树 → Sema 折叠求值归一，文档 docs/learn/39）
 - [x] 模板类型：T\*, T\*\*, T&, T&&, const T&
 - [x] 引用折叠（Reference Collapsing）
-- [x] 控制流：if/else, while, **for, break, continue, 三元 ?:**（主线 C 首批，文档 docs/learn/38）
+- [x] 控制流：if/else, while, **for, break, continue, 三元 ?:**（主线 C 首批，文档 docs/learn/38）；
+      **switch / case / default / do-while / 逗号表达式**（主线 C 二批，文档 docs/learn/41）
+- [x] **常量折叠**：全字面量表达式树 Sema 层折成单字面量（`[fold]` 日志），
+      恒定条件三元 = 死分支消除；除零/含变量不折（主线 D 首批，文档 docs/learn/39）
+- [x] **constexpr 与常量传播**：const/constexpr 整型变量登记编译期常量表，
+      表达式里命中即替换成字面量（`int x = c * 2;` ⇒ 8）；constexpr 初始化式
+      不可常量求值时报错（与 clang 逐字同）；`Buf<k>` 常量变量作 NTTP 实参
+      （主线 D 二批，文档 docs/learn/40）
 - [x] 算术/逻辑/比较运算符
 - [x] 成员访问（. 和 ->）
 - [x] Name Mangling（GCC ABI 风格）
