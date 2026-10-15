@@ -14,6 +14,13 @@ ministl 用宿主编译器（GCC/Clang）写 → 跑通测试 → 成为 minicc 
                           minicc 能编译它 → 说明 minicc 支持了这些语言特性
 ```
 
+**现状（2026-10）**：飞轮第二段尚未闭合。用 `./minicc` 编译 `map.h` 探针，
+第一堵墙是系统头依赖链：`<cstddef>` → `<initializer_list>` / `<stdexcept>` →
+`<type_traits>`（ministl 的 traits 是有意转发 `std::` 的）。即使垫桩过预处理，
+`initializer_list` 文法、`throw`、`<utility>` 转发等还是 parser/语义层的真缺口。
+路线图（第一步 ✅ 已完成）：minicc 预定义 `__MINICC__`（[cpp.predefined] 扩展，
+docs/learn/37）→ 由 ministl 侧按 `__MINICC__` 分支提供自供桩头，逐层闭合。
+
 测试用 GoogleTest，与仓库里 `tests/unit/` 同一套约定（`FetchContent` 拉 v1.14.0，
 `gtest_discover_tests` 注册）。代价是 minicc 暂时吃不下这些测试——它连 GTest 的头文件
 都过不了，飞轮的第二段要等它追上来才能闭合。这个取舍是明确选的：
@@ -24,12 +31,15 @@ ministl 用宿主编译器（GCC/Clang）写 → 跑通测试 → 成为 minicc 
 | 文件 | 内容 |
 |---|---|
 | `type_traits.h` | 转发 `std::` 的 traits + 自研 `is_memmovable` |
-| `utility.h` | move / forward / move_if_noexcept / pair / index_sequence |
+| `utility.h` | move / forward / move_if_noexcept / pair / index_sequence / less 等仿函数 |
 | `iterator.h` | 五个迭代器标签、`iterator_adaptor`(CRTP)、reverse/back/insert 迭代器 |
 | `memory.h` | allocator、`uninitialized_*`、unique_ptr、shared_ptr、weak_ptr、make_shared |
+| `detail/rb_tree.h` | 红黑树核心（哨兵节点 + CLRS 旋转/插入/删除修复，移植 libc++ `__tree`） |
 | `vector.h` | 三指针 + EBO 的动态数组 |
 | `list.h` | 哨兵节点的双向链表 |
 | `unordered_map.h` | 链地址法哈希表 |
+| `map.h` | 有序映射（`rb_tree` 适配器：pair 取 `.first` 当键） |
+| `set.h` | 有序唯一键集合（`rb_tree` 适配器：键即值，只读迭代器） |
 | `hash.h` | MurmurHash3 混合器 + FNV-1a + 各类型特化 |
 | `algorithm.h` | copy/find/sort/lower_bound/is_sorted 等 |
 | `ranges.h` | 惰性视图与管道组合 |
@@ -101,6 +111,45 @@ using view_storage_t =
 **不会向上递归**。闭包类型都定义在 `ministl::ranges::views`，
 所以 `operator|` 放在外层 `ministl::ranges` 里是找不到的——这是第一版编译失败的原因。
 
+### map：哨兵节点与删除修正的"重新选边"
+
+红黑树不用 `nullptr` 当 end()，而是放一个哨兵节点 `end_`：
+`end_.right` 存根、`end_.parent` 缓存最左节点（即 `begin()`）、
+`end_.left` 缓存最右节点。好处是 `begin()/end()` 全是 O(1)，
+且最左节点上溯时天然停在哨兵上，`++` 到头自然等于 `end()`，
+不需要任何"根的特殊情况"分支。这与 libc++ `__tree` 的布局一致。
+
+删除修正（黑节点被移除后的双重黑消解）最容易写错的点是**情形 2 的 fall-through**：
+兄弟染红、双重黑上推给父节点之后，若父节点仍是黑，下一轮处理的"兄弟"在
+**另一侧**（方向可能翻转）。旧实现顺着往下走进了为旧方向写的情形 3/4，
+树当场损坏——5000 随机操作对拍时表现为"父链断在黑高错乱的节点上"。
+修法是照 libc++ 的结构：循环头**每次重新选边**（`w = is_left_child(x) ? ... : ...`），
+情形 2 结尾无条件 `continue`，情形 3/4 收敛在 `else` 里以 `break` 结束。
+
+### `detail/rb_tree.h`：一棵树，两个适配器
+
+libc++ 的分层是 `__tree`（裸树 + 哨兵）→ `map`/`set`/`multiset`（适配器）。
+照抄这个分层后，新增一个有序容器 = 写键萃取器 + 转发接口。树核心只认三样：
+
+```text
+rb_tree<Key, T, KeyOf, Compare>
+              │     │      └─ 键比较器（树内所有比较都发生在 Key 域）
+              │     └─ 存储类型：map 存 pair<const K,V>，set 存 K
+              └─ 键萃取：KeyOf::get(const T&) → const Key&
+```
+
+map 的 `first_of_value::get` 取 `.first`，set 的 `identity_key::get` 原样返回——
+`set.h` 的全部树相关代码就这一行。两个适配器差异只剩接口语义：
+`map` 有 `operator[]`（键不存在先默认构造填进去）与 `at`（越界抛异常），
+`set` 的迭代器是只读的（改键会破坏排序不变量，`iterator` 与
+`const_iterator` 同为 const 版）。
+
+键萃取用**静态成员函数**而非 `operator()`——minicc 尚未支持重载调用运算符，
+这是双栖（宿主可编译 / minicc 可解释）约束下的取舍。迭代器的
+可变→只读转换用 C++20 `requires` 约束（const 性挂在 pointee 上，
+`remove_const` 必须先剥指针——直接比 `Ptr` 类型会撞
+`remove_const_t<const int*> == const int*` 这个经典坑）。
+
 ## 构建与测试
 
 ```bash
@@ -118,7 +167,7 @@ ctest --test-dir build -R Ranges --output-on-failure   # 只跑 Ranges.*
 ```
 
 在 CLion 里：Reload CMake 后每个 `TEST()` 左侧出现绿色三角，点击即单跑该用例；
-底部 Test 面板树状查看全部 55 个用例的通过/失败。
+底部 Test 面板树状查看全部 89 个用例的通过/失败。
 
 验证内存正确性（建议每次改动后都跑）：
 
@@ -128,8 +177,14 @@ cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
 cmake --build build-asan -j && ctest --test-dir build-asan
 ```
 
-当前状态：5 个测试文件、55 个用例、233 处断言，GCC 10 / Clang 18 双编译器通过，
+当前状态：7 个测试文件、89 个用例、337 处断言，GCC 10 / Clang 18 双编译器通过，
 ASan + UBSan 无告警。
+
+`map.h` 与 `set.h` 的交叉核对用例（`Map.CrossCheckAgainstStdMap` /
+`Set.CrossCheckAgainstStdSet`）各用 mt19937 生成 5000 个随机插入/删除/查找
+操作，与 `std::map` / `std::set` 逐键对拍——任何一次旋转/染色写错，
+对拍必然失配。删除修正的 fall-through bug（情形 2 后方向翻转走错边）
+就是它对拍抓出来的（详见下文「map：哨兵节点与删除修正」一节）。
 
 ## 尚未实现
 

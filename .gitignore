@@ -36,3 +36,4 @@ compile_commands.json
 !/tests/**/*.s
 !/tests/**/*.md
 !/tests/**/*.h
+build-*/

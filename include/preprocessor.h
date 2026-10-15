@@ -71,6 +71,15 @@ public:
     // 观测接口：被成功并合的头文件数 / 当前宏表（供驱动打印统计信息）
     int includeCount() const { return m_includeCount; }
     const std::unordered_map<std::string, MacroDef>& macros() const { return m_macros; }
+    // 内建静态宏名单（构造时注入宏表）：[cpp.predefined] 的 minicc 扩展，
+    // 供头文件 `#ifdef __MINICC__` 走自供桩分支。统计"用户定义宏数"时剔除——
+    // 否则每个翻译单元的宏数统计都会 +1，漂移全部既有日志基线。
+    static bool isBuiltinMacro(const std::string& name) { return name == "__MINICC__"; }
+    int userMacroCount() const {
+        int n = 0;
+        for (auto& [k, _] : m_macros) { if (!isBuiltinMacro(k)) n++; }
+        return n;
+    }
 
 private:
     // 白盒单元测试桩（见 tests/unit/test_preprocessor.cpp）：授权测试直接调用

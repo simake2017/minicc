@@ -19,6 +19,8 @@
 #include "vector.h"        // 动态数组（连续存储，迭代器即裸指针）
 #include "list.h"          // 双向链表（哨兵节点，O(1) 插入删除）
 #include "unordered_map.h" // 哈希表（链地址法 + 质数桶）
+#include "map.h"           // 红黑树有序映射（detail/rb_tree 适配器）
+#include "set.h"           // 红黑树有序集合（detail/rb_tree 适配器）
 
 // ── 算法与视图 ──
 #include "algorithm.h"     // sort / find / copy / transform ...

@@ -475,3 +475,45 @@ TEST(LexUtils, Trim) {
     auto out = PreprocessorTestPeer::trim(in);
     showAndExpectEq("trim", in, out, "x");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 套件 BuiltinMacro：[cpp.predefined] 扩展 __MINICC__（静态内建宏）
+// → clang 对照：lib/Lex/Preprocessor.cpp InitPreprocessor 注册 _GNUC_ 等
+//   内建宏；本实现收在 Preprocessor 构造函数（值恒为 1，故进宏表而非
+//   像 __LINE__/__FILE__ 那样就地生成）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 20. 构造即注入：宏表里有 __MINICC__，对象形态，体为 "1"
+TEST(BuiltinMacro, InjectedAtConstruction) {
+    Preprocessor pp;
+    auto it = pp.macros().find("__MINICC__");
+    ASSERT_NE(it, pp.macros().end()) << "构造函数必须注入 __MINICC__";
+    EXPECT_FALSE(it->second.functionLike);
+    EXPECT_EQ(it->second.body, "1");
+}
+
+// 21. 用户宏统计剔除内建：空翻译单元 0 个；#define 一个后恰为 1
+//     （main.cpp 统计行用 userMacroCount —— 否则全部既有日志基线 +1）
+TEST(BuiltinMacro, UserMacroCountExcludesBuiltin) {
+    Preprocessor pp;
+    EXPECT_EQ(pp.userMacroCount(), 0);
+    PreprocessorTestPeer::processText(pp, "#define USER_MACRO 42\n");
+    EXPECT_EQ(pp.userMacroCount(), 1);
+}
+
+// 22. #ifdef 分支可达（processText 总循环走条件栈）
+TEST(BuiltinMacro, IfdefBranchTaken) {
+    Preprocessor pp;
+    std::string out = PreprocessorTestPeer::processText(
+        pp, "#ifdef __MINICC__\nint ok;\n#else\nint bad;\n#endif\n");
+    EXPECT_NE(out.find("int ok;"), std::string::npos);
+    EXPECT_EQ(out.find("int bad;"), std::string::npos);
+}
+
+// 23. #if 值求值：先宏展开成 1 再参与比较（evalConstantExpr 第②步）
+TEST(BuiltinMacro, ValueInIfExpression) {
+    Preprocessor pp;
+    std::string out = PreprocessorTestPeer::processText(
+        pp, "#if __MINICC__ >= 1\nint ok;\n#endif\n");
+    EXPECT_NE(out.find("int ok;"), std::string::npos);
+}

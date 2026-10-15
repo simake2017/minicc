@@ -757,7 +757,7 @@ MyClass::foo(int)   → _ZN7MyClass3fooEi (类方法)
 - [x] 函数模板隐式实例化：调用点驱动、mangled 符号（_Z5twiceIiE）、实例缓存、实例体二次语义分析（S5，文档 docs/learn/05）
 - [x] 重载决议：非模板优先 + deduction-based 偏序选最特化（S6，文档 docs/learn/06）
 - [x] 隐式转换：左值到右值（引用剥除，[conv.lval]）、int→double 提升（[conv.promo]）
-- [x] 预处理器：`#include "..."`/`<...>` 搜索路径、`#define` 对象宏/函数宏（递归展开+涂蓝）、`#ifdef/#if/#elif/#else/#endif`、`#pragma once`、`__LINE__/__FILE__`、`-E` 选项（P0，文档 docs/learn/07）
+- [x] 预处理器：`#include "..."`/`<...>` 搜索路径、`#define` 对象宏/函数宏（递归展开+涂蓝）、`#ifdef/#if/#elif/#else/#endif`、`#pragma once`、`__LINE__/__FILE__`、内建静态宏 `__MINICC__`（[cpp.predefined] 扩展，闭合 ministl 双栖桩分支）、`-E` 选项（P0，文档 docs/learn/07、37）
 - [x] 类模板特化：`struct` 写模板体、默认模板实参、偏特化、全特化、三路择优（文档 docs/learn/19）
 - [x] **decltype**：`decltype(e)` 两套规则（声明类型 / 表达式类型+左值引用）、
       依赖上下文的延迟求值、`decltype(&a)` 取地址（文档 docs/learn/20）

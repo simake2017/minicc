@@ -126,7 +126,14 @@ std::string Preprocessor::readFileContents(const std::string& path) const {
 
 // ── 入口 ─────────────────────────────────────────────────────────────────
 // 保存 -I 搜索目录等选项；宏表、pragma once 集合、include 栈初始为空。
-Preprocessor::Preprocessor(PreprocessorOptions opts) : m_opts(std::move(opts)) {}
+Preprocessor::Preprocessor(PreprocessorOptions opts) : m_opts(std::move(opts)) {
+    // 内建静态宏 __MINICC__（[cpp.predefined] 的 minicc 扩展）：值恒为 1、
+    // 不随展开位置变化（与 __LINE__/__FILE__ 那对"动态宏"不同），故直接进宏表——
+    // #ifdef 走 m_macros.count，#if __MINICC__ 走 evalConstantExpr 第②步的宏展开。
+    // 用途：让 ministl 这类"宿主可编译、目标 minicc 可解释"的双栖头文件按编译器分支。
+    MacroDef minicc{"__MINICC__", {}, "1", false};
+    m_macros[minicc.name] = minicc;
+}
 
 // 预处理总入口（main.cpp "阶段 0" 的唯一调用点）。
 // 先把主文件的 canonical 路径压入 include 栈 —— 主文件自身也受循环检测保护：

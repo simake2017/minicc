@@ -420,6 +420,55 @@ docs/learn/17 §2 Bug 5；单测 266 → **272** / 集成 116 → **118**。
 边界表）；BUGS.md B21/B24/B25 转 ✅ + 新增 B26/B27。
 全量 272 → **276** 单测 / 118 → **123** 集成测试；既有用例**逐字节零漂移**。
 
+✅ **ministl::map（红黑树）已完成（STL 覆盖第 1 轮）** ——
+起点问题："ministl 对各种常用容器都有支持吗，希望有基础实现源码、也能从 minicc 去解释"。
+盘点现状：vector/list/智能指针/function/algorithm/ranges 已有，缺 map/string/set。
+本轮实现 `ministl::map`：红黑树全移植 libc++ `__tree` 算法（哨兵节点布局：
+`end_.right`=根、`end_.parent`=最左、`end_.left`=最右；CLRS 旋转/插入染色/删除修正）。
+★ 删除修正抓到一个真 bug：情形 2（两侄黑、双重黑上推）之后**方向可能翻转**，
+旧实现 fall-through 走进为旧方向写的情形 3/4 ⇒ 树损坏；修法照 libc++ 结构：
+循环头每次**重新选边**，情形 2 无条件 `continue`，3/4 收敛在 else 里 break。
+`Map.CrossCheckAgainstStdMap`：mt19937 生成 5000 随机插入/删除/operator[] 与
+`std::map` 逐键对拍 + 红黑不变量校验（父链双向/黑高全树相等/无相邻红）。
+ministl 统计：6 文件 / 76 用例 / 292 断言，ASan+UBSan 全绿（新配 ministl/build-asan）。
+minicc 兼容性探针结论：第一堵墙是系统头链 `<cstddef>` → `<initializer_list>`/`<stdexcept>`
+→ `<type_traits>`（ministl traits 有意转发 std）；`initializer_list` 文法、`throw`
+是 parser/语义层真缺口，记入 ministl README「现状」路线图。
+
+✅ **内建静态宏 `__MINICC__` 已完成（飞轮第一块砖，docs/learn/37）** ——
+[cpp.predefined] 的 minicc 扩展：构造函数把 `MacroDef{"__MINICC__",{},"1"}` 注入宏表
+（静态宏，与 `__LINE__/__FILE__` 动态宏的就地生成不同路径），白得三条求值路径：
+`#ifdef` 查 count / `#if __MINICC__>=1` 经 evalConstantExpr 第②步宏展开 /
+`defined()` 第①步单独处理。★ 统计口径分层：`userMacroCount()` 剔除内建名单，
+否则每个 TU 的 `N macro(s) defined` 恒 +1、114 份日志基线全漂移。
+用途：ministl 双栖桩分支开关（`#ifdef __MINICC__` 走自供桩头，宿主编译器走系统
+标准库）——**桩头用引号 include 完整路径，不在 -I 目录造叫 `cstddef` 的文件**
+（会连 clang 一起劫持）。测试 tests/pp/test_pp_05_minicc_macro.cpp（三路求值 +
+运行期返回值钉值 + 宿主 #else 分支双栖可编译）+ 单测 `BuiltinMacro.*` 4 例
+（**突变验证：摘掉注入 ⇒ 3 例实跑变红**；统计口径例不含注入、保持绿属正确行为）。
+全量 323 → **327** 单测；既有集成用例**逐字节零漂移**，基线重刷（+1 新文件）。
+clang 对照：`InitPreprocessor` 注册一族版本/target 宏 → 本实现两行、值恒 1。
+
+✅ **ministl::set + 红黑树分层抽取已完成（STL 覆盖第 2 轮）** ——
+把 map.h 里的树核心抽成 `detail/rb_tree.h`（对齐 libc++ `__tree` 分层），
+`map` 重构为薄适配器、`set` 为新适配器。**没复制粘贴第二份删除修正**——
+那种"5000 步随机操作才炸一次"的代码存在两份就是两个 bug 温床。
+树核心 `rb_tree<Key, T, KeyOf, Compare>` 只认三样：存储类型 T、键域 Key、
+键萃取 KeyOf（`static const Key& get(const T&)` —— **静态成员函数而非
+operator()**，minicc 不支持重载调用运算符；这是双栖约束下的取舍）。
+set 适配器差异：值类型退成 Key、迭代器只读（iterator 与 const_iterator 同型，
+改键会破坏排序不变量——std 同款设计）。
+★ 踩了两个经典坑：① 迭代器可变→只读转换的 `requires` 约束里
+`remove_const_t<const int*>` 剥的是**指针顶层** const、pointee 的 const 纹丝不动
+（要先 `remove_pointer_t` 再 `remove_const_t`）；② set 的 iterator==const_iterator
+导致 erase 两个重载" class member cannot be redeclared"（只留收 const_iterator 一个）。
+map 重构零回退：16 用例全绿 + 5000 步对拍照旧。
+测试 ministl/tests/test_set.cpp 13 例（手工钉规则 + `Set.CrossCheckAgainstStdSet`
+5000 随机操作对拍 std::set + 逆序插入钉平衡）；ministl 规模 6 → **7 文件 /
+76 → 89 用例 / 292 → 337 断言**，ASan+UBSan 全绿；主项目 ctest 327 → **340**
+（+13 Set），既有集成日志**逐字节零漂移**，基线重刷。汇总头 ministl.h 补上
+map/set 两行（之前漏了）。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

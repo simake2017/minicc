@@ -559,7 +559,7 @@ int main(int argc, char* argv[]) {
         std::string preprocessed = preprocessor.processFile(inputFile);
 
         std::cout << std::format("  {} file(s) included, {} macro(s) defined\n",
-            preprocessor.includeCount(), preprocessor.macros().size());
+            preprocessor.includeCount(), preprocessor.userMacroCount());
 
         // -E 模式到此为止：预处理文本写到 -o 指定的文件；
         // 未指定 -o 时直接打印到 stdout（同 gcc -E 的行为）。
