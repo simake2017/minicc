@@ -2151,8 +2151,8 @@ StmtPtr Parser::parseStatement() {
         // 对照 clang：isDeclarationSpecifier 里 TryAnnotateTypeToken 会把
         //   `Cls<...>::member` 整体注解成一个类型 Token（ParseCXXScopeSpecifier
         //   之后的 nested-name-specifier 处理），教学版同样用"跳过后回滚"近似。
+        // ★ 注意：纯 `N::C;` 不设置 sawTypeIdSyntax，保留给 Sema 经符号表消歧（[stmt.ambig]）
         while (check(TokenType::ColonColon)) {
-            sawTypeIdSyntax = true;
             advance();  // 消费 '::'
             if (!check(TokenType::Identifier)) break;
             advance();  // 成员名

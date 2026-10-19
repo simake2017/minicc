@@ -3366,10 +3366,32 @@ void SemanticAnalyzer::visit(AssignStmt& stmt) {
 // 表达式语句：只求类型不求值 —— 值被丢弃，语句的意义在副作用（典型如 `foo();`）。
 // 推导本身会触发符号决议与类型检查。
 void SemanticAnalyzer::visit(ExprStmt& stmt) {
+    // ── [stmt.ambig] 语句级歧义消解 ──
+    // 裸标识符或限定名单独成行（如 `N::S;` / `Dog;` / `S::type;`）时，
+    // 语法上可能是无声明符的声明语句，也可能是变量表达式。
+    // Parser 无法区分，交由 Sema 查符号表权威裁决：
+    //   若是类型名/别名/类模板，判定为无声明符声明，折叠为空（不发射汇编）；
+    //   若是变量，维持表达式语句，正常走类型推导与求值。
+    if (stmt.expr && stmt.expr->kind == NodeKind::Var) {
+        auto& var = static_cast<VarExpr&>(*stmt.expr);
+        Symbol* sym = m_symbolTable.lookup(var.name);
+        if (!sym && !m_currentNamespace.empty()) {
+            sym = m_symbolTable.lookup(m_currentNamespace + "::" + var.name);
+        }
+        if ((sym && sym->kind == SymbolKind::Type) ||
+            m_classTemplates.count(var.name) ||
+            m_aliasTemplates.count(var.name)) {
+            stmt.expr = nullptr;
+            return;
+        }
+    }
+
     stmt.expr = m_constantFolder.fold(std::move(stmt.expr));
-    m_inferDepth++;
-    inferType(stmt.expr);
-    m_inferDepth--;
+    if (stmt.expr) {
+        m_inferDepth++;
+        inferType(stmt.expr);
+        m_inferDepth--;
+    }
 }
 
 // ═══ 表达式类型推导 (inferType) —— 符号决议的核心 ═════════════════════════════
