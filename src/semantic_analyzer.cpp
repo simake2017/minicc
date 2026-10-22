@@ -395,15 +395,24 @@ TypePtr SemanticAnalyzer::deduceClassTemplateArgs(const VarDeclStmt& decl) {
     if (!m_classTemplates.count(t->name)) return t;
     if (decl.ctorArgs.empty()) return t;
 
-    TemplateDeclPtr primary = m_classTemplates[t->name];
-
     // ── 实参类型 ──
     std::vector<TypePtr> argTypes;
     for (auto& a : decl.ctorArgs) {
         argTypes.push_back(inferType(a));
     }
+    return deduceCtadCore(t, argTypes, decl.name);
+}
 
-    std::cout << std::format("  [ctad] ▶ {} {}(", decl.name, t->name);
+// CTAD 核心（语句级与表达式级 `Box(7)` 构造共用，[dcl.type.class.deduct]）：
+// 两条来源：① 用户写的推导指引 ② 构造函数的隐式指引（拿每个构造函数的形参表当
+// "指引形参表"，与函数模板推导同一套合一算法）。推导失败原样返回 t（调用方按
+// 原路径继续，该报的错照报）；dbgName 仅供 [ctad] 日志冠名。
+TypePtr SemanticAnalyzer::deduceCtadCore(TypePtr t,
+                                         const std::vector<TypePtr>& argTypes,
+                                         const std::string& dbgName) {
+    TemplateDeclPtr primary = m_classTemplates[t->name];
+
+    std::cout << std::format("  [ctad] ▶ {} {}(", dbgName, t->name);
     for (size_t i = 0; i < argTypes.size(); i++) {
         if (i > 0) std::cout << ", ";
         std::cout << (argTypes[i] ? argTypes[i]->toString() : "?");
@@ -1599,15 +1608,30 @@ void SemanticAnalyzer::processNamespaceDecl(NamespaceDeclPtr decl) {
 }
 
 void SemanticAnalyzer::processTypeAliasDecl(TypeAliasDeclPtr decl) {
+    // ── ★ 别名目标必须【当场解析】（注册即实例化）──
+    // 反例：`using IntBox = Box<int>;` 曾把【未实例化】的模板 id 原样存进符号表，
+    //   `IntBox b; b.v` 对着蓝图名 "Box" 查字段 ⇒ "No member 'v' in class 'Box'"
+    //   （合法程序被拒，目标该是实例 Box_int）。这里过一遍 resolveType，
+    //   模板 id 在此实例化、别名模板在此解糖，之后所有使用点拿到的都是成品类型。
+    // 对照 clang：TypedefNameDecl 的底层类型在声明点就完成
+    //   Sema::getTypeName / BuildTypedefNameExpr 的决议。
+    TypePtr resolved = resolveType(decl->underlyingType);
+
+    // ── 命名空间成员【名字前缀化】（与类/函数同约定，processNamespaceDecl）──
+    // 曾用裸名注册 ⇒ 类外 `N::IntBox` 查无此名（unknown type name）。
+    std::string fullName = m_currentNamespace.empty()
+        ? decl->aliasName
+        : m_currentNamespace + "::" + decl->aliasName;
+
     Symbol sym;
-    sym.name = decl->aliasName;
-    sym.type = decl->underlyingType;
+    sym.name = fullName;
+    sym.type = resolved;
     sym.kind = SymbolKind::Type;
     sym.isLocal = false;
     sym.definedAt = decl->location;
-    m_symbolTable.globalScope()->define(decl->aliasName, sym);
+    m_symbolTable.globalScope()->define(fullName, sym);
     std::cout << std::format("  [register] type alias '{}' = {}\n",
-        decl->aliasName, decl->underlyingType ? decl->underlyingType->toString() : "?");
+        fullName, resolved ? resolved->toString() : "?");
 }
 
 // ─── 成员方法符号名的【单点】判据（BUGS.md B20）──────────────────────────────
@@ -3050,6 +3074,49 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
                 }
             }
         }
+
+        // ── 表达式级构造调用升级：`Box<int> b = Box<int>(7);` / `auto b = Box<int>(7);` ──
+        // inferType 已把 RHS 判成构造调用（isCtorCall）。拷贝初始化语境里临时对象是
+        // 纯浪费 —— 直接升级成【直接初始化】：构造进 b 的槽（拷贝省略，
+        // [class.copy.elision] 允许且 clang 默认这么做），临时对象永不物化。
+        // ★ 放在 if/else 之外：auto 变量 `auto b = Box<int>(7);` 反推完类型后
+        //   同样要升级，否则 CodeGen 走"默认构造"分支发不存在的 0 参符号。
+        if (type->isClass() && decl.initializer->kind == NodeKind::Call) {
+            auto ce = std::static_pointer_cast<CallExpr>(decl.initializer);
+            if (ce->isCtorCall) {
+                if (!ce->ctorClassType->equals(type)) {
+                    error(std::format(
+                        "Type mismatch in '{}': declared '{}', got '{}'",
+                        decl.name, type->toString(),
+                        ce->ctorClassType->toString()),
+                        decl.location);
+                }
+                decl.ctorArgs = ce->arguments;
+                decl.ctorSymbol =
+                    std::static_pointer_cast<VarExpr>(ce->callee)->name;
+                decl.initializer = nullptr;
+                std::cout << std::format(
+                    "  [ctor] ★ {} : {}({} 个实参) ⇒ 升级直接初始化（拷贝省略），构造符号 {}\n",
+                    decl.name, type->toString(), decl.ctorArgs.size(),
+                    decl.ctorSymbol);
+            }
+        }
+        // ── 平凡拷贝初始化：`Box<int> b = a;`（init 是同类左值）──
+        // 用户没写拷贝构造 ⇒ 编译器合成的那个语义就是逐字节复制。旧行为：掉到
+        // "无初始化的类声明"，CodeGen 发默认构造调用 —— 符号根本不存在，
+        // 链接期 undefined reference 'Box_int_Box_int'（编译期全绿的错配）。
+        // 此处改判平凡拷贝：CodeGen 按布局发 memcpy。
+        // ★ init 限 Var/Member：函数返回同类对象（`Box<int> b = f();`）不涉及。
+        // ★ 同样放在 if/else 之外：auto 变量 `auto b = a;` 反推成同类后走此分支。
+        else if (type->isClass() && initType && initType->isClass()
+                 && type->equals(initType)
+                 && (decl.initializer->kind == NodeKind::Var
+                     || decl.initializer->kind == NodeKind::Member)) {
+            decl.isTrivialCopy = true;
+            std::cout << std::format(
+                "  [ctor] ★ {} : {} = {} ⇒ 平凡拷贝（无用户拷贝构造，按布局 memcpy）\n",
+                decl.name, type->toString(), initType->toString());
+        }
     } else if (containsAuto(type)) {
         // 含占位符但无初始化式（`const auto x;` 同样要拦）
         error(std::format("auto variable '{}' must have an initializer", decl.name),
@@ -3361,6 +3428,16 @@ void SemanticAnalyzer::visit(AssignStmt& stmt) {
     std::cout << std::format("  [assign] {} ⟵ {} \n",
         targetType ? targetType->toString() : "?",
         valueType ? valueType->toString() : "?");
+
+    // ── 类实例赋值标记：`b = a;` / `b = Box<int>(9);` ──
+    // 本语言没有 operator=：合成的赋值语义就是逐字节复制。由 Sema 判定回填
+    // （判据单点），CodeGen 的 visit(AssignStmt) 据此走 memcpy 路径 —— 旧行为把
+    // 它当标量赋值只写 8 字节，类对象赋值静默算错（如 Box<int> b(1); b = a; 得 64）。
+    if (targetType && valueType && targetType->isClass()
+        && targetType->equals(valueType)) {
+        stmt.isClassAssign = true;
+        stmt.assignClassType = targetType;
+    }
 }
 
 // 表达式语句：只求类型不求值 —— 值被丢弃，语句的意义在副作用（典型如 `foo();`）。
@@ -4066,6 +4143,76 @@ TypePtr SemanticAnalyzer::inferCall(CallExpr& expr) {
     //   ② 形参类型与实参类型【逐位精确相等】者优先（剥引用/顶层 const 后比）③ 无精确匹配
     //   时退回"按个数命中"。真重载决议还要算隐式转换序列的 rank。
     // 对照 clang：LookupResult 收集普通查找与 ADL 两批候选后交 OverloadCandidateSet 排序。
+
+    // ── 类模板构造调用：`Box<int>(7)` / `Box(7)`（表达式级临时对象构造）────────
+    // Parser 已把它解析成普通 CallExpr（callee = 带显式实参表的 VarExpr）。走到这里
+    // 名字命中【类模板/别名模板】注册表 ⇒ 这不是函数调用，是"构造一个临时对象"：
+    //   ① 有显式实参 ⇒ resolveType 实例化（别名模板则解糖）；裸名 ⇒ CTAD 推导
+    //   ② 按实参类型选构造函数 —— 与语句级直接初始化【同一择优原语】pickBestByArgs
+    //   ③ 打 isCtorCall 标记 + ctorClassType 实例类型，callee 名字回填构造符号
+    // 返回实例类型；CodeGen emitCall 据此走"物化临时对象"路径（表达式的值=对象地址）。
+    // 此前没有这支：一路漏到兜底被 inferVar 以 "Undefined variable 'Box'" 拒掉
+    // —— Box 明明存在（是类模板），报错完全指错方向。
+    // 对照 clang：ParseCXXFunctionalCastExpression → Sema::BuildCXXConstructExpr
+    //   （初始化式语境走 CopyInitialization，表达式语境走 explicit 构造）。
+    if (calleeVar) {
+        std::string tplName = funcName;
+        if (!m_classTemplates.count(tplName) && !m_aliasTemplates.count(tplName)
+            && !m_currentNamespace.empty()) {
+            std::string qualified = m_currentNamespace + "::" + funcName;
+            if (m_classTemplates.count(qualified) || m_aliasTemplates.count(qualified)) {
+                tplName = qualified;
+            }
+        }
+        if (m_classTemplates.count(tplName) || m_aliasTemplates.count(tplName)) {
+            // 显式实参逐个解析：类型实参递归 resolveType，NTTP 值实参原样带过
+            // （类模板支持 NTTP —— `Buf<4>(...)`，与函数模板路径"见值即拒"不同）。
+            std::vector<TemplateArg> targs;
+            targs.reserve(calleeVar->explicitTemplateArgs.size());
+            for (auto& a : calleeVar->explicitTemplateArgs) {
+                targs.push_back(a.isType() && a.type
+                    ? TemplateArg::ofType(resolveType(a.type)) : a);
+            }
+            TypePtr tid = Type::makeClass(tplName);
+            tid->templateArgs = std::move(targs);
+            // 裸模板名 + 实参表 ⇒ CTAD；否则实例化/解糖。别名解糖的产物可能还是
+            // 模板 id，再过一次 resolveType 落地（与 learn/27 的"替换≠实例化"同款）。
+            TypePtr instType = tid->templateArgs.empty()
+                ? deduceCtadCore(tid, argTypes, funcName)
+                : resolveType(tid);
+            instType = resolveType(instType);
+            if (!instType || !instType->isClass()) {
+                error(std::format(
+                    "construction target '{}' is not a class type",
+                    instType ? instType->toString() : "?"), expr.location);
+            }
+            auto cit = m_classDecls.find(instType->name);
+            if (cit != m_classDecls.end()) {
+                std::vector<FuncDeclPtr> ctors;
+                for (auto& method : cit->second->methods) {
+                    if (method->kind != NodeKind::Constructor) continue;
+                    if (method->parameters.size() != argTypes.size()) continue;
+                    ctors.push_back(method);
+                }
+                if (auto best = pickBestByArgs(ctors, argTypes,
+                        std::format("ctor-expr {}({} args)",
+                            instType->toString(), argTypes.size()))) {
+                    expr.isCtorCall = true;
+                    expr.ctorClassType = instType;
+                    calleeVar->name = best->mangledName;  // CodeGen callq 目标
+                    std::cout << std::format(
+                        "{}[ctor-expr] ★ {}({} args) ⇒ 选定构造函数符号 {}    [临时对象构造]\n",
+                        inferIndent(), instType->toString(), argTypes.size(),
+                        best->mangledName);
+                    return instType;
+                }
+            }
+            error(std::format(
+                "no matching constructor for '{}' with {} argument(s)",
+                instType->toString(), argTypes.size()), expr.location);
+        }
+    }
+
     auto it = m_functionMap.find(funcName);
 
     // ── ① 关联命名空间：从实参类型反推（[basic.lookup.argdep]/2）──

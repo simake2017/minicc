@@ -529,6 +529,10 @@ private:
     //   则原样返回输入类型（调用方按原路径继续，该报的错照报）。
     // 两条来源：① 用户写的推导指引 ② 构造函数的隐式指引（算法见实现处注释）。
     TypePtr deduceClassTemplateArgs(const VarDeclStmt& decl);
+    // CTAD 核心：与语句形态共用（表达式级 `Box(7)` 构造走同一套推导），
+    // 输入裸模板名类型 + 已推好的实参类型表；dbgName 仅用于 [ctad] 日志冠名。
+    TypePtr deduceCtadCore(TypePtr t, const std::vector<TypePtr>& argTypes,
+                           const std::string& dbgName);
     // 登记一条推导指引（模板形态由 processTemplateDecl 调用，独立形态由 processDecl 调用）。
     void registerDeductionGuide(const std::shared_ptr<struct DeductionGuideDecl>& g);
     // 把替换表套用到类型上（推导指引的 `-> X<T>` 右侧用）。

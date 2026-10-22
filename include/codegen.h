@@ -111,6 +111,28 @@ private:
     // 天然支持嵌套块——与符号表 enterScope/exitScope 同构。
     std::vector<std::vector<std::string>> m_blockDtorStack;
 
+    // ── 表达式级临时对象区（类模板构造调用 `Box<int>(7)` 的物化点）──
+    // 帧布局：序言槽 → 局部声明区 → 【临时区】（ estimateFrameSize 已预留）。
+    // m_tempBase = 帧主体字节数（estimateFrameBodyBytes），临时槽从它末尾向低地址接龙；
+    // allocTempSlot 与帧估算的 countCtorTempBytes 按【同一遍历序】计数 —— 发射序与
+    // 估算序必须一致，否则临时槽写穿帧底（CodegenFrame 单测的红线）。
+    int m_tempBase = 0;
+    uint32_t m_tempUsed = 0;
+    int allocTempSlot(uint32_t size);                 // 分配临时槽，返回 rbp 负偏移
+    // 临时对象析构的语境协作：赋值 RHS 的临时对象要先 memcpy 进 lhs 再析构，
+    // 故 visit(AssignStmt) 置 m_suppressTempDtor 期间 visit(CallExpr)【不】析构，
+    // 由赋值路径拷完后用 m_lastCtorTemp* 记录的信息补发。
+    int m_suppressTempDtor = 0;
+    int m_lastCtorTempOffset = 0;
+    std::string m_lastCtorTempClass;
+    // 类值的【取址】：类对象在表达式里没有"标量值"表示，按内存块传递，一律按地址。
+    // VarExpr 局部 → 栈槽；全局 → 标签；裸字段 → this+偏移；Member → 递归 + 字段偏移。
+    // 与 visit(MemberExpr) 的"子对象取址"约定同源（那边只管类字段这一步）。
+    void emitClassAddress(const ExprPtr& expr);
+    // 帧估算用：数出函数体里所有会被物化的构造调用（与发射端同序遍历）。
+    uint32_t countCtorTempBytes(std::shared_ptr<BlockStmt> block);
+    uint32_t countCtorTempBytesInExpr(const ExprPtr& expr);
+
     // 发射"调用 C 的析构函数"：rdi = leaq off(%rbp)（对象地址），按 vtable 有无定虚实。
     // 与 emitDelete 共享；块尾析构是它的"无 free"版（栈对象不经过 malloc）。
     void emitClassDtorCall(const std::string& className, int rbpOffset);
@@ -128,6 +150,9 @@ private:
     // "先数后减"一遍扫描。
     uint32_t estimateFrameSize(FuncDeclPtr func);
     uint32_t estimateBlockSize(std::shared_ptr<BlockStmt> block);
+    // 帧主体（局部声明 + 序言槽）字节数 —— 临时对象区从它末尾开始接龙，
+    // estimateFrameSize = 帧主体 + 临时区。拆出来是为了让发射端拿到临时区起点。
+    uint32_t estimateFrameBodyBytes(FuncDeclPtr func);
 
     // 多继承 upcast：从 derivedClassName 转为 baseClassName 时的偏移量。
     // 返回 0 表示主基类或无继承关系（无需调整）。

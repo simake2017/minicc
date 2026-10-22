@@ -483,6 +483,7 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
     m_arrayLocals.clear();
     m_blockDtorStack.clear();
     m_currentStackOffset = 0;
+    m_tempUsed = 0;            // 临时对象区：每函数重新接龙（槽位由 allocTempSlot 按序分配）
     m_currentClassName = func->ownerClassName;
 
     // 查找当前类类型
@@ -526,6 +527,10 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
     if (frameSize < 64) frameSize = 64;
     frameSize = (frameSize + 15) / 16 * 16;   // 16 字节对齐（System V）
     emit(std::format("subq ${}, %rsp              # 预留局部变量栈空间（16B 对齐）", frameSize));
+
+    // 临时对象区起点 = 帧主体末尾（局部声明区 + 序言槽之后），
+    // 构造调用的临时槽从这里的低地址侧接龙（estimateFrameSize 已为其预留字节）。
+    m_tempBase = static_cast<int>(estimateFrameBodyBytes(func));
 
     // 保存参数到栈上
     // System V 整数参数寄存器序列；第 7 个及以后的参数应经栈传递
@@ -979,7 +984,12 @@ uint32_t CodeGen::estimateBlockSize(std::shared_ptr<BlockStmt> block) {
 //   `pushq %rax` 与 `callq` 压入的返回地址踩掉（症状极具迷惑性，见踩坑史 C1）。
 // 对照 clang：PrologEpilogInserter / X86FrameLowering::determineFrameLayout ——
 //   帧大小是序言与局部布局【同一份】分配器的产物，不存在两处各算一份却对不上。
-uint32_t CodeGen::estimateFrameSize(FuncDeclPtr func) {
+// 帧主体 = 局部声明字节数 + 序言区（帧基 + 形参 spill 槽）。
+// demo: int f(int a, int b) { int x; } ⇒ 8B(帧基) + 16B(两形参槽) + 8B(x) = 32B
+// ★ 序言区【必须】计入：漏算会让最深的局部落到 rsp 之下，被表达式求值的
+//   `pushq %rax` 与 `callq` 压入的返回地址踩掉（症状极具迷惑性，见踩坑史 C1）。
+// 对照 clang：PrologEpilogInserter / X86FrameLowering::determineFrameLayout ——
+uint32_t CodeGen::estimateFrameBodyBytes(FuncDeclPtr func) {
     uint32_t total = estimateBlockSize(func->body);
 
     uint32_t slots = 1;                            // 帧基：paramOffset 从 -8 起
@@ -990,6 +1000,201 @@ uint32_t CodeGen::estimateFrameSize(FuncDeclPtr func) {
     }
     total += slots * 8;
     return total;
+}
+
+uint32_t CodeGen::estimateFrameSize(FuncDeclPtr func) {
+    // 帧主体之外再加【临时对象区】：表达式级构造调用（Box<int>(7)）物化的
+    // 临时对象占槽。数法与发射端 allocTempSlot 同序 —— 见 countCtorTempBytes。
+    return estimateFrameBodyBytes(func) + countCtorTempBytes(func->body);
+}
+
+// ── 临时对象区估算：数出函数体里所有会被物化的构造调用 ─────────────────────────
+// 必须与发射端【同一遍历序】（语句顺序 + 表达式自顶向下、自左向右），
+// allocTempSlot 按调用先后分配槽位，顺序不一致就写穿帧底。
+// 说明：VarDeclStmt 的 init 若是构造调用，Sema 已把它【升级成直接初始化】
+//   （构造进变量槽，临时对象永不物化）—— 所以这里只数 init 里【嵌套】的构造
+//   （ctorArgs 内部的）与赋值 RHS / 表达式语句 / 条件式等真正经 visit(CallExpr)
+//   物化的点。
+uint32_t CodeGen::countCtorTempBytes(std::shared_ptr<BlockStmt> block) {
+    if (!block) return 0;
+    uint32_t total = 0;
+    for (auto& stmt : block->statements) {
+        switch (stmt->kind) {
+            case NodeKind::VarDecl: {
+                auto v = std::static_pointer_cast<VarDeclStmt>(stmt);
+                for (auto& a : v->ctorArgs) {
+                    total += countCtorTempBytesInExpr(a);
+                }
+                break;
+            }
+            case NodeKind::Assign: {
+                auto s = std::static_pointer_cast<AssignStmt>(stmt);
+                total += countCtorTempBytesInExpr(s->value);
+                total += countCtorTempBytesInExpr(s->target);
+                break;
+            }
+            case NodeKind::ExprStmt: {
+                auto s = std::static_pointer_cast<ExprStmt>(stmt);
+                total += countCtorTempBytesInExpr(s->expr);
+                break;
+            }
+            case NodeKind::Return: {
+                auto s = std::static_pointer_cast<ReturnStmt>(stmt);
+                total += countCtorTempBytesInExpr(s->value);
+                break;
+            }
+            case NodeKind::Delete: {
+                auto s = std::static_pointer_cast<DeleteStmt>(stmt);
+                total += countCtorTempBytesInExpr(s->pointerExpr);
+                break;
+            }
+            case NodeKind::If: {
+                auto s = std::static_pointer_cast<IfStmt>(stmt);
+                total += countCtorTempBytesInExpr(s->condition);
+                if (s->thenBranch && s->thenBranch->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->thenBranch));
+                if (s->elseBranch && s->elseBranch->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->elseBranch));
+                break;
+            }
+            case NodeKind::While: {
+                auto s = std::static_pointer_cast<WhileStmt>(stmt);
+                total += countCtorTempBytesInExpr(s->condition);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::DoWhile: {
+                auto s = std::static_pointer_cast<DoWhileStmt>(stmt);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                total += countCtorTempBytesInExpr(s->condition);
+                break;
+            }
+            case NodeKind::For: {
+                auto s = std::static_pointer_cast<ForStmt>(stmt);
+                if (s->init && s->init->kind == NodeKind::Block) {
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->init));
+                } else if (s->init && s->init->kind == NodeKind::Assign) {
+                    auto a = std::static_pointer_cast<AssignStmt>(s->init);
+                    total += countCtorTempBytesInExpr(a->value);
+                    total += countCtorTempBytesInExpr(a->target);
+                }
+                total += countCtorTempBytesInExpr(s->condition);
+                // increment 是语句槽（本语言赋值是语句）：只展开赋值形态
+                if (s->increment && s->increment->kind == NodeKind::Assign) {
+                    auto a = std::static_pointer_cast<AssignStmt>(s->increment);
+                    total += countCtorTempBytesInExpr(a->value);
+                    total += countCtorTempBytesInExpr(a->target);
+                }
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Switch: {
+                auto s = std::static_pointer_cast<SwitchStmt>(stmt);
+                total += countCtorTempBytesInExpr(s->condition);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Case: {
+                auto s = std::static_pointer_cast<CaseStmt>(stmt);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Default: {
+                auto s = std::static_pointer_cast<DefaultStmt>(stmt);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Block:
+                total += countCtorTempBytes(std::static_pointer_cast<BlockStmt>(stmt));
+                break;
+            default:
+                break;
+        }
+    }
+    return total;
+}
+
+// 表达式子树里的构造调用计数（自顶向下、自左向右，与发射序一致）。
+// 构造调用自身先占槽（发射时 visit(CallExpr) 入口即分配），再递归其实参。
+uint32_t CodeGen::countCtorTempBytesInExpr(const ExprPtr& expr) {
+    if (!expr) return 0;
+    uint32_t total = 0;
+    switch (expr->kind) {
+        case NodeKind::Call: {
+            auto e = std::static_pointer_cast<CallExpr>(expr);
+            if (e->isCtorCall) {
+                uint32_t sz = 8;
+                if (m_classTypes) {
+                    auto cit = m_classTypes->find(e->ctorClassType->name);
+                    if (cit != m_classTypes->end()) {
+                        sz = cit->second->classLayout.totalSize;
+                    }
+                }
+                total += (sz + 7) / 8 * 8;
+            }
+            total += countCtorTempBytesInExpr(e->callee);
+            for (auto& a : e->arguments) total += countCtorTempBytesInExpr(a);
+            break;
+        }
+        case NodeKind::Binary: {
+            auto e = std::static_pointer_cast<BinaryExpr>(expr);
+            total += countCtorTempBytesInExpr(e->left);
+            total += countCtorTempBytesInExpr(e->right);
+            break;
+        }
+        case NodeKind::Unary: {
+            auto e = std::static_pointer_cast<UnaryExpr>(expr);
+            total += countCtorTempBytesInExpr(e->operand);
+            break;
+        }
+        case NodeKind::Conditional: {
+            auto e = std::static_pointer_cast<ConditionalExpr>(expr);
+            total += countCtorTempBytesInExpr(e->condition);
+            total += countCtorTempBytesInExpr(e->thenExpr);
+            total += countCtorTempBytesInExpr(e->elseExpr);
+            break;
+        }
+        case NodeKind::Comma: {
+            auto e = std::static_pointer_cast<CommaExpr>(expr);
+            total += countCtorTempBytesInExpr(e->left);
+            total += countCtorTempBytesInExpr(e->right);
+            break;
+        }
+        case NodeKind::Member: {
+            auto e = std::static_pointer_cast<MemberExpr>(expr);
+            total += countCtorTempBytesInExpr(e->object);
+            break;
+        }
+        case NodeKind::Index: {
+            auto e = std::static_pointer_cast<IndexExpr>(expr);
+            total += countCtorTempBytesInExpr(e->object);
+            total += countCtorTempBytesInExpr(e->index);
+            break;
+        }
+        case NodeKind::New: {
+            auto e = std::static_pointer_cast<NewExpr>(expr);
+            for (auto& a : e->constructorArgs) total += countCtorTempBytesInExpr(a);
+            break;
+        }
+        default:
+            break;
+    }
+    return total;
+}
+
+// 分配一个临时对象槽：临时区从帧主体末尾向低地址接龙，返回对象起始的 rbp 负偏移。
+// 与 countCtorTempBytesInExpr 同序调用 ⇒ 槽位恰好落在已预留的临时区内。
+int CodeGen::allocTempSlot(uint32_t size) {
+    uint32_t aligned = (size + 7) / 8 * 8;
+    if (aligned < 8) aligned = 8;
+    m_tempUsed += aligned;
+    return -(m_tempBase + static_cast<int>(m_tempUsed));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1080,6 +1285,25 @@ void CodeGen::visit(VarDeclStmt& decl) {
 
             emitComment(std::format("stack object {} : {} ({} bytes, RAII)",
                 decl.name, cit->second->name, size));
+
+            // ── 平凡拷贝初始化（`Box<int> b = a;`，Sema 判同类左值且无用户拷贝构造）──
+            // 合成的拷贝构造语义就是逐字节复制 ⇒ memcpy(dst=&b, src=&a, size)。
+            // 旧行为掉到默认构造调用，符号不存在 ⇒ 链接期 undefined reference
+            // （编译期全绿的错配）。vptr 随 memcpy 一起复制 ⇒ 动态类型一并拷贝，正确。
+            // 源地址约定：局部 VarExpr 取栈槽、全局取标签、类类型 MemberExpr
+            // 求值后地址本就在 rax（"子对象取址"约定，见 visit(MemberExpr)）。
+            if (decl.isTrivialCopy) {
+                emitComment(std::format("trivial copy {} ← init ({} bytes)", decl.name, size));
+                emitClassAddress(decl.initializer);   // rax = 源对象地址
+                emit("movq %rax, %rsi          # 源对象地址");
+                emit(std::format("leaq {}(%rbp), %rdi    # 目标 = &{}（变量槽）", offset, decl.name));
+                // 逐字节内联复制：自研链接器只内置 malloc/free，memcpy 无定义可绑
+                // （[builtin] 阶段注册的只是原型）⇒ 用 rep movsb 展开，等价 memcpy。
+                emit(std::format("movq ${}, %rcx         # 复制字节数 = sizeof({})",
+                    size, cit->second->name));
+                emit("rep movsb                  # 平凡拷贝：逐字节复制对象表示");
+                return;
+            }
 
             // ① 零初始化整个对象（8 字节一拍）——构造函数写入字段前，
             //    其余字节必须是确定的 0（对应真实编译器的"默认成员初始化
@@ -1205,7 +1429,109 @@ void CodeGen::visit(VarDeclStmt& decl) {
 //   undefined reference。
 // 注：字段路径把右值【求值两次】（先算一遍、算完对象地址再重算）—— 教学简化，
 //   假定右值无副作用；真实编译器用寄存器分配避免重复求值。
+// ─────────────────────────────────────────────────────────────────────────────
+// 类值的【取址】：rax = 类对象的起始地址
+// ─────────────────────────────────────────────────────────────────────────────
+// 类对象在表达式里没有"标量值"表示（首 8 字节加载出来不是值是 vptr/字段片段），
+// 凡按值传递类的地方（平凡拷贝 / 类赋值 / 构造实参约定）都按【内存块 + 地址】处理：
+//   局部 VarExpr → 栈槽取址 │ 全局 → 标签取址 │ 方法体内裸字段 → this + 偏移
+//   成员 .fld   → 递归对象取址 + 字段偏移（Sema 回填偏移优先，BUGS.md B21）
+//   ptr->fld    → 对象表达式求值（指针值本身就是地址）
+// 对照 clang：类值按 Aggregate 内存传递（sret/按副本），取址即 GEP 0。
+void CodeGen::emitClassAddress(const ExprPtr& expr) {
+    if (expr->kind == NodeKind::Var) {
+        auto var = std::static_pointer_cast<VarExpr>(expr);
+        if (m_localVars.count(var->name)) {
+            emit(std::format("leaq {}(%rbp), %rax    # 类对象地址 &{}（栈槽）",
+                m_localVars[var->name], var->name));
+            return;
+        }
+        // 方法体内的裸字段（this->成员，类类型）：局部表 miss 且当前类有该字段
+        if (!m_currentClassName.empty() && m_currentClassType) {
+            auto field = m_currentClassType->classLayout.findField(var->name);
+            auto thisIt = m_localVars.find("this");
+            if (field && thisIt != m_localVars.end()) {
+                emit(std::format("movq {}(%rbp), %rax    # 加载 this 指针", thisIt->second));
+                emit(std::format("leaq {}(%rax), %rax    # &this->{}（字段偏移 +{}）",
+                    field->offset, var->name, field->offset));
+                return;
+            }
+        }
+        // 全局类对象
+        emit(std::format("leaq {}(%rip), %rax    # 类对象地址 &{}（全局）",
+            asmSymbol(var->name), var->name));
+        return;
+    }
+    if (expr->kind == NodeKind::Member) {
+        auto mem = std::static_pointer_cast<MemberExpr>(expr);
+        TypePtr objType = mem->object->resolvedType;
+        bool objIsPtr = objType && objType->isPointer();
+        if (objIsPtr) {
+            emitExpr(mem->object);            // 指针值本身就是对象地址
+        } else {
+            emitClassAddress(mem->object);    // 递归取子对象地址
+        }
+        // 字段偏移：Sema 回填优先（限定名成员 B21），否则查布局表
+        int fieldOff = mem->resolvedFieldOffset;
+        if (fieldOff < 0) {
+            TypePtr cls = objIsPtr ? objType->pointeeType : objType;
+            if (cls && cls->isClass()) {
+                auto f = cls->classLayout.findField(mem->memberName);
+                if (f) fieldOff = static_cast<int>(f->offset);
+            }
+        }
+        if (fieldOff > 0) {
+            emit(std::format("leaq {}(%rax), %rax    # + 字段 .{} 偏移 {}", fieldOff, mem->memberName, fieldOff));
+        }
+        return;
+    }
+    // 其余形态：Sema 判据保证类值只来自 Var/Member/构造调用，落不到这里
+    emitExpr(expr);
+}
+
 void CodeGen::visit(AssignStmt& stmt) {
+    // ── 类实例赋值（Sema 回填 isClassAssign）：memcpy 逐字节复制 ──────────
+    // 本语言没有 operator=：合成赋值的语义就是按内存复制对象表示（[class.copy]）。
+    // 旧行为把它当标量赋值只写 8 字节且源地址错 —— 类对象赋值静默算错。
+    // 右值三形态：构造临时对象（拷贝完成后析构，见 m_suppressTempDtor 协作）、
+    //   同类 Var（取址）、同类成员子对象（求值即地址）。
+    if (stmt.isClassAssign) {
+        uint32_t size = 8;
+        if (m_classTypes) {
+            auto cit = m_classTypes->find(stmt.assignClassType->name);
+            if (cit != m_classTypes->end()) size = cit->second->classLayout.totalSize;
+        }
+        emitComment(std::format("class assign: {} ({} bytes)",
+            stmt.assignClassType->name, size));
+
+        // 右值 → 源地址（rsi）
+        bool rhsIsTemp = stmt.value->kind == NodeKind::Call
+            && std::static_pointer_cast<CallExpr>(stmt.value)->isCtorCall;
+        if (rhsIsTemp) m_suppressTempDtor++;
+        if (rhsIsTemp || stmt.value->kind == NodeKind::Member) {
+            emitExpr(stmt.value);            // 临时对象 / 子对象：rax = 地址
+        } else {
+            emitClassAddress(stmt.value);    // 同类 Var：取址
+        }
+        if (rhsIsTemp) m_suppressTempDtor--;
+        emit("movq %rax, %rsi            # 源对象地址");
+
+        // 左值 → 目标地址（rdi）
+        emitClassAddress(stmt.target);
+        emit("movq %rax, %rdi            # 目标对象地址");
+
+        // 逐字节内联复制（rep movsb）——自研链接器只内置 malloc/free，memcpy 无定义可绑
+        emit(std::format("movq ${}, %rcx           # 复制字节数 = sizeof({})",
+            size, stmt.assignClassType->name));
+        emit("rep movsb                  # 类实例赋值：逐字节复制对象表示");
+
+        // 构造临时对象在拷贝完成后析构（全表达式结束，[class.dtor]/2）
+        if (rhsIsTemp) {
+            emitClassDtorCall(m_lastCtorTempClass, m_lastCtorTempOffset);
+        }
+        return;
+    }
+
     // 计算右值到 rax
     emitExpr(stmt.value);
 
@@ -2091,6 +2417,80 @@ void CodeGen::visit(UnaryExpr& expr) {
 //                   popq %rsi / popq %rdi / callq add
 //       d.get(5)（非虚）⇒ this(d 的地址) → rdi，5 → rsi，callq Dog_get
 void CodeGen::visit(CallExpr& expr) {
+    // ── 类模板构造调用：物化临时对象（表达式级 `Box<int>(7)`）────────────
+    // Sema 已实例化类（ctorClassType）、选定构造符号（callee 名字 = mangled ctor）。
+    // 临时对象在帧的【临时区】（countCtorTempBytes 已按同序预留）：
+    //   清零 → 装 _vptr（多态类）→ 实参压栈逆序弹入 rsi..r9 → this=槽地址 callq 构造。
+    // 表达式的值 = 对象地址（%rax）—— 类值在表达式里的约定表示（与 emitNew 相同）。
+    // 全表达式结束即析构临时对象（[class.dtor]/2 的栈对象规则），rax 经 push/pop 保护。
+    // 注：拷贝初始化语境（`auto b = Box<int>(7);`）Sema 已升级成直接初始化
+    //   （构造进 b 的槽），不会走到这里 —— 此处物化的只有真正需要临时对象的点。
+    if (expr.isCtorCall) {
+        if (!m_classTypes || m_classTypes->find(expr.ctorClassType->name) == m_classTypes->end()) {
+            throw std::runtime_error(std::format(
+                "[CodeGen Error] ctor temp class '{}' not in class table (line {})",
+                expr.ctorClassType->name, expr.location.line));
+        }
+        auto& layout = m_classTypes->find(expr.ctorClassType->name)->second->classLayout;
+        uint32_t size = layout.totalSize;
+        int offset = allocTempSlot(size);
+
+        emitComment(std::format("ctor temp {} : {} ({} bytes)",
+            expr.ctorClassType->name, expr.ctorClassType->name, size));
+
+        // ① 清零（8 字节一拍，与栈对象路径同公式）
+        uint32_t aligned = (size + 7) / 8 * 8;
+        for (uint32_t i = 0; i < aligned; i += 8) {
+            emit(std::format("movq $0, {}(%rbp)    # 零初始化临时对象 偏移 +{}",
+                offset + static_cast<int>(i), i));
+        }
+
+        // ② 安装 _vptr（仅多态类；公式与 visit(VarDeclStmt)/emitNew 同一来源）
+        if (layout.hasVTable) {
+            std::string vtableLabel = NameMangler::mangleVTable(expr.ctorClassType->name);
+            emit(std::format("leaq {}(%rip), %rcx    # 取 vtable 首地址", vtableLabel));
+            emit("addq $16, %rcx              # 跳过 offset-to-top 与 RTTI，指向 vtable[0]");
+            emit(std::format("movq %rcx, {}(%rbp)    # 安装主 _vptr 到临时对象", offset));
+            for (auto& base : layout.bases) {
+                if (base.isPrimary || !base.hasVTable) continue;
+                uint32_t vptrOffset = base.vtableSegmentOffset + 16;
+                emit(std::format("leaq {}(%rip), %rcx    # 取次表首地址（基类 '{}'）",
+                    vtableLabel, base.baseClassName));
+                emit(std::format("addq ${}, %rcx          # 跳过次表头，指向 secondary[0]", vptrOffset));
+                emit(std::format("movq %rcx, {}(%rbp)    # 安装次 _vptr（偏移 {} 处）",
+                    offset + static_cast<int>(base.offset), base.baseClassName));
+            }
+        }
+
+        // ③ 调用构造函数：实参压栈暂存 → 逆序弹入 rsi..r9（rdi 留给 this）
+        for (size_t i = 0; i < expr.arguments.size() && i < 5; i++) {
+            emitExpr(expr.arguments[i]);
+            emit("pushq %rax                  # 构造实参压栈暂存");
+        }
+        for (int i = static_cast<int>(expr.arguments.size()) - 1; i >= 0 && i < 5; i--) {
+            static const char* regs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
+            emit(std::format("popq %{}                   # 逆序弹出实参到寄存器", regs[i]));
+        }
+        emit(std::format("leaq {}(%rbp), %rdi       # this = 临时对象地址", offset));
+        std::string ctorSym = (expr.callee->kind == NodeKind::Var)
+            ? std::static_pointer_cast<VarExpr>(expr.callee)->name : "";
+        emit(std::format("callq {}               # 调用构造函数（临时对象）",
+            asmSymbol(ctorSym)));
+
+        // ④ 表达式值 = 对象地址；随后就地析构（全表达式结束），rax 保护/恢复。
+        // 例外：赋值 RHS 语境（m_suppressTempDtor > 0）—— 临时对象要先 memcpy 进
+        // 左值再析构，此处只登记槽位，析构由 visit(AssignStmt) 拷完后补发。
+        m_lastCtorTempOffset = offset;
+        m_lastCtorTempClass = expr.ctorClassType->name;
+        emit(std::format("leaq {}(%rbp), %rax       # 表达式的值 = 临时对象地址", offset));
+        if (m_suppressTempDtor == 0) {
+            emit("pushq %rax                  # 保护对象地址（析构调用会踩 rax）");
+            emitClassDtorCall(expr.ctorClassType->name, offset);
+            emit("popq %rax                   # 恢复对象地址");
+        }
+        return;
+    }
+
     emitComment("function call");
 
     // 检查是否是方法调用

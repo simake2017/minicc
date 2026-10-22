@@ -262,6 +262,17 @@ struct CallExpr : Expression {
         : Expression(NodeKind::Call), callee(std::move(c)),
           arguments(std::move(args)) {}
 
+    // ── 类模板构造调用：Box<int>(7)（表达式级临时对象构造）────────────────
+    // Parser 把 `Box<int>(7)` 解析成普通 CallExpr（callee 是带 explicitTemplateArgs
+    // 的 VarExpr），Sema 的 inferCall 认出"名字是类模板"后改判为构造调用：
+    //   isCtorCall=true、ctorClassType=实例类型（如 Box_int）、callee 名字回填为
+    //   选定的构造函数符号。CodeGen 的 emitCall 据此走"物化临时对象"路径
+    //   （栈槽 + 清零 + vptr + 构造），表达式的值 = 对象地址（%rax）。
+    // 拷贝初始化的语境（`auto b = Box<int>(7);`）由 Sema 升级成直接初始化、
+    //   构造直接进变量槽（拷贝省略），不物化临时对象。
+    bool   isCtorCall = false;
+    TypePtr ctorClassType;
+
     void accept(AstVisitor& v) override { v.visit(*this); }
 };
 
@@ -464,6 +475,11 @@ struct VarDeclStmt : Statement {
     // 语义同 GlobalVarDecl::isConstexpr：初始化式必须可常量求值。
     bool isConstexpr = false;
 
+    // ── 平凡拷贝初始化：`Box<int> b = a;`（同类左值，无用户拷贝构造函数）──
+    // 类实例按内存逐字节复制（CodeGen 发 memcpy），不调用（不存在的）拷贝构造函数。
+    // 由 Sema 在 init 类型与声明类型同类时回填。
+    bool isTrivialCopy = false;
+
     VarDeclStmt(std::string n, TypePtr t, ExprPtr init)
         : Statement(NodeKind::VarDecl), name(std::move(n)),
           declaredType(std::move(t)), initializer(std::move(init)) {}
@@ -480,6 +496,13 @@ struct AssignStmt : Statement {
     ExprPtr value;    // 右值
     AssignStmt(ExprPtr t, ExprPtr v)
         : Statement(NodeKind::Assign), target(std::move(t)), value(std::move(v)) {}
+
+    // ── 类实例赋值（Sema 回填）：`b = a;` / `b = Box<int>(9);` ──
+    // 本语言没有 operator=：合成的赋值语义即逐字节复制，CodeGen 据此走 memcpy
+    // （旧行为把它当标量赋值只写 8 字节，类对象赋值静默算错）。
+    // 判据：目标与右值同为类类型且同类 —— 单点回填，CodeGen 不看类型推导。
+    bool    isClassAssign = false;
+    TypePtr assignClassType;
 
     void accept(AstVisitor& v) override { v.visit(*this); }
 };

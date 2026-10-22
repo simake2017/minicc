@@ -2075,3 +2075,97 @@ MUT-1 对称剥壳回退 ⇒ 运行 235（红）；MUT-2 调整恢复无条件 �
 程序输出/退出码/汇编零变化，已重刷基线（124 → 125）。
 
 **文档**：tests/tmpl/test_tmpl_73 文件头（理论点全列）。
+
+## B29. 全局/命名空间内的类型别名存了未实例化模板 id + 裸名（两处都是"没做完"）
+
+**来源**：排查"`using IntBox = Box<int>;` 能不能用"时发现的旧缺口 ——
+此前唯一被测过的别名形态是**类内**别名（learn/24 的三条查找路径全在类作用域），
+全局与命名空间形态从没进过用例。
+
+**复现**（修复前）
+
+| 程序 | minicc（修前） | clang++-18 |
+|---|---|---|
+| `using IntBox = Box<int>; IntBox b; b.v = 7;` | ❌ rc=1 `No member 'v' in class 'Box'` | ✅ rc=0 |
+| `typedef Box<int> IntBox;`（同上用法） | ❌ 同上 | ✅ rc=0 |
+| `namespace N { using IntBox = Box<int>; } N::IntBox b;` | ❌ rc=1 `unknown type name 'N::IntBox'` | ✅ rc=0 |
+
+**性质**：拒收合法程序（两个方向）。
+
+**根因**：`processTypeAliasDecl` 两个"没做完"——
+① 把 `underlyingType`（**未实例化**的模板 id `Box<int>`，一个名字节点）
+原样存进符号表；使用点 `IntBox b;` 拿到的还是蓝图名 "Box"，
+字段查找对着蓝图查 ⇒ 报 No member。对照 clang：TypedefNameDecl 的底层类型
+在**声明点**就完成决议（Sema::getTypeName / BuildTypedefNameExpr）。
+② 注册名是裸 `aliasName`，不带 `m_currentNamespace` 前缀
+（类/函数在 processNamespaceDecl 里早就前缀化了，别名漏了）。
+使用点带着 `N::IntBox` 限定名来查，裸名必然查无此名。
+
+**修法**：声明点 `resolveType(underlyingType)` —— 模板 id 在此**实例化**、
+别名模板在此**解糖**（复用既有路径，一行新机制都没造），之后所有使用点
+拿到的都是成品类型；注册名加命名空间前缀，与类/函数同约定。
+
+**回归用例**：`tests/decl/test_decl_03_global_alias.cpp`
+（using/typedef/命名空间前缀三个形态，运行钉 0）。
+修复前该类组合**没有任何用例覆盖**（别名全测在类内）——修复后
+既有用例逐字节零漂移。
+
+**文档**：docs/learn/43 §1。
+
+## B30. 表达式级构造调用 `Box<int>(7)` 无路可走 + 平凡拷贝/类赋值静默算错
+
+**来源**：追问"inferVar 能不能支持 `x = Box<int>;` 这种"时确认的两组缺口：
+Parser 一直能建出 `CallExpr(VarExpr(Box)+显式模板实参)`，但语义层
+inferCall 四路（成员/自由函数/函数模板/回退）全不接类模板构造 ⇒
+落到回退 `inferType(VarExpr(Box))` ⇒ `Undefined variable 'Box'`；
+继续探下去发现**相邻的三个伴随 bug**。
+
+**复现**（修复前）
+
+| 程序 | minicc（修前） | clang++-18 |
+|---|---|---|
+| `Box<int> b = Box<int>(7);` | ❌ rc=1 `Undefined variable 'Box'` | ✅ rc=0 |
+| `auto b = Box(9);`（表达式级 CTAD） | ❌ 同上 | ✅ rc=0 |
+| `Box<int> b = a;`（同类左值拷贝初始化） | ❌ 链接期 `undefined reference to 'Box_int_Box_int'`（编译期全绿） | ✅ rc=0 |
+| `b = Box<int>(9);` / `b = a;`（类实例赋值） | ⚠️ rc=0 但**静默算错**（当标量赋值只写 8 字节、源地址错） | ✅ rc=0 |
+
+**根因**（一条主线 + 三个伴随）：
+① 主缺口：inferCall 没有"类模板名 + 显式/推导实参 ⇒ 构造调用"分支。
+   修法：在自由函数查找**之前**插入构造分支 —— 命名空间限定名回退、
+   显式实参经 resolveType 实例化（NTTP 值位保留）、空实参表走 CTAD
+   （语句级 deduceClassTemplateArgs 提炼出共用的 `deduceCtadCore`，
+   [dcl.type.class.deduct]：构造函数形参表当推导指引，与函数模板同一套合一），
+   构造选定走 pickBestByArgs，结果回填 `isCtorCall/ctorClassType/符号`
+   （与 B10/B21/B22 的"符号回填"同一形状 —— mangling 有状态，
+   CodeGen 硬拼必错配）。
+② 伴随一（**链接期才炸的错配**）：`Box<int> b = a;` 在 Sema 既不是
+   构造调用也不是标量初始化，掉到 CodeGen"无初始化式类声明"分支发
+   **0 参默认构造**调用 —— 符号只在用户真写了 0 参构造时才存在。
+   修法：Sema 判 `isTrivialCopy`（同类左值 + init 限 Var/Member），
+   CodeGen 按布局复制；表达式升级分支同点判 `[class.copy.elision]`
+   拷贝省略（临时对象永不物化）。
+③ 伴随二（**静默算错**）：类实例赋值走了标量 AssignStmt 路径。
+   修法：Sema 在 visit(AssignStmt) 回填 `isClassAssign/assignClassType`，
+   CodeGen 按对象表示逐字节复制。
+④ 伴随三（**克隆丢槽**）：cloneStmt(VarDeclStmt) 漏搬 `ctorArgs` ——
+   顶层 `Box<int> b(7);` 正常，模板体内同名写法构造实参**整体丢失**。
+
+**★ 实现期踩的两个坑**（写进判据）：
+- **析构时机**：visit(CallExpr) 若对构造临时对象无条件发析构，
+  `b = Box<int>(9);` 会 memcpy **已析构**的源 —— 用 `m_suppressTempDtor`
+  协作：赋值 RHS 语境抑制，memcpy 完成后由 visit(AssignStmt) 补发
+  （[class.dtor]/2：临时对象在**全表达式结束**才析构）。
+- **内联复制**：自研链接器只内置 malloc/free，[builtin] 阶段注册的
+  memcpy 只是**原型** —— 对象复制一律 `rep movsb` 内联展开，没有
+  `callq memcpy` 可绑。
+
+**回归用例**：`tests/lang/test_basics_11_ctor_expr.cpp`（6 检查点：
+拷贝省略升级 / auto+构造表达式 / 类赋值 RHS 临时 / CTAD / 平凡拷贝 /
+合成拷贝赋值，运行钉 0）+ `tests/lang/test_basics_12_ctor_expr_error.cpp`
+（负例：`Box<int> b = Box<double>(7);` ⇒ rc=1
+`Type mismatch in 'b': declared 'Box_int', got 'Box_double'`）。
+
+**日志漂移**：既有 140 个集成用例**逐字节零漂移**；基线 140 → 143
+（+3 新文件）。
+
+**文档**：docs/learn/43 §2。

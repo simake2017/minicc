@@ -1199,6 +1199,8 @@ ExprPtr TemplateInstantiator::cloneExpr(
             auto cloned = std::make_shared<CallExpr>(
                 cloneExpr(e.callee, subst), std::move(clonedArgs));
             cloned->location = e.location;
+            cloned->isCtorCall = e.isCtorCall;
+            cloned->ctorClassType = e.ctorClassType;
             return cloned;
         }
 
@@ -1302,6 +1304,13 @@ StmtPtr TemplateInstantiator::cloneStmt(
                 substituteType(s.declaredType, subst),
                 cloneExpr(s.initializer, subst));
             cloned->location = s.location;
+            // 直接初始化实参表 / 选定符号 / constexpr / 平凡拷贝标记全部要跟身：
+            // 模板体里的 `T x(args);` 若丢了 ctorArgs，实例化后会被当成无初始化声明，
+            // 默默去调不存在的默认构造（链接期才炸）。
+            for (auto& a : s.ctorArgs) cloned->ctorArgs.push_back(cloneExpr(a, subst));
+            cloned->ctorSymbol = s.ctorSymbol;
+            cloned->isConstexpr = s.isConstexpr;
+            cloned->isTrivialCopy = s.isTrivialCopy;
             return cloned;
         }
 
@@ -1323,6 +1332,8 @@ StmtPtr TemplateInstantiator::cloneStmt(
                 cloneExpr(s.target, subst),
                 cloneExpr(s.value, subst));
             cloned->location = s.location;
+            cloned->isClassAssign = s.isClassAssign;
+            cloned->assignClassType = s.assignClassType;
             return cloned;
         }
 
