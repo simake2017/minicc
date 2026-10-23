@@ -319,7 +319,7 @@ SFINAE 探测不命中时**静默回退**而非报错；与 clang oracle 对拍�
 
 | # | 任务 | 对应 | 修法要点（生产惯例） | 验收 |
 |---|---|---|---|---|
-| 1 | 模板-id 消歧引入只读模板名登记表 | [B31](BUGS.md#b31-模板-id-试探把-abc-误判为模板调用拒收合法程序) | Parser 持"名字→是否模板"登记表（Pass 1 前向收集），消歧 = 只读查询一个 bit；查询面只到名字种类，不做方法 lookup，不打破 Sema 分层 | `a<b>(c)` 全变量比较链 rc=0 且与 clang 逐字对拍；tmpl 21..26 零漂移；`>` 不入 `isExprContinuation` |
+| 1 ✅ | 模板-id 消歧引入只读模板名登记表 | [B31](BUGS.md#b31-模板-id-试探把-abc-误判为模板调用拒收合法程序) | Parser 构造时前向扫 token 流建"名字→是否模板"只读登记表（类/别名/函数模板、推导指引、成员模板、模板模板形参 + Sema 内建 declval 种子），消歧第一层闸 = 查表；查不到不试探直接按比较解析；查询面只到名字种类，不做方法 lookup，不打破 Sema 分层 | `a<b>(c)` 全变量比较链 rc=0 且与 clang 对拍（tests/lang/test_basics_20）；既有 150 份基线零漂移；`>` 不入 `isExprContinuation`（docs/learn/46） |
 | 2 ✅ | 试探-回滚升级为 RAII 存档点 + 日志收口 | [B32](BUGS.md#b32-模板-id-试探回滚只撤-m_pos不撤日志幽灵-parsetarg-行) | ① `TokenCheckpoint`（构造快照全维度/析构回卷/`commit()` 确认），取代 try/catch 与裸 `m_pos = saved`——新状态维度进快照是编译期强制；② 全部 `[parse:targ]`/`[parse]` 打点收进 `Parser::logParse(...)` 单一出口，配 `m_quietDepth` 静默开关（试探期日志缓冲/抑制） | `a < Box > c;` 日志无幽灵行；基线零漂移；`parseIntLiteral` 刻意不打日志约定不破 |
 | 3 ✅ | 异常退出试探路径（顺带回卷语义修对） | B31 附带 | `a < b > c` 是常见形态不是异常情况；catch `std::exception` 全集会吞掉试探内部的真 bug 并静默降级——换 TokenCheckpoint 后异常只用于"真错误"，且析构保证回卷 | 故意在试探内制造 logic_error ⇒ 响亮报错而非静默当比较 |
 | 4 | 个人阅读注释出源码 | 代码审查（非 bug） | `// mrd` 批注按先例提炼进 `docs/NOTES-阅读笔记.md`（69 处 `// wangyang` 同款处置），源码注释只讲 why 不讲 what | 源码 grep 无 `// mrd`；NOTES 新增小节 |

@@ -43,7 +43,7 @@
 | [B28](#b28-偏特化匹配误用调用推导的剥壳规则structuralmatch-的另一半) | 偏特化匹配套用调用推导的剥壳规则 ⇒ 具体引用位 `Duo<T,int&>` 配 `int&` 误拒（**拒收合法程序**）、`Same<T,T>` 配 `<int&,int>` **静默选错特化** | `src/template_deduction.cpp` deducePair（引用分支递归 + 裸形参位调整两处漏网） | 中（三种症状各一） | ✅ 已修 |
 | [B29](#b29-全局命名空间内的类型别名存了未实例化模板-id--裸名两处都是没做完) | 全局/命名空间别名存了**未实例化模板 id** + 裸名（两处"没做完"）⇒ `IntBox b;` 报 No member / `N::IntBox` 查无此名 | `src/semantic_analyzer.cpp` processTypeAliasDecl | 小（拒收合法程序） | ✅ 已修 |
 | [B30](#b30-表达式级构造调用-boxint7-无路可走--平凡拷贝类赋值静默算错) | 表达式级构造调用 `Box<int>(7)` 无路可走 + 平凡拷贝/类赋值静默算错 | `src/semantic_analyzer.cpp` inferCall + `src/codegen.cpp` | 中（一拒收 + 一静默算错 + 链接期错配） | ✅ 已修 |
-| [B31](#b31-模板-id-试探把-abc-误判为模板调用拒收合法程序) | 模板-id 试探只看"后跟 `(`/`::`" ⇒ `a<b>(c)` 全变量比较链被**拒收合法程序**（clang 按 `(a<b)>(c)` 接受） | `src/parser.cpp` parsePrimaryExpr 歧义消解三步曲 | 中（罕见写法，但方向性分歧） | ⬜ 未修 |
+| [B31](#b31-模板-id-试探把-abc-误判为模板调用拒收合法程序) | 模板-id 试探只看"后跟 `(`/`::`" ⇒ `a<b>(c)` 全变量比较链被**拒收合法程序**（clang 按 `(a<b)>(c)` 接受） | `src/parser.cpp` parsePrimaryExpr 歧义消解三步曲 | 中（罕见写法，但方向性分歧） | ✅ 已修 |
 | [B32](#b32-模板-id-试探回滚只撤-m_pos不撤日志幽灵-parsetarg-行) | 试探失败回滚只撤 `m_pos`，`[parse:targ]` 日志已打印撤不回 ⇒ 幽灵日志行（"日志即契约"基线被污染） | `src/parser.cpp` parsePrimaryExpr + parseTemplateArgumentList | 低（纯日志，不影响正确性） | ⬜ 未修 |
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
@@ -2235,7 +2235,17 @@ bool isTemplateId = false;
 }                                        // 未 commit ⇒ 全状态回卷
 ```
 
-**状态**：⬜ 未修（已列入 ROADMAP 主线 I 第 1 项）。
+**状态**：✅ 已修（ROADMAP 主线 I 第 1 项，docs/learn/46）。
+**修法**（与"要修的话"一致）：Parser 构造时前向扫 token 流建只读**模板名登记表**
+`m_templateNames`（类/别名/函数模板、推导指引、成员模板、模板模板形参全收；
+Sema 内建的 `std::declval` 以种子名单收入 —— 它不经 token 流，漏收会让
+test_tmpl_35..39 的 `decltype(std::declval<T>()...)` 当场被消歧成比较链），
+消歧第一层闸 = `check(Less) && isKnownTemplateName(name)`；不在表 ⇒ 不试探
+直接按比较解析。在表仍走 B32 的试探-回滚（变量可遮蔽模板名，方向保守）。
+回归红线：`a<b>(c)` rc=0 与 clang 一致（tests/lang/test_basics_20），
+既有 150 份日志基线零漂移（`>` 未进 `isExprContinuation`，与 learn/39 判据协同）。
+突变验证：摘掉闸 ⇒ 新测试退回链接期 `undefined reference to 'a'`（rc=1），
+证明判据有判别力。
 ★ 附带问题（catch std::exception 全集吞真 bug，主线 I 第 3 项）已随 B32 修复：
   ParseError 专用异常 + 试探处窄捕获，B32 批次落地（docs/learn/45 §3）。
 

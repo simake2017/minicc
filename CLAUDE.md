@@ -599,6 +599,25 @@ basics_10 凡有比较运算的测试都在默默产幽灵——第三次印证"
 未做的同类现场：parseDeclaration（890）与类体方法/字段判定（1862）的试探让
 [parse:type] 成对重复（无幽灵只有重复），单独成批再瘦身。
 
+✅ **主线 I 第 1 项已完成（B31，docs/learn/46）** ——
+模板名登记表：`<` 消歧从"纯后缀启发式"升级为"只读查表 + 试探"（对照 clang
+Parser::isTemplateName → Sema::isTemplateName 的"问一个 bit"，查询面只到名字
+种类，不打破 Sema 分层）。★ 判据方向：`a<b>(c)` 全变量比较链被旧"实参表空跑
+成功 + '>' 后跟 '('"误判成模板调用（拒收合法程序；变异实测摘掉判据 ⇒ 链接期
+`undefined reference to 'a'`——变量被当函数模板实例发 callq）。修法三层：
+① Parser 构造时**前向扫 token 流**建只读登记表（类/别名/函数模板、推导指引、
+成员模板、模板模板形参——前向而非边解析边登记，支撑先使用后声明；循环不跳
+已处理区间，形参表内嵌的 template 头照常收）② 种子名单收 Sema 内建
+`std::declval`（不经 token 流；漏收现场 = test_tmpl_35..39 的 declval 探测
+当场 rc=1——内建名字 parser 必须知道，同 clang 名单制 builtin）③ 消歧第一层闸
+`check(Less) && isKnownTemplateName(name)`：不在表连试探都不做；在表仍走 B32
+试探（变量可遮蔽模板名，**宁宽勿窄**：误收进试探是响亮拒收，漏收是方向性错）。
+`std::void_t` 只走类型位置按名识别、不收。★ 与 learn/39 协同：`>` 刻意不进
+isExprContinuation 的判据不动，两处闸不交叉，tmpl 21..26 零漂移。
+测试 tests/lang/test_basics_20（a<b>(c) + d<e>(f) + identity<int>/Trait<int>::
+value 回归，rc=0 与 clang 对拍；突变验证：摘闸 ⇒ 链接期炸）；既有 150 份基线
+零漂移，基线 +1 → 151。BUGS.md B31 转 ✅、ROADMAP 主线 I 第 1 项 ✅。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

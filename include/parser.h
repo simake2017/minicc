@@ -55,6 +55,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <set>
 #include <utility>
 
 namespace minicc {
@@ -231,6 +232,22 @@ private:
     //   TokenCheckpoint 决定冲刷（commit）或丢弃（回卷）。模板-id 消歧等
     //   试探路径用；非试探路径行为与直写 std::cout 逐字节一致。
     std::vector<std::string> m_logBuffers;
+
+    // ── B31：只读"模板名登记表"（ROADMAP 主线 I 第 1 项）──────────────────
+    // 消歧判据"IDENT '<' ⇒ 试探 template-id"需要回答"a 是不是模板名"——这个
+    // 信息住在 Sema 的注册表里，而 [stmt.ambig] 的设计基石是"语法期零语义"
+    // （B16/B21 两轮修复确立）。生产做法（clang）：Parser 持 Actions 句柄，
+    // 歧义点回调 isTemplateName() 问一个 bit 的问题，决议权仍在 Sema。
+    // minicc 轻量版：Parser 构造时【前向扫一遍 token 流】收集本 TU 声明的
+    // 模板名，消歧 = 只读查询。查询面只到"名字的种类"，不做方法存在性 lookup，
+    // 不打破 Sema 分层。★ 前向收集而非边解析边登记：模板可以先使用后声明
+    // （Sema 三遍扫描支持），调用点出现在声明之前时登记表也必须已含该名。
+    // ★ std 垫片（registerBuiltins 直接注入 AST）不经 token 流 ——  shim
+    //   名只在【类型位置】使用（parseType 分支，不走本消歧），故不收进表
+    //   也不影响；边界见 docs/learn/46。
+    std::set<std::string> m_templateNames;
+    void collectTemplateNames();              // 构造时一次性前向收集
+    bool isKnownTemplateName(const std::string& name) const;
 
     // 日志【单一出口】（B32「正确的写法」第 2 条）：全部 [parse:*] 打点过
     //   这里。收口前 87 处 std::cout 散点直写 —— 符号定名、择优早已"判据
