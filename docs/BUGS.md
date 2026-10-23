@@ -41,6 +41,10 @@
 | [B26](#b26-引用绑定判据只写了模板那一半) | 引用绑定判据只写在模板推导里 ⇒ `const T&` 拒右值（**拒收合法程序**）、`int&&` 收左值（**接受非法程序**） | `src/template_deduction.cpp` deducePair + `src/semantic_analyzer.cpp` inferCall（非模板路径**没有**） | 中（一个判据缺一半，两个方向都错） | ✅ 已修 |
 | [B27](#b27-无可行候选时静默退回候选集首个) | 候选集非空而无一可行 ⇒ 静默选第一个（`c.f(p)` 调进了 `f(int)`），编译全绿、运行算错 | `src/semantic_analyzer.cpp` pickBestByArgs | 中（**静默算错** + 接受非法程序） | ✅ 已修 |
 | [B28](#b28-偏特化匹配误用调用推导的剥壳规则structuralmatch-的另一半) | 偏特化匹配套用调用推导的剥壳规则 ⇒ 具体引用位 `Duo<T,int&>` 配 `int&` 误拒（**拒收合法程序**）、`Same<T,T>` 配 `<int&,int>` **静默选错特化** | `src/template_deduction.cpp` deducePair（引用分支递归 + 裸形参位调整两处漏网） | 中（三种症状各一） | ✅ 已修 |
+| [B29](#b29-全局命名空间内的类型别名存了未实例化模板-id--裸名两处都是没做完) | 全局/命名空间别名存了**未实例化模板 id** + 裸名（两处"没做完"）⇒ `IntBox b;` 报 No member / `N::IntBox` 查无此名 | `src/semantic_analyzer.cpp` processTypeAliasDecl | 小（拒收合法程序） | ✅ 已修 |
+| [B30](#b30-表达式级构造调用-boxint7-无路可走--平凡拷贝类赋值静默算错) | 表达式级构造调用 `Box<int>(7)` 无路可走 + 平凡拷贝/类赋值静默算错 | `src/semantic_analyzer.cpp` inferCall + `src/codegen.cpp` | 中（一拒收 + 一静默算错 + 链接期错配） | ✅ 已修 |
+| [B31](#b31-模板-id-试探把-abc-误判为模板调用拒收合法程序) | 模板-id 试探只看"后跟 `(`/`::`" ⇒ `a<b>(c)` 全变量比较链被**拒收合法程序**（clang 按 `(a<b)>(c)` 接受） | `src/parser.cpp` parsePrimaryExpr 歧义消解三步曲 | 中（罕见写法，但方向性分歧） | ⬜ 未修 |
+| [B32](#b32-模板-id-试探回滚只撤-m_pos不撤日志幽灵-parsetarg-行) | 试探失败回滚只撤 `m_pos`，`[parse:targ]` 日志已打印撤不回 ⇒ 幽灵日志行（"日志即契约"基线被污染） | `src/parser.cpp` parsePrimaryExpr + parseTemplateArgumentList | 低（纯日志，不影响正确性） | ⬜ 未修 |
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
 > B13/B14/B15 三条根因相同 —— 见文末[小结](#小结-字符串兼任-id-与路径)。
@@ -2169,3 +2173,84 @@ inferCall 四路（成员/自由函数/函数模板/回退）全不接类模板�
 （+3 新文件）。
 
 **文档**：docs/learn/43 §2。
+
+---
+
+## B31. 模板-id 试探把 `a<b>(c)` 误判为模板调用（拒收合法程序）
+
+**来源**：复查 `parsePrimaryExpr` 的 template-id 歧义消解（parser.cpp:2989 起
+"试探法三步曲"）时确认。这轮代码审查顺带核对出三个**无问题**项（`>>` 不切 token、
+`m_stopAtGreater` 有 save/restore、表达式分支异常即回滚）—— 但判据本身有方向性分歧。
+
+**复现**
+
+```cpp
+int main() {
+    int a=1, b=2, c=3;
+    return a<b>(c);    // clang：比较链 (a<b)>(c) = false → rc=0（仅 -Wparentheses 警告）
+}
+```
+
+| | minicc | clang++-18 `-std=c++20` |
+|---|---|---|
+| `return a<b>(c);` | ❌ rc=1（判成模板调用，Sema 报无此模板） | ✅ rc=0 |
+
+**性质**：**拒收合法程序**。minicc 的判据是"`>` 后紧跟 `(` 或 `::` ⇒ 认定 template-id"，
+而 clang 把 `a<b>(c)` 解析为比较链 `(a<b)>(c)`（左结合 relational 运算，
+`<` 前不是模板名就是比较）。
+
+**根因**：架构性的。**clang 在这一刻会反向查符号表**判"`a` 是不是模板名"
+（语法 ⇄ 语义双向反馈）；minicc 则把符号表查询整体推迟到 Sema（语法期零语义，
+这是 [stmt.ambig] 两轮修复的设计基石），纯语法启发式拿不到"是不是模板"这个信息，
+只能看紧跟的 token 下注。`x<y>(z)` 全变量的写法现实中罕见
+（需要三个短名字恰好凑成这个形状），所以一直没炸。
+
+**要修的话**：Parser 持一份**只读的"模板名登记表"**（类模板/别名模板/函数模板名，
+Pass 1 前向收集或 Lexer 期建），消歧时先查表：名字在表中 ⇒ template-id；
+不在 ⇒ 比较运算。不动 Sema 分层（登记表只是语法期的消歧 hint，不做决议）。
+注意与 docs/learn/39 §"刻意不收 Less/Greater"的判据协同，别把 `>` 收进
+`isExprContinuation`（tmpl 21..26 会全线漂移）。
+
+**状态**：⬜ 未修
+
+---
+
+## B32. 模板-id 试探回滚只撤 `m_pos`，不撤日志（幽灵 `[parse:targ]` 行）
+
+**来源**：与 B31 同轮代码审查。B31 是判据错，本条是**机制漏**：试探-回滚的
+清理只做了一半。
+
+**复现**
+
+```cpp
+class Box { public: int v; };
+int main() {
+    int a = 1, c = 3;
+    a < Box > c;    // 比较链 (a<Box)>c —— Box 语法上是合法类型实参，试探【成功】
+    return 0;
+}
+```
+
+- Parser 走到 parser.cpp:3001 的试探：`parseTemplateArgumentList()` 把 `Box`
+  解析成类型实参 **成功**，内部打印 `[parse:targ] template argument list: <1 argument(s)>`
+  及逐实参行；
+- 随后发现 `>` 后是 `c` 不是 `(`/`::` ⇒ `isTemplateId = false` ⇒
+  `m_pos = saved` 回滚，按比较表达式重新解析 —— **语法与语义都对**；
+- 但刚才那几行 `[parse:targ]` 日志**撤不回**，留在输出里成幽灵记录
+ （最终 AST 与日志对不上）。
+
+**性质**：纯日志瑕疵，不影响编译正确性；但对本项目"**日志即契约**"的基线体系
+（logdiff 逐字节比对、单测子串匹配日志原文、docs/learn 直接粘贴日志片段）
+是真污染 —— 用户照着日志学解析过程会被误导。
+
+**根因**：回滚只恢复了 `m_pos` 一个状态维度。`parseTemplateArgumentList`
+内部到处 `std::cout` 直接打点（698~807 行共 5+ 处），没有"静默模式"概念；
+试探期间产生的输出没有任何缓冲/抑制机制。
+
+**要修的话**：给 Parser 加一个**静默深度计数器**（`m_quietDepth`）：
+试探三步曲入口 `++m_quietDepth`、出口 `--m_quietDepth`；
+所有 `[parse:targ]` / `[parse]` 打点处包一层 `if (m_quietDepth == 0)`。
+（把日志收口成一个小宏/辅助函数，避免 5 处散落判断日后漏改。）
+不改 `parseIntLiteral` 的刻意不打日志约定（learn/39）。
+
+**状态**：⬜ 未修
