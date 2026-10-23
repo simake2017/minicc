@@ -630,9 +630,29 @@ private:
      *  返回 nullptr = Q 的作用域里没有叫 m 的数据成员。
      *  为什么必须走布局而不是 Q 自己的布局：同一字段在派生类布局里的偏移可能含
      *  子对象偏移（[class.mi]），而 CodeGen 用的就是这个布局。 */
-    const FieldInfo* resolveQualifiedField(const std::string& ownerClass,
-                                           const std::string& qualifier,
-                                           const std::string& member) const;
+    /** 限定名成员 `Q::m` 落到【ownerClass 对象布局】里的那一条字段。
+     *  调用前需自行确认 Q 是 ownerClass 或它的基类（isClassOrBaseOf）。
+     *  返回 nullptr = Q 的作用域里没有叫 m 的数据成员。
+     *  为什么必须走布局而不是 Q 自己的布局：同一字段在派生类布局里的偏移可能含
+     *  子对象偏移（[class.mi]），而 CodeGen 用的就是这个布局。
+     * 【B31 扩展】第二查找源：布局落空后查符号表 "Q::m" —— static 数据成员
+     *  不占布局（[class.static.data]），是"挂在类名上的全局符号"。两路合一
+     *  是本判据的【单点】：类内裸名 `A::count`（inferVar 第 0 步）与
+     *  `obj.A::count`（inferMember 限定分支）共用，隐藏方向（实例字段优先）
+     *  与 [class.member.lookup]/3 一致。 */
+    struct QualifiedLookupResult {
+        const FieldInfo* field = nullptr;   // ① 实例字段命中（权威偏移在它身上）
+        Symbol*          statik = nullptr;  // ② static 数据成员命中（符号表第二源）
+        bool valid() const { return field || statik; }
+    };
+    QualifiedLookupResult resolveQualifiedField(const std::string& ownerClass,
+                                                const std::string& qualifier,
+                                                const std::string& member);
+
+    // ── static 数据成员（[class.static.data]；BUGS.md B31）────────────────────
+    // 类外定义（`int A::count = 7;`，Parser 拼成 GlobalVarDecl{name="A::count"}）
+    // 决议时登记：防"一个成员两个定义"（C++ 是 ODR 违规，链接器层面才爆）。
+    std::set<std::string> m_definedStaticMembers;
 
     // ── auto 占位符（[dcl.spec.auto]/7）──
     // auto 可能被 cv/指针/引用包住（Const(Auto) / Pointer(Auto) / ...），

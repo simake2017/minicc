@@ -2174,6 +2174,7 @@ inferCall 四路（成员/自由函数/函数模板/回退）全不接类模板�
 
 **文档**：docs/learn/43 §2。
 
+<<<<<<< HEAD
 ---
 
 ## B31. 模板-id 试探把 `a<b>(c)` 误判为模板调用（拒收合法程序）
@@ -2309,3 +2310,71 @@ public:
    收口后静默开关、未来加时间戳/日志级别都是改一处。
 
 **状态**：⬜ 未修（已列入 ROADMAP 主线 I 第 2 项）
+
+---
+
+## B33. static 数据成员整体缺失：Parser 硬性拒收 + 无存储模型
+
+**来源**：追问"`Other::s` 这种静态字段怎么访问"时确认 ——
+类体内 `static int count;` 直接在 Parser 报
+"static data members are not implemented (only static member functions are)"
+（**拒收合法程序**），整条 [class.static.data] 没有实现。
+
+**复现**（修复前）
+
+| 程序 | minicc（修前） | clang++-18 |
+|---|---|---|
+| `struct A { static int count; }; int A::count = 3; A::count` | ❌ rc=1 Parser 硬拒 | ✅ rc=0 |
+| `static const int limit = 7;` 类内初始化 + 读取 | ❌ 同上 | ✅ rc=0（编译期常量折叠） |
+| 成员函数内裸名 `return count + limit;` | ❌ 同上 | ✅ rc=0 |
+| 模板类 `C<int>::cid` | ❌ 同上 | ✅ rc=0 |
+
+**设计**（不是 bug 修复而是特性落地，但按本仓惯例记此）：
+① **存储模型**：static 成员不属于对象（sizeof 不含它）= "挂在类名上的
+   全局变量"。类内只是【声明】；非 const 成员的存储只能来自类外定义
+   （`int A::count = 3;` ⇒ 全局符号 `A::count`，asmSymbol 净化为
+   `A__count`，读写两端同源）。漏定义又 odr-use ⇒ 链接期
+   `undefined reference`（与 clang 的 ld 报错同形态，响亮）。
+② **类内初始化**（[class.static.data]/3）：const 整型族 / constexpr
+   允许类内初始化 ⇒ 编译期常量、**无存储**。★ 判据对 Const 包裹剥一层
+   再查家族（`const int` 是 Const(Int)，isInteger() 只看最外层 kind —
+   第一版没剥，把合法的 `const int limit = 7` 当场误拒）。
+   双登记：staticConsts（isTypeAccess 折叠 `Cls<Args>::value` 的老设施）
+   + registerConstVar 编译期常量表（裸名传播 / NTTP 实参 `Buf<A::twice>`）。
+③ **读取三路径判据单点**（承 B21/B22 教训）：`A::count`（Parser 粘单名
+   → 符号表全名，inferVar 第 0 步走 resolveQualifiedField 第二源）、
+   `a.count`（布局落空 → 符号表回退，inferMember 普通分支）、
+   `a.A::count`（resolveQualifiedField：布局三分条件循环 → static 第二源
+   符号表 BFS 基类链）。第二源在 resolveQualifiedField 一处，两条调用
+   路径共用。
+④ **查找顺序 = [class.member.lookup]/3 隐藏**：实例字段（扁平布局）
+   先于 static 成员 —— 派生类实例字段可合法隐藏基类 static。
+⑤ **折叠槽**：类内初始化的 static const 没有存储，MemberExpr 读取必须
+   折叠成立即数 —— MemberExpr 加 `staticConstFolded/Value` 回填槽
+   （CodeGen 见槽发 `movq $v`），lookupStaticConst 沿基类链查。
+⑥ **成员函数内裸名的时序坑**：ReturnStmt::visit 是【先 fold 后 infer】，
+   inferVar 第 2.5 步的改名还没发生，裸名 `limit` 在折叠器里查不到。
+   修法：constResolver 回调补第 ② 路 —— 直查落空时按当前类 + 基类链
+   BFS 补查 "类名::裸名"（与 inferVar 2.5 同一判据形状）。
+⑦ **类外定义的校验**（processGlobalVarDecl 头部）：
+   ★ 判据收窄 —— 限定者是【类】才走 static 校验；`int Math::g_factor`
+   （namespace 成员）同形但走普通全局变量旧路（第一版把命名空间成员
+   定义也拦下，decl_01 当场变红）。四条校验：类存在 / 声明过 /
+   **equals 同类型**（typeCompatible 会把 long/int 判兼容静默放行，
+   探针校准时实测抓到）/ ODR 单定义。
+⑧ **模板类**：实例化步骤 5.7 把蓝图 staticDataMembers（含初始化式
+   cloneExpr）替换后挂到实例类 —— 实例经 processClassDecl 自然完成
+   常量表/符号注册，与 C++ 语义一致（蓝图不过 processClassDecl）。
+
+**回归用例**：`tests/lang/test_basics_13_static_member.cpp`（正例 13
+检查点：三入口同存储读写 / 成员函数裸名 / const 三路径折叠 / 继承 +
+实例字段隐藏 / 命名空间类多级限定 / 模板类 / NTTP 实参，运行钉 0，
+clang 对拍一致）+ 5 个负例（basics_14..18：out of line 初始化 /
+no member named / redefinition / not a class / different type，
+文案与 clang++-18 **逐字相同**，全部探针校准）。
+
+**日志漂移**：既有 149 个集成用例**逐字节零漂移**；基线 149 → 155
+（+6 新文件）。全量 ctest 346 全绿。
+
+**文档**：docs/learn/44。
+

@@ -1246,7 +1246,27 @@ SemanticAnalyzer::SemanticAnalyzer() {
     // （常量表随声明增长）—— 注入查询回调，保持 ConstantFolder 不依赖
     // 符号表（与上面三个求值器同一分层形状：能力住 Sema，回调注入引擎）。
     m_constantFolder.setConstResolver(
-        [this](const std::string& name) { return lookupConstValue(name); });
+        [this](const std::string& name) -> std::optional<ConstantFolder::IntegralValue> {
+            // ① 直查全名（`A::limit` 粘连名、普通 const 变量）
+            if (auto v = lookupConstValue(name)) return v;
+            // ② 类作用域静态成员的【裸名】（B31）：成员函数体里写 `limit`，
+            //   折叠先于 inferVar 改名执行（ReturnStmt::visit 先 fold 后 infer），
+            //   这里按 inferVar 第 2.5 步的同一判据（当前类 + 基类链 BFS）补查
+            //   "类名::裸名"。查不到维持 nullopt，VarExpr 原样保留走符号表。
+            if (m_currentClassName.empty()) return std::nullopt;
+            std::vector<std::string> work = {m_currentClassName};
+            std::set<std::string> visited;
+            while (!work.empty()) {
+                std::string cur = work.back();
+                work.pop_back();
+                if (!visited.insert(cur).second) continue;
+                if (auto v = lookupConstValue(cur + "::" + name)) return v;
+                auto it = m_classDecls.find(cur);
+                if (it == m_classDecls.end()) continue;
+                for (auto& bn : it->second->baseClassNames) work.push_back(bn);
+            }
+            return std::nullopt;
+        });
 }
 
 // ─── 推导缩进辅助 ───────────────────────────────────────────────────────────
@@ -1493,6 +1513,65 @@ void SemanticAnalyzer::registerConstVar(
 
 void SemanticAnalyzer::processGlobalVarDecl(GlobalVarDeclPtr decl) {
     decl->declaredType = resolveType(decl->declaredType);
+
+    // ── static 数据成员的类外定义：`int A::count = 7;`（[class.static.data]；B31）──
+    // Parser 把名字拼成了 "A::count"（命名空间类则是 "N::A::count"）。这不是新
+    // 变量 —— 是给已声明的 static 成员【提供存储】：校验四件套后走常规全局变量
+    // 路径发射（asmSymbol("A::count") = .data 段标签 A__count，读写两端同源于它）。
+    // 对照 clang：ActOnCXXDeclarator 判这是 static 成员定义；校验失败各条文案
+    // 与 clang++-18 逐字对齐（探针见 docs/learn/44）。
+    // ★ 判据收窄：只有限定者是【类】时才走 static 成员定义的校验 ——
+    //   `int Math::g_factor = 2;`（namespace Math 的成员）也是 `名字::名字` 形，
+    //   但那是普通全局变量（注册成全局符号 "Math::g_factor"），绝不能拦。
+    bool isStaticMemberDef = false;
+    {
+        const auto sep0 = decl->name.rfind("::");
+        if (sep0 != std::string::npos
+            && m_classDecls.find(decl->name.substr(0, sep0)) != m_classDecls.end()) {
+            isStaticMemberDef = true;
+        }
+    }
+    if (isStaticMemberDef) {
+        const auto sep = decl->name.rfind("::");
+        const std::string qual = decl->name.substr(0, sep);
+        const std::string member = decl->name.substr(sep + 2);
+
+        // ① 类存在（m_classDecls 是全名注册：命名空间类叫 "N::A"）
+        auto clsIt = m_classDecls.find(qual);
+        if (clsIt == m_classDecls.end()) {
+            error(std::format("'{}' is not a class, namespace, or enumeration", qual),
+                  decl->location);
+        }
+        // ② 该类声明过这个 static 成员
+        const StaticDataMember* smDecl = nullptr;
+        for (auto& sm : clsIt->second->staticDataMembers) {
+            if (sm.name == member) { smDecl = &sm; break; }
+        }
+        if (!smDecl) {
+            error(std::format("no member named '{}' in '{}'", member, qual),
+                  decl->location);
+        }
+        // ③ 类型一致：这里要的是【同一类型】而非可转换 —— typeCompatible 会把
+        //    long/int 这种可隐转的对判成兼容，而 clang 对 `long A::count`（声明
+        //    int）报 "redefinition of 'count' with a different type"（探针校准）。
+        if (!smDecl->type || !decl->declaredType
+            || !smDecl->type->equals(decl->declaredType)) {
+            error(std::format(
+                "redefinition of '{}' with a different type: '{}' vs '{}'",
+                member, decl->declaredType ? decl->declaredType->toString() : "?",
+                smDecl->type ? smDecl->type->toString() : "?"), decl->location);
+        }
+        // ④ 一个成员只许一个定义（ODR；C++ 要到链接期才爆，这里编译期拦）。
+        //    clang 口径：报的是【成员裸名】不是全名。
+        if (!m_definedStaticMembers.insert(decl->name).second) {
+            error(std::format("redefinition of '{}'", member), decl->location);
+        }
+        std::cout << std::format(
+            "  [static] ★ 类外定义：{}（存储 = 全局符号 {}）\n",
+            decl->name, decl->name);
+        // 初值过一遍折叠后走下面的类型检查/登记（与全局变量同路）。
+    }
+
     // 主线 D 二批：全局初始化式也过一遍常量折叠（此前只有局部变量折），
     // 随后登记编译期常量表 —— `constexpr int k = 2+3;` 的全局 k 由此
     // 可在 main 体内传播 / 作 NTTP 实参。
@@ -1517,7 +1596,11 @@ void SemanticAnalyzer::processGlobalVarDecl(GlobalVarDeclPtr decl) {
     sym.kind = SymbolKind::Variable;
     sym.isLocal = false;
     sym.definedAt = decl->location;
-    m_symbolTable.globalScope()->define(decl->name, sym);
+    // static 成员的类外定义：符号表条目在类内声明时已注册（first-wins，
+    // 类型以声明点为准），重复 define 只会让快照里多出一条同名片花。
+    if (!isStaticMemberDef) {
+        m_symbolTable.globalScope()->define(decl->name, sym);
+    }
 
     std::cout << std::format("  [register] global variable '{}' : {}\n",
         decl->name, decl->declaredType ? decl->declaredType->toString() : "auto");
@@ -2039,6 +2122,71 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
 
         std::cout << std::format("    field: {} : {}\n",
             field.name, field.type ? field.type->toString() : "?");
+    }
+
+    // ── static 数据成员注册（[class.static.data]；BUGS.md B31）──────────────
+    // 三个落点，一次做完（本类只注册一次，实例类经 instantiate 的克隆各注册各的）：
+    //   ① 符号表 define "类名::成员" —— inferVar 类内路径 / inferMember 两分支的
+    //      查找源（resolveQualifiedField 第二源、裸名回退都查它）；
+    //   ② 类内初始化式（const 整型族/constexpr，[class.static.data]/3）⇒ 求值进
+    //      编译期常量表（裸名 `A::limit` 被常量传播折叠）+ staticConsts
+    //      （`Trait<T>::value` 的 isTypeAccess 折叠路，沿继承链查）；
+    //   ③ 非 const 且无类内初值 ⇒ 只声明：存储等类外定义
+    //      （`int A::count = 7;` 走 processGlobalVarDecl 的静态成员定义校验）。
+    // 对照 clang：VarDecl + isStaticDataMember；常量求值上下文直接 EvaluateAsInt。
+    for (auto& sm : decl->staticDataMembers) {
+        sm.type = resolveType(sm.type);
+        const std::string fullName = decl->name + "::" + sm.name;
+
+        // 类内重复声明（`static int count; static int count;`）当场拒收
+        for (auto& other : decl->staticDataMembers) {
+            if (&other != &sm && other.name == sm.name) {
+                error(std::format("duplicate static member '{}'", sm.name), decl->location);
+            }
+        }
+
+        Symbol sym;
+        sym.name = fullName;
+        sym.type = sm.type;
+        sym.kind = SymbolKind::Variable;
+        sym.isLocal = false;
+        sym.definedAt = decl->location;
+        m_symbolTable.globalScope()->define(fullName, sym);
+        std::cout << std::format("    static member: {} : {}\n",
+            fullName, sm.type ? sm.type->toString() : "?");
+
+        if (sm.initializer) {
+            // [class.static.data]/3：类内初始化只放行 const 整型族（constexpr 前缀
+            // 在 parseType 里已 implies const）。其余（非 const / 浮点 / 类类型…）
+            // 必须类外定义 —— 拒收文案与 clang 逐字对齐（探针校准，见 docs/learn/44）。
+            // 判据对 Const 包裹剥一层再查家族（`const int` 是 Const(Int)，
+            //   isInteger() 只看最外层 kind —— 不剥会误拒合法的 const 整型）。
+            const TypePtr bare = sm.type->isConst() ? sm.type->stripConst() : sm.type;
+            if (!sm.type->isConst()
+                || !(bare->isInteger() || bare->isChar())) {
+                // 注意 clang 原文不带成员名（"non-const static data member must
+                //   be initialized out of line"），逐字对齐不加名字。
+                error("non-const static data member must be initialized out of line",
+                      decl->location);
+            }
+            sm.initializer = m_constantFolder.fold(std::move(sm.initializer));
+            auto evaluated = m_constantFolder.evaluateIntegral(sm.initializer);
+            if (!evaluated) {
+                error(std::format(
+                    "static member '{}' initializer is not a constant expression",
+                    sm.name), decl->location);
+            }
+            const int64_t value = evaluated->value;
+            // 静态常量表：isTypeAccess 折叠（`Cls<Args>::value`）按类作用域+基类链查
+            decl->staticConsts[sm.name] = StaticConstMember{value, sm.type};
+            // 编译期常量表：裸名 `A::limit` 走常量传播折叠（registerConstVar 的
+            // 判据自带 const 整型族过滤，形态取声明类型 —— K<A::limit> 由此可用）。
+            ExprPtr initRef = sm.initializer;
+            registerConstVar(fullName, sm.type, initRef, sm.isConstexpr, decl->location);
+            std::cout << std::format(
+                "    [static] ★ 类内初始化：{} = {} : {}（编译期常量，无存储）\n",
+                fullName, value, sm.type ? sm.type->toString() : "?");
+        }
     }
 
     // ── 合成默认构造与析构（若未显式提供）──
@@ -3637,7 +3785,9 @@ TypePtr SemanticAnalyzer::inferNullptrLiteral(NullptrLiteralExpr&) {
 
 // ─── 变量引用的符号决议 ═══════════════════════════════════════════════════════
 // 查找顺序：① 符号表（作用域链由内向外）② 当前类的字段（类方法中，即隐式 this->x）
+//   2.5 static 数据成员的类作用域裸名（[class.static.data]，实例字段优先 ⇒ 在②后）
 //   ③ m_functionMap（x 是函数名则返回其返回类型）④ 全失 → error("Undefined variable")
+//   （另有第 0 步限定名 `Q::v` 在最前，见函数内注释。）
 // demo（类 C 的成员函数内，块中引用名字 x）：block ✗ → 函数作用域 ✗ → global ✗
 //   ⇒ C 的布局表 findField("x") ✓ ⇒ 返回字段类型（"编译期看符号"兑现为字段偏移的线索）
 // ┌─ DEMO ─────────────────────────────────────────────────────────────────────
@@ -3663,22 +3813,36 @@ TypePtr SemanticAnalyzer::inferVar(VarExpr& expr) {
         const std::string qualifier = expr.name.substr(0, sep);
         const std::string member    = expr.name.substr(sep + 2);
         if (isClassOrBaseOf(m_currentClassName, qualifier)) {
-            const FieldInfo* hit =
+            QualifiedLookupResult hit =
                 resolveQualifiedField(m_currentClassName, qualifier, member);
-            if (!hit) {
+            if (!hit.valid()) {
                 error(std::format("no member named '{}' in '{}'", member, qualifier),
                       expr.location);
             }
+            if (hit.statik) {
+                // ── static 数据成员（B31）：不占布局、无偏移可回填。把名字换成
+                //   符号表里注册的全名（"A::count"）—— CodeGen 的 VarExpr 全局
+                //   路径按名字净化后即是 .data 段标签，一行不用改。const 整型族
+                //   类内初值已进编译期常量表，更早被折叠成字面量，走不到这里。
+                expr.name = hit.statik->name;
+                std::cout << std::format(
+                    "{}[resolve] '{}' → {}    (static member, 全局符号 {})\n",
+                    inferIndent(), hit.statik->name,
+                    hit.statik->type ? hit.statik->type->toString() : "?",
+                    hit.statik->name);
+                return hit.statik->type;
+            }
+            const FieldInfo* f = hit.field;
             // 回填位置 + 把名字还原成裸名：CodeGen 两条路径（读 / 写）优先吃回填值，
             // 未回填时才按名字查（那时裸名就是原来的语义，不会更糟）。
-            expr.resolvedFieldOffset = static_cast<int>(hit->offset);
-            expr.resolvedFieldSize   = hit->size;
+            expr.resolvedFieldOffset = static_cast<int>(f->offset);
+            expr.resolvedFieldSize   = f->size;
             expr.name = member;
             std::cout << std::format(
                 "{}[resolve] '{}::{}' → {}    (qualified member, offset={} 隐式 this)\n",
                 inferIndent(), qualifier, member,
-                hit->type ? hit->type->toString() : "?", hit->offset);
-            return hit->type;
+                f->type ? f->type->toString() : "?", f->offset);
+            return f->type;
         }
     }
 
@@ -3718,6 +3882,35 @@ TypePtr SemanticAnalyzer::inferVar(VarExpr& expr) {
                     field->type ? field->type->toString() : "?",
                     field->offset);
                 return field->type;
+            }
+        }
+
+        // 2.5 static 数据成员的类作用域裸名（[class.static.data]；B31）
+        // 成员函数体内写裸名 `count` 等价于 `A::count`（类作用域查找的一部分，
+        // [class.member.lookup] 对静态/非静态成员同链）——static 成员不在布局里，
+        // 步骤 2 查不到。顺序在实例字段【之后】：同名时实例字段隐藏静态成员
+        // （[class.member.lookup]/3），反了会静默绑错（B14 同类）。
+        // 沿当前类 + 基类链查符号表（与 resolveQualifiedField 第二源同形状）；
+        // 命中把名字改写成注册全名 —— CodeGen 的 VarExpr 全局路径按名净化后
+        // 即是 .data 段标签。const 整型族更早被常量传播折掉，走不到这里。
+        {
+            std::vector<std::string> work = {m_currentClassName};
+            std::set<std::string> visited;
+            while (!work.empty()) {
+                std::string cur = work.back();
+                work.pop_back();
+                if (!visited.insert(cur).second) continue;
+                if (Symbol* s = m_symbolTable.lookup(cur + "::" + expr.name)) {
+                    expr.name = s->name;
+                    std::cout << std::format(
+                        "{}[resolve] '{}' → {}    (static member, 全局符号 {})\n",
+                        inferIndent(), s->name,
+                        s->type ? s->type->toString() : "?", s->name);
+                    return s->type;
+                }
+                auto it = m_classDecls.find(cur);
+                if (it == m_classDecls.end()) continue;
+                for (auto& bn : it->second->baseClassNames) work.push_back(bn);
             }
         }
     }
@@ -5362,19 +5555,46 @@ bool SemanticAnalyzer::isClassOrBaseOf(const std::string& derived,
 //      sourceClass 只在"与基类撞名被加前缀"时才落名）
 //   ③ sourceClass 比 qualifier 更靠下（Q 是它的祖辈）—— 字段其实声明在 Q 里，
 //      只是经过若干层才带到本类的布局
-const FieldInfo* SemanticAnalyzer::resolveQualifiedField(const std::string& ownerClass,
-                                                         const std::string& qualifier,
-                                                         const std::string& member) const {
+// 【B31 第二查找源】布局三条件全落空 ⇒ 符号表查 "qualifier::member"：static 数据
+//   成员不占布局、是"挂在类名上的全局符号"（[class.static.data]）。顺序在实例字段
+//   【之后】是刻意的 —— 派生类的实例字段隐藏基类 static 成员（[class.member.lookup]/3），
+//   反了会静默绑错（B14 那一类"隐藏方向做反"）。
+SemanticAnalyzer::QualifiedLookupResult
+SemanticAnalyzer::resolveQualifiedField(const std::string& ownerClass,
+                                        const std::string& qualifier,
+                                        const std::string& member) {
+    QualifiedLookupResult result;
     auto classIt = m_classTypes.find(ownerClass);
-    if (classIt == m_classTypes.end()) return nullptr;
-    for (auto& f : classIt->second->classLayout.fields) {
-        if (f.bareName() != member) continue;          // ★ 权威裸名，不是显示名
-        bool belongs = f.sourceClass == qualifier
-            || (f.sourceClass.empty() && qualifier == ownerClass)
-            || (!f.sourceClass.empty() && isClassOrBaseOf(f.sourceClass, qualifier));
-        if (belongs) return &f;
+    if (classIt != m_classTypes.end()) {
+        for (auto& f : classIt->second->classLayout.fields) {
+            if (f.bareName() != member) continue;          // ★ 权威裸名，不是显示名
+            bool belongs = f.sourceClass == qualifier
+                || (f.sourceClass.empty() && qualifier == ownerClass)
+                || (!f.sourceClass.empty() && isClassOrBaseOf(f.sourceClass, qualifier));
+            if (belongs) { result.field = &f; return result; }
+        }
     }
-    return nullptr;
+    // ② static 数据成员：符号表注册的就是 "类名::成员" 全名（processClassDecl）。
+    //    沿 qualifier 及其基类链查（BFS + visited 防环，与 isClassOrBaseOf 同形状）：
+    //    `d.Derived::limit`（limit 声明在 Base）由此命中 —— 实例字段的继承查找
+    //    由扁平布局天然覆盖，static 成员没有布局，继承只能靠这条链。
+    {
+        std::vector<std::string> work = {qualifier};
+        std::set<std::string> visited;
+        while (!work.empty()) {
+            std::string cur = work.back();
+            work.pop_back();
+            if (!visited.insert(cur).second) continue;
+            if (Symbol* sym = m_symbolTable.lookup(cur + "::" + member)) {
+                result.statik = sym;
+                return result;
+            }
+            auto it = m_classDecls.find(cur);
+            if (it == m_classDecls.end()) continue;
+            for (auto& bn : it->second->baseClassNames) work.push_back(bn);
+        }
+    }
+    return result;
 }
 
 FuncDeclPtr SemanticAnalyzer::findMethodInHierarchy(const std::string& className,
@@ -5455,19 +5675,40 @@ TypePtr SemanticAnalyzer::inferMember(MemberExpr& expr) {
         const std::string qualifier = expr.memberName.substr(0, sep);
         const std::string member    = expr.memberName.substr(sep + 2);
         if (isClassOrBaseOf(actualType->name, qualifier)) {
-            const FieldInfo* hit = resolveQualifiedField(actualType->name, qualifier, member);
-            if (!hit) {
+            QualifiedLookupResult hit =
+                resolveQualifiedField(actualType->name, qualifier, member);
+            if (!hit.valid()) {
                 error(std::format("no member named '{}' in '{}'", member, qualifier),
                       expr.location);
             }
-            expr.resolvedFieldOffset = static_cast<int>(hit->offset);
-            expr.resolvedFieldSize   = hit->size;
+            if (hit.statik) {
+                // ── static 数据成员（B31）：回填全局符号，CodeGen 直接 RIP 寻址，
+                //   对象表达式照常求值（[expr.ref]：postfix 表达式被求值，值弃用）。
+                expr.resolvedStaticSymbol = hit.statik->name;
+                expr.memberName = member;
+                // 类内初始化的 static const（常量表命中）没有存储 —— 读取折叠成
+                // 字面量；lookupStaticConst 沿基类链走，故从限定类起查。
+                int64_t folded = 0;
+                if (lookupStaticConst(qualifier, member, folded)) {
+                    expr.staticConstFolded = true;
+                    expr.staticConstValue  = folded;
+                }
+                std::cout << std::format(
+                    "{}[member] {}.{}::{} → {}    (static member, 全局符号 {})\n",
+                    inferIndent(), actualType->name, qualifier, member,
+                    hit.statik->type ? hit.statik->type->toString() : "?",
+                    hit.statik->name);
+                return hit.statik->type;
+            }
+            const FieldInfo* f = hit.field;
+            expr.resolvedFieldOffset = static_cast<int>(f->offset);
+            expr.resolvedFieldSize   = f->size;
             expr.memberName = member;
             std::cout << std::format(
                 "{}[member] {}.{}::{} → {}    (qualified member, offset={})\n",
                 inferIndent(), actualType->name, qualifier, member,
-                hit->type ? hit->type->toString() : "?", hit->offset);
-            return hit->type;
+                f->type ? f->type->toString() : "?", f->offset);
+            return f->type;
         }
     }
 
@@ -5497,6 +5738,40 @@ TypePtr SemanticAnalyzer::inferMember(MemberExpr& expr) {
             fieldInfo->type ? fieldInfo->type->toString() : "?",
             fieldInfo->offset, fieldInfo->size);
         return fieldInfo->type;
+    }
+
+    // ── static 数据成员的裸名访问 `obj.count`（B31）────────────────────────
+    // 布局落空 ⇒ 符号表查 "类名::裸名"（沿基类链，与 resolveQualifiedField 第二源
+    // 同一形状）：`a.count` / `a.A::count` 是同一成员的两种写法。回填全局符号后
+    // CodeGen 走 RIP 寻址；对象表达式照常求值（[expr.ref]，值弃用）。
+    // ★ 位置在方法查找之前：数据成员与方法同名时，C++ 允许同声明域共存（重载
+    //   集规则），但本项目的"单名字单符号"模型下先数据后方法的顺序与字段一致。
+    {
+        std::vector<std::string> work = {actualType->name};
+        std::set<std::string> visited;
+        while (!work.empty()) {
+            std::string cur = work.back();
+            work.pop_back();
+            if (!visited.insert(cur).second) continue;
+            if (Symbol* sym = m_symbolTable.lookup(cur + "::" + expr.memberName)) {
+                expr.resolvedStaticSymbol = sym->name;
+                // 类内初始化的 static const（常量表命中）没有存储 —— 读取折叠成
+                // 字面量；从对象实际类起查（lookupStaticConst 沿基类链走）。
+                int64_t folded = 0;
+                if (lookupStaticConst(actualType->name, expr.memberName, folded)) {
+                    expr.staticConstFolded = true;
+                    expr.staticConstValue  = folded;
+                }
+                std::cout << std::format(
+                    "{}[member] {}.{} → {}    (static member, 全局符号 {})\n",
+                    inferIndent(), actualType->name, expr.memberName,
+                    sym->type ? sym->type->toString() : "?", sym->name);
+                return sym->type;
+            }
+            auto it = m_classDecls.find(cur);
+            if (it == m_classDecls.end()) continue;
+            for (auto& bn : it->second->baseClassNames) work.push_back(bn);
+        }
     }
 
     // 查找方法 —— 走【类作用域 + 基类链】（[class.member.lookup]）

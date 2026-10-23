@@ -548,6 +548,23 @@ ClassDeclPtr TemplateInstantiator::instantiate(
         newClass->memberTemplates.push_back(clonedMt);
     }
 
+    // 5.7 克隆 static 数据成员（[class.static.data]；BUGS.md B31）
+    // 实例类各持各的声明（processClassDecl 会按实例名注册 "Box_int::value"），
+    // 类型随形参替换（`static const int size = sizeof(T)` 这类用法由此成立），
+    // 初始化式走 cloneExpr（表达式位置上的 T 一并替换）。
+    // ★ 每个实例的静态常量是【不同实体】：Box<int>::tag 与 Box<double>::tag
+    //   在符号表里是两个名字（"Box_int::tag" / "Box_double::tag"），不会互踩。
+    for (auto& sm : templateDecl->classTemplate->staticDataMembers) {
+        StaticDataMember cloned;
+        cloned.name = sm.name;
+        cloned.type = substituteType(sm.type, subst);
+        cloned.isConstexpr = sm.isConstexpr;
+        if (sm.initializer) {
+            cloned.initializer = cloneExpr(sm.initializer, subst);
+        }
+        newClass->staticDataMembers.push_back(std::move(cloned));
+    }
+
     // 6. 生成 mangled name
     std::string mangledName = NameMangler::mangleTemplateInstance(
         templateDecl->classTemplate->name, args);

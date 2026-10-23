@@ -314,6 +314,26 @@ struct MemberExpr : Expression {
     int      resolvedFieldOffset = -1;
     uint32_t resolvedFieldSize   = 0;
 
+    // ── static 数据成员访问（[class.static.data]；BUGS.md B31）────────────────
+    // 非空 ⇒ 这个 . 访问的是【静态成员】：不占对象内存、没有偏移，CodeGen 不该
+    // 按"基址+偏移"寻址，而要直接读写全局符号（值 = 本字段，即符号表里注册的
+    // "类名::成员" 全名，asmSymbol 净化后即是 .data 段标签）。
+    // 对象表达式仍被求值（[expr.ref]：postfix 表达式照常求值，值弃用）——
+    // 故放在 resolvedFieldOffset 判定【之前】：static 命中时偏移槽保持 -1。
+    // Sema 的 resolveQualifiedField 第二查找源（符号表）命中后回填；裸名
+    // `obj.count` 走 inferMember 的普通分支回退，同样回填这里（单一消费点）。
+    std::string resolvedStaticSymbol;
+
+    // ── 类内初始化的 static const 成员的【编译期折叠】（B31）────────────────
+    // 这类成员没有存储（声明点只注册了常量表，不发全局符号），读取必须替换成
+    // 字面量 —— 否则 CodeGen 按全局符号 RIP 寻址会链接失败（undefined
+    // reference）。inferMember 两条 static 分支用 lookupStaticConst 命中后
+    // 回填；CodeGen 见 staticConstFolded 即发 movq $value 立即数。
+    // 写路径（AssignStmt）无视此槽：对常量赋值由 const 语义另管（边界见
+    // docs/learn/44 §边界）。
+    bool    staticConstFolded = false;
+    int64_t staticConstValue  = 0;
+
     MemberExpr(ExprPtr obj, std::string member, bool arrow)
         : Expression(NodeKind::Member), object(std::move(obj)),
           memberName(std::move(member)), isArrow(arrow) {}
@@ -847,6 +867,19 @@ struct StaticConstMember {
     TypePtr type;          // 常量自身的类型（bool / int …）
 };
 
+// ─── static 数据成员【声明】（[class.static.data]；BUGS.md B31）───────────────
+// 与 staticConsts（纯编译期常量表）互补：这是完整的静态数据成员 ——
+//   占独立存储（类外定义 `int A::count = 7;` 发射全局符号），不占对象内存、
+//   不进 classLayout（sizeof(A) 不含它）。
+// 类内初始化式（initializer 非空）只允许 const 整型族/constexpr
+// （[class.static.data]/3）：这种成员没有存储，读一律编译期折叠成字面量。
+struct StaticDataMember {
+    std::string name;
+    TypePtr     type;
+    ExprPtr     initializer;      // 类内初始化式（可空 ⇒ 等类外定义给存储）
+    bool        isConstexpr = false;
+};
+
 struct ClassDecl : Declaration {
     std::string              name;
     std::vector<std::string> baseClassNames; // 基类名列表（空 = 无继承；
@@ -875,6 +908,14 @@ struct ClassDecl : Declaration {
     //   `int i = Trait<T>::value;` 报错，int→bool 未开放为隐式转换）—— 折叠时按这里的
     //   type 造对应字面量，而不是一律给 int。
     std::unordered_map<std::string, StaticConstMember> staticConsts;
+
+    // ── static 数据成员【声明表】（[class.static.data]；BUGS.md B31）──────────
+    // Parser 类体分支解析 `static int count;` / `static const int limit = 7;` 的产物。
+    // 与 staticConsts 的关系：类内给了初值的 const 整型族成员【同时】登记进
+    //   staticConsts（值在声明点已确定，`Trait<T>::value` 折叠路由此对普通类可用）；
+    //   staticDataMembers 是权威声明表 —— 类外定义的校验（有无声明/类型/重定义）
+    //   只认它。符号表另注册 "类名::成员" 全名（inferVar/inferMember 的查找源）。
+    std::vector<StaticDataMember> staticDataMembers;
 
     // ── 成员类型别名（名 → 目标类型）────────────────────────────────────
     // 【语法】`using type = T;` 与 `typedef T type;`（[dcl.typedef]）

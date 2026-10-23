@@ -915,6 +915,18 @@ GlobalVarDeclPtr Parser::parseGlobalVarDecl() {
     decl->declaredType = parseType();
     const Token& nameTok = expect(TokenType::Identifier, "Expected global variable name");
     decl->name = nameTok.text;
+    // ── static 数据成员的类外定义：`int A::count = 7;`（[class.static.data]）──
+    // 名字部收 IDENT (:: IDENT)* 拼成全名 "A::count"（命名空间类则是 "N::A::count"）。
+    // Sema 的 processGlobalVarDecl 见名字带 "::" ⇒ 按"静态成员定义"校验
+    // （类存在/有该声明/类型一致/不重定义），合法后存储发射与全局变量同路。
+    // 对照 clang：ParseDeclWithFlags 收 nested-name-specifier，Sema 侧
+    //   ActOnCXXDeclarator 判定这是 static 成员定义而非新变量。
+    while (check(TokenType::ColonColon)) {
+        advance();
+        const Token& next = expect(TokenType::Identifier,
+            "Expected member name after '::' in out-of-class definition");
+        decl->name += "::" + next.text;
+    }
     decl->declaredType = parseArrayDeclaratorSuffix(decl->declaredType);
     // 主线 D 二批：接走 parseType 留下的 constexpr 前缀（读走即清，防串味）
     decl->isConstexpr = m_pendingConstexpr;
@@ -1703,10 +1715,11 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
         }
 
         // ── static 成员（[class.static]）──
-        // 本项目只实现 static 成员【函数】：它没有隐式 this 参数，调用时不必传对象。
-        // ★ static 数据成员（`static int count;`）未实现 —— 它需要类外定义与独立
-        //   存储（不是每实例一份）。落到字段分支时明确报错，绝不静默当成普通字段
-        //   （那会每个对象各存一份，语义与 C++ 完全相反，且不报错）。
+        // static 成员【函数】：没有隐式 this 参数，调用时不必传对象 —— 前瞻
+        //   "类型 + 名字 + '('" 命中后走 isMethod 分支。
+        // static 数据成员（`static int count;`）：不占对象内存、无偏移，靠前瞻
+        //   "类型 + 名字 + ['=' 常量式] + ';" 落到字段分支里的专用解析
+        //   （BUGS.md B31；理论 [class.static.data]，存储由类外定义提供）。
         // ★ 位置在成员模板【之前】：`template <...> static T f(T)` 的 template 在外层，
         //   但 isStatic/isVirtual 的声明必须先于任何使用它们的成员分支。
         bool isStatic = false;
@@ -1870,8 +1883,39 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             decl->methods.push_back(method);
         } else {
             if (isStatic) {
-                error("static data members are not implemented "
-                      "(only static member functions are)");
+                // ── static 数据成员（[class.static.data]；BUGS.md B31）──────────
+                // `static int count;` / `static const int limit = 7;`
+                // 与 static 成员函数同起点（都认 'static' 前缀），靠前瞻区分：
+                //   static + 类型 + 名字 + '('  ⇒ 方法（上面 isMethod 分支）
+                //   static + 类型 + 名字 + ['=' 常量式] ';' ⇒ 本分支
+                // 【理论】static 数据成员不占对象内存（sizeof 不含它）、没有偏移，
+                //   是"挂在类名上的全局变量"：类内只能【声明】（const 整型族/constexpr
+                //   例外，[class.static.data]/3 允许类内给常量初值），存储由类外定义
+                //   `int A::count = 7;` 提供（parseGlobalVarDecl 收限定名）。
+                // 【有意拒收】static 数组/类类型成员：存储与取址约定另说，边界见
+                //   docs/learn/44。
+                // 对照 clang：ParseCXXClassMemberDecl 里 decl-specifier 含 static
+                //   且声明符是 declarator（非 function-declarator）⇒ VarDecl +
+                //   isStaticDataMember。
+                TypePtr smType = parseType();   // 收 const/constexpr 前缀
+                const Token& smName = expect(TokenType::Identifier,
+                                             "Expected static member name");
+                ExprPtr smInit;
+                if (match(TokenType::Assign)) {
+                    smInit = parseExpression();   // 类内初始化式（Sema 判 const 整型族）
+                }
+                expect(TokenType::Semicolon, "Expected ';' after static member declaration");
+                StaticDataMember sm;
+                sm.name = smName.text;
+                sm.type = smType;
+                sm.initializer = std::move(smInit);
+                sm.isConstexpr = m_pendingConstexpr;   // parseType 留下的前缀
+                m_pendingConstexpr = false;
+                decl->staticDataMembers.push_back(std::move(sm));
+                std::cout << std::format(
+                    "  [parse:member] ★ '{}' 是 static 数据成员（不占对象内存，"
+                    "存储在类外定义 [class.static.data]）\n", sm.name);
+                continue;
             }
             // 字段声明
             TypePtr fieldType = parseType();

@@ -1707,6 +1707,16 @@ void CodeGen::visit(AssignStmt& stmt) {
         } break;
         case NodeKind::Member: {
             auto mem = std::static_pointer_cast<MemberExpr>(stmt.target);
+            // ─── static 数据成员写（B31）：obj.count = v / obj.A::count = v ───
+            // 与读路径对称：直接写全局符号，不碰对象（赋值目标语境里对象
+            // 表达式不求值——[expr.ass] 的左值不需要对象值，static 成员尤其
+            // 如此：它没有 this 语义）。rax 已是右值（函数开头统一求值）。
+            if (!mem->resolvedStaticSymbol.empty()) {
+                emitComment(std::format("static member assign: .{} = ...", mem->memberName));
+                emit(std::format("movq %rax, {}(%rip)       # 静态成员 {} = ...（全局符号）",
+                    asmSymbol(mem->resolvedStaticSymbol), mem->memberName));
+                return;
+            }
             // ─── 字段访问的消除 ───
             // 将 obj.field = value 转化为 [objAddr + fieldOffset] = value
             emitComment(std::format("member assign: .{} = ...", mem->memberName));
@@ -2703,6 +2713,25 @@ void CodeGen::emitVirtualCall(
 // 对照 clang：CodeGenFunction::EmitMemberExpr（链式访问折叠为常量总偏移，本实现逐层 leaq）。
 void CodeGen::visit(MemberExpr& expr) {
     emitComment(std::format("member access: .{}", expr.memberName));
+
+    // ── static 数据成员（B31）：全局符号 RIP 寻址，不走基址+偏移 ──
+    // Sema 回填 resolvedStaticSymbol（"A::count" 全名，asmSymbol 净化后即
+    // .data 段标签）。对象表达式【照常求值】（[expr.ref]：postfix 表达式被
+    // 求值）——副作用保留（`make().count` 仍会调 make()），值弃用。
+    // 必须放在 resolvedFieldOffset 判定之前：static 命中时偏移槽保持 -1。
+    if (!expr.resolvedStaticSymbol.empty()) {
+        emitExpr(expr.object);
+        // 类内初始化的 static const：没有存储，编译期折叠成立即数
+        // （Sema 的 lookupStaticConst 命中后回填 staticConstFolded/Value）。
+        if (expr.staticConstFolded) {
+            emit(std::format("movq ${}, %rax    # 静态常量折叠 .{}（无存储，对象值弃用）",
+                expr.staticConstValue, expr.memberName));
+            return;
+        }
+        emit(std::format("movq {}(%rip), %rax    # 读取静态成员 .{}（全局符号，对象值弃用）",
+            asmSymbol(expr.resolvedStaticSymbol), expr.memberName));
+        return;
+    }
 
     // 计算对象地址
     emitExpr(expr.object);
