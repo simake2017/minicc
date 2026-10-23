@@ -51,8 +51,26 @@
 #include "ast.h"
 #include <vector>
 #include <stdexcept>
+#include <format>
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace minicc {
+
+// =============================================================================
+// 语法错误的专用异常（panic 模式唯一的"预期异常"，B32 / 主线 I 第 3 项）
+// =============================================================================
+// ★ 为什么单独成类型：试探解析（template-id 消歧）靠"捕获 ParseError ⇒
+//   这不是 template-id"做决议，因此试探处只能 catch 本类型 —— 旧代码
+//   catch (const std::exception&) 会把试探内部的【真 bug】（越界 / logic_error）
+//   一并吞掉，静默降级成"比较运算"（BUGS.md B31 附带问题）。
+// 顶层驱动仍按 std::exception 捕获（is-a runtime_error），报错出口不变。
+class ParseError : public std::runtime_error {
+public:
+    explicit ParseError(const std::string& msg) : std::runtime_error(msg) {}
+};
 
 // =============================================================================
 // Parser 类：单遍扫描 Token 流，产出 AST。
@@ -170,6 +188,62 @@ private:
     // parseVarDeclStmt / parseGlobalVarDecl 读走并写进节点的 isConstexpr。
     // 只应出现在变量声明处；出现在形参表等其它位置会被静默当 const（已知边界）。
     bool m_pendingConstexpr = false;
+
+    // ── B32：试探解析的存档点 + 日志缓冲（对照 clang TentativeParsingAction）──
+    // 动机：template-id 消歧等场合需要"空跑一段再决定"，失败就回滚。旧实现
+    //   只回滚 m_pos 一个维度，试探期打点留进输出成幽灵行（BUGS.md B32）；
+    //   且回滚靠手写 saved 变量，Parser 新增状态维度时容易漏救。TokenCheckpoint
+    //   把"存档 + 回卷 + 日志缓冲"做成 RAII：
+    //     构造 ⇒ 快照全维度 + 日志进缓冲栈；
+    //     commit() ⇒ 试探成立，保留进度，缓冲冲刷（成功路径输出逐字节不变）；
+    //     析构未 commit ⇒ 全维度回卷 + 缓冲丢弃（幽灵行根治）。
+    // ★ 新状态维度进快照是编译期强制、不靠 Code Review 记性 —— 这就是防
+    //   "回滚漏维度"复发的结构保证（B32「正确的写法」第 1 条）。
+    class TokenCheckpoint {
+        Parser& p;
+        size_t pos;
+        bool   stopAtGreater;
+        bool   committed = false;
+    public:
+        explicit TokenCheckpoint(Parser& p) : p(p), pos(p.m_pos),
+            stopAtGreater(p.m_stopAtGreater) { p.m_logBuffers.emplace_back(); }
+        ~TokenCheckpoint() {
+            std::string buf = std::move(p.m_logBuffers.back());
+            p.m_logBuffers.pop_back();
+            if (committed) {
+                // 确认：日志落盘；嵌套试探（外层还在缓冲）⇒ 并入外层缓冲，
+                // 由最外层的 checkpoint 统一决定冲刷或丢弃。
+                if (p.m_logBuffers.empty()) std::cout << buf;
+                else p.m_logBuffers.back() += buf;
+            }
+            // 未确认：缓冲随 token 进度一起废弃 —— 试探日志绝不泄漏成幽灵行。
+            if (!committed) {
+                p.m_pos             = pos;
+                p.m_stopAtGreater   = stopAtGreater;
+            }
+        }
+        void commit() { committed = true; }   // 试探成立：保留进度与日志
+        TokenCheckpoint(const TokenCheckpoint&)            = delete;
+        TokenCheckpoint& operator=(const TokenCheckpoint&) = delete;
+    };
+
+    // 试探期日志缓冲栈：空 ⇒ 打点直接出流；非空 ⇒ 追加到栈顶缓冲，由
+    //   TokenCheckpoint 决定冲刷（commit）或丢弃（回卷）。模板-id 消歧等
+    //   试探路径用；非试探路径行为与直写 std::cout 逐字节一致。
+    std::vector<std::string> m_logBuffers;
+
+    // 日志【单一出口】（B32「正确的写法」第 2 条）：全部 [parse:*] 打点过
+    //   这里。收口前 87 处 std::cout 散点直写 —— 符号定名、择优早已"判据
+    //   单点"，日志却一直是散点；同一原则两处执行力度不同。收口后静默
+    //   开关（本函数的缓冲分支）只此一处，未来加时间戳/日志级别也是改一处。
+    // 注意 parseIntLiteral 的"刻意不打日志"约定不变：它根本不调用本函数
+    //   （learn/39 —— 它被每条整数表达式调用，打点会淹没日志）。
+    template<typename... Args>
+    void logParse(std::string_view fmt, Args&&... args) {
+        std::string line = std::vformat(fmt, std::make_format_args(args...));
+        if (m_logBuffers.empty()) std::cout << line;
+        else m_logBuffers.back() += line;
+    }
 
     // ── 声明解析 ──
     // declaration := template-decl | class-decl | enum-decl | namespace-decl

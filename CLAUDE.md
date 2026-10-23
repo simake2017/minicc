@@ -580,6 +580,25 @@ typeCompatible 会误放行 long vs int/ODR 单定义）文案与 clang++-18 逐
 int C<T>::tag = 1;` 未做（Parser 响亮拒收）、常量成员写检查、odr-use 探测、
 foldStaticConst 挂点仍只在变量初始化式。
 
+✅ **主线 I 第 2、3 项已完成（B32，docs/learn/45）** ——
+试探-回滚升级为 RAII 存档点 + 日志收口（不改语言特性，改机制质量）。
+① TokenCheckpoint（parser.h）：构造快照 m_pos + m_stopAtGreater + 日志进缓冲栈，
+commit 冲刷（成功路径输出逐字节不变）、析构未 commit 全维度回卷 + 缓冲丢弃
+（幽灵行机制上不可能再产生；新状态维度进快照是编译期强制）。★ 取舍：缓冲-冲刷
+而非静默开关——成功路径的 [parse:targ] 是真日志，静默会让它们也丢行。
+② 日志单一出口：parser.cpp 全部 87 处 std::cout 散点收进 logParse（链式多段
+改拼 string 单点）；parseIntLiteral 刻意不打日志约定不破。③ 顺带完成第 3 项：
+ParseError 专用异常（is-a runtime_error），试探处窄捕获——旧 catch(std::exception)
+会把试探内部的真 bug（越界/logic_error）吞成"不是模板"静默降级。
+★ 修复过程的意外发现：基线里早已固化 14 行幽灵行无人察觉（flow_01/02/05/06、
+basics_10 凡有比较运算的测试都在默默产幽灵——第三次印证"基线会把污染固化成
+契约"）；且 B32 原始复现 `a < Box > c;` 经 clang 实测是非法程序（minicc 宽松
+放行，等 B31 登记表落地再裁）。测试 tests/lang/test_basics_19（断言在日志：
+基线无 [parse:targ]/[parse:type] 试探残留；运行钉 0，clang 对拍）；ctest 346
+全绿，有意日志漂移仅 5 文件删 14 行幽灵（rc/run 逐字节不变），基线 155 → 156。
+未做的同类现场：parseDeclaration（890）与类体方法/字段判定（1862）的试探让
+[parse:type] 成对重复（无幽灵只有重复），单独成批再瘦身。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

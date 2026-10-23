@@ -144,7 +144,7 @@ bool Parser::isAtEnd() const {
 //    不做 Token 级跳过/同步恢复。调用方（main/驱动）捕获后打印信息并退出。
 //    教学取舍：换取实现极简与错误信息确定性（每处语法错误恰好一条报告）。──
 [[noreturn]] void Parser::errorAt(const Token& tok, const std::string& msg) const {
-    throw std::runtime_error(
+    throw ParseError(
         std::format("[Parse Error] {} at '{}': {}",
             tok.location.toString(), tok.text, msg));
 }
@@ -261,7 +261,7 @@ TypePtr Parser::parseBuiltinTypeSpecifierSeq() {
         base = uns ? Type::makeUInt() : Type::makeInt();
     }
 
-    std::cout << std::format(
+    logParse(
         "  [parse:type] type-specifier-seq: '{}' ⇒ base = {}  ({})\n",
         spelling, base->toString(),
         (nUnsigned ? "无符号，Itanium 编码与有符号版不同" : "有符号"));
@@ -274,7 +274,7 @@ TypePtr Parser::parseType() {
     if (check(TokenType::KwConst)) {
         isConst = true;
         advance();
-        std::cout << std::format("  [parse:type] ✦ const prefix detected\n");
+        logParse("  [parse:type] ✦ const prefix detected\n");
     }
     // constexpr：[dcl.constexpr] —— 隐含 const（"implies const"），且初始化式
     // 必须可常量求值。类型层面按 const 处理；constexpr 性本身经
@@ -283,7 +283,7 @@ TypePtr Parser::parseType() {
         advance();
         isConst = true;
         m_pendingConstexpr = true;
-        std::cout << std::format("  [parse:type] ✦ constexpr prefix detected (implies const)\n");
+        logParse("  [parse:type] ✦ constexpr prefix detected (implies const)\n");
     }
 
     // ── Step 1.5: typename 前缀（依赖限定名消歧，[temp.res]/5）──
@@ -297,7 +297,7 @@ TypePtr Parser::parseType() {
     //   （被消歧的那个名字建成 DependentNameType）。
     if (check(TokenType::KwTypename)) {
         advance();
-        std::cout << "  [parse:type] ✦ typename prefix (依赖限定名消歧)\n";
+        logParse("  [parse:type] ✦ typename prefix (依赖限定名消歧)\n");
     }
 
     // ── Step 2: 解析基础类型（基本类型 / 标识符 / 命名空间限定类型）──
@@ -313,23 +313,23 @@ TypePtr Parser::parseType() {
     }
     else if (match(TokenType::KwInt)) {
         base = Type::makeInt();          // 样例: int
-        std::cout << std::format("  [parse:type] base = int\n");
+        logParse("  [parse:type] base = int\n");
     }
     else if (match(TokenType::KwDouble)) {
         base = Type::makeDouble();       // 样例: double
-        std::cout << std::format("  [parse:type] base = double\n");
+        logParse("  [parse:type] base = double\n");
     }
     else if (match(TokenType::KwBool)) {
         base = Type::makeBool();         // 样例: bool
-        std::cout << std::format("  [parse:type] base = bool\n");
+        logParse("  [parse:type] base = bool\n");
     }
     else if (match(TokenType::KwVoid)) {
         base = Type::makeVoid();         // 样例: void
-        std::cout << std::format("  [parse:type] base = void\n");
+        logParse("  [parse:type] base = void\n");
     }
     else if (match(TokenType::KwAuto)) {
         base = Type::makeAuto();         // 样例: auto
-        std::cout << std::format("  [parse:type] base = auto\n");
+        logParse("  [parse:type] base = auto\n");
     }
     else if (check(TokenType::KwDecltype)) {
         // ── decltype(expr)：延迟求值的类型查询 ──
@@ -354,7 +354,7 @@ TypePtr Parser::parseType() {
 
         base = Type::makeDecltype(operand, paren);
         base->name = "decltype";
-        std::cout << std::format(
+        logParse(
             "  [parse:type] base = decltype({}) [deferred: 不求值，留待替换阶段]\n",
             paren ? "(e)" : "e");
         (void)kwLoc;
@@ -375,7 +375,7 @@ TypePtr Parser::parseType() {
         if (qualParam && qualParam->kind == TemplateParamKind::Type
             && check(TokenType::ColonColon)) {
             TypePtr qual = Type::makeTemplateParam(name);
-            std::cout << std::format(
+            logParse(
                 "  [parse:type] ★ 依赖限定名: {}::...（限定者是模板形参）\n", name);
             while (check(TokenType::ColonColon)) {
                 advance();
@@ -384,7 +384,7 @@ TypePtr Parser::parseType() {
                 TypePtr nested = Type::makeClass(memberTok.text);
                 nested->nestedQualifier = qual;
                 qual = nested;
-                std::cout << std::format("  [parse:type] ★ nested name: {}\n",
+                logParse("  [parse:type] ★ nested name: {}\n",
                     qual->toString());
             }
             base = qual;
@@ -418,11 +418,11 @@ TypePtr Parser::parseType() {
             //         （只在【模板实参位】被还原成值：`template<int N> using BufA = Buf<N>;`）
             if (tp && tp->kind == TemplateParamKind::Type) {
                 base = Type::makeTemplateParam(name);
-                std::cout << std::format("  [parse:type] base = {} (template param, scope hit)\n", name);
+                logParse("  [parse:type] base = {} (template param, scope hit)\n", name);
             }
             else {
                 base = Type::makeClass(name);
-                std::cout << std::format("  [parse:type] base = {} (class/tparam)\n", name);
+                logParse("  [parse:type] base = {} (class/tparam)\n", name);
                 // 模板 id（P3）——标识符后紧跟 '<' 即模板实参表：
                 //   Box<int>、Buf<4>、Map<int, double>，实参类型/值分流见
                 //   parseTemplateArgumentList（类型递归 parseType，支持嵌套
@@ -432,7 +432,7 @@ TypePtr Parser::parseType() {
                 // 的 templateArgs 上，语义阶段再按需实例化（[temp.inst]）。
                 if (check(TokenType::Less)) {
                     base->templateArgs = parseTemplateArgumentList();
-                    std::cout << std::format(
+                    logParse(
                         "  [parse:type] ★ template-id: {}\n", base->toString());
                 }
 
@@ -450,7 +450,7 @@ TypePtr Parser::parseType() {
                     TypePtr nested = Type::makeClass(memberTok.text);
                     nested->nestedQualifier = base;
                     base = nested;
-                    std::cout << std::format("  [parse:type] ★ nested name: {}\n",
+                    logParse("  [parse:type] ★ nested name: {}\n",
                         base->toString());
                 }
             }
@@ -470,7 +470,7 @@ TypePtr Parser::parseType() {
     //   对照 clang：DeclSpec 里的 const 在 GetTypeForDeclarator 中先于声明符算子生效。
     if (isConst) {
         base = Type::makeConst(base);
-        std::cout << std::format("  [parse:type] const applied to base → {}\n", base->toString());
+        logParse("  [parse:type] const applied to base → {}\n", base->toString());
         isConst = false;   // 已消费，Step 4 不再重复套
     }
 
@@ -488,21 +488,21 @@ TypePtr Parser::parseType() {
         if (match(TokenType::Star)) {
             // 指针: T*
             base = Type::makePointer(base);
-            std::cout << std::format("  [parse:type] suffix * → {}\n", base->toString());
+            logParse("  [parse:type] suffix * → {}\n", base->toString());
         }
         else if (check(TokenType::AmpAmp)) {
             // 右值引用: T&&
             // 注意：AmpAmp 是 &&（逻辑与 Token），在类型上下文中表示右值引用
             advance();
             base = Type::makeRValueReference(base);
-            std::cout << std::format("  [parse:type] suffix && → {} (rvalue ref)\n",
+            logParse("  [parse:type] suffix && → {} (rvalue ref)\n",
                 base->toString());
         }
         else if (check(TokenType::Ampersand)) {
             // 左值引用: T&
             advance();
             base = Type::makeLValueReference(base);
-            std::cout << std::format("  [parse:type] suffix & → {} (lvalue ref)\n",
+            logParse("  [parse:type] suffix & → {} (lvalue ref)\n",
                 base->toString());
         }
         else if (check(TokenType::KwConst)) {
@@ -515,7 +515,7 @@ TypePtr Parser::parseType() {
             //     auto const 同理 ⇒ Const(Auto)。
             advance();
             base = Type::makeConst(base);
-            std::cout << std::format(
+            logParse(
                 "  [parse:type] suffix const → {} (const-qualified declarator)\n",
                 base->toString());
         }
@@ -524,7 +524,7 @@ TypePtr Parser::parseType() {
         }
     }
 
-    std::cout << std::format("  [parse:type] ★ final type = {}\n", base->toString());
+    logParse("  [parse:type] ★ final type = {}\n", base->toString());
     return base;
 }
 
@@ -610,7 +610,9 @@ static IntLiteralValue parseIntLiteral(const std::string& text, SourceLocation l
     try {
         u = digits.empty() ? 0 : std::stoull(digits, nullptr, base);
     } catch (const std::exception&) {
-        throw std::runtime_error(std::format(
+        // ParseError：试探路径只捕获"语法错误"这一预期信号（B32/主线 I-3），
+        // 字面量溢出属于语法错误的一种。
+        throw ParseError(std::format(
             "integer literal '{}' is too large to represent in 64 bits", text));
     }
 
@@ -727,7 +729,7 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
                 //   的整型提升在此不改变类型）。故形态取自字面量本身。
                 IntLiteralValue lv = parseIntLiteral(lit.text, lit.location);
                 lv.value = -lv.value;
-                std::cout << std::format(
+                logParse(
                     "  [parse:targ] ★ non-type argument (NTTP): negative integer {} (形态 {})\n",
                     lv.value, lv.type->toString());
                 args.push_back(TemplateArg::ofValue(lv.value, lv.type));
@@ -741,7 +743,7 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
                 }
                 const Token& tok = advance();
                 IntLiteralValue lv = parseIntLiteral(tok.text, tok.location);
-                std::cout << std::format(
+                logParse(
                     "  [parse:targ] ★ non-type argument (NTTP): integer literal {} (形态 {})\n",
                     lv.value, lv.type->toString());
                 args.push_back(TemplateArg::ofValue(lv.value, lv.type));
@@ -755,7 +757,7 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
             else if (check(TokenType::KwTrue) || check(TokenType::KwFalse)) {
                 bool b = check(TokenType::KwTrue);
                 advance();
-                std::cout << std::format(
+                logParse(
                     "  [parse:targ] ★ non-type argument (NTTP): bool literal {} ({})\n",
                     b ? "true" : "false", b ? 1 : 0);
                 args.push_back(TemplateArg::ofValue(b ? 1 : 0, Type::makeBool()));
@@ -769,7 +771,7 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
                 const Token& tok = advance();
                 int64_t val = 0;
                 for (char ch : tok.text) val = (val << 8) | static_cast<unsigned char>(ch);
-                std::cout << std::format(
+                logParse(
                     "  [parse:targ] ★ non-type argument (NTTP): char literal '{}' ({})\n",
                     escapeCharText(tok.text), val);
                 args.push_back(TemplateArg::ofValue(val, Type::makeChar()));
@@ -792,7 +794,7 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
                         if (!srcText.empty()) srcText += " ";
                         srcText += m_tokens[ti].text;
                     }
-                    std::cout << std::format(
+                    logParse(
                         "  [parse:targ] ★ non-type argument (NTTP): constant expression '{}' "
                         "（求值推迟到语义期）\n", srcText);
                     TemplateArg a;
@@ -808,13 +810,15 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
 
     expect(TokenType::Greater, "Expected '>' after template arguments");
 
-    std::cout << std::format("  [parse:targ] ★ template argument list: <{} argument(s)> — ",
+    logParse("  [parse:targ] ★ template argument list: <{} argument(s)> — ",
         args.size());
+    // 逐段拼进一行再单点输出（B32 收口：链式 cout 在试探缓冲下也能整行进缓冲）
+    std::string targLine;
     for (size_t i = 0; i < args.size(); i++) {
-        if (i > 0) std::cout << ", ";
-        std::cout << (args[i].isValue() ? "(value) " : "(type) ") << args[i].toString();
+        if (i > 0) targLine += ", ";
+        targLine += (args[i].isValue() ? "(value) " : "(type) ") + args[i].toString();
     }
-    std::cout << "\n";
+    logParse("{}\n", targLine);
     return args;
 }
 
@@ -1061,12 +1065,14 @@ DeductionGuideDeclPtr Parser::parseDeductionGuide() {
 
     expect(TokenType::Semicolon, "Expected ';' after deduction guide");
 
-    std::cout << std::format("  [parse:guide] ★ deduction guide: {}(", decl->guideName);
+    logParse("  [parse:guide] ★ deduction guide: {}(", decl->guideName);
+    std::string guideLine;
     for (size_t i = 0; i < decl->parameters.size(); i++) {
-        if (i > 0) std::cout << ", ";
-        std::cout << decl->parameters[i].type->toString();
+        if (i > 0) guideLine += ", ";
+        guideLine += decl->parameters[i].type->toString();
     }
-    std::cout << ") -> " << target->toString() << "\n";
+    guideLine += ") -> " + target->toString();
+    logParse("{}\n", guideLine);
     return decl;
 }
 
@@ -1113,14 +1119,14 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
     auto decl = std::make_shared<TemplateDecl>();
     decl->location = current().location;
 
-    std::cout << std::format("  [parse:template] ▶ template declaration at {}\n",
+    logParse("  [parse:template] ▶ template declaration at {}\n",
         current().location.toString());
 
     // 强制消费 'template' 与 '<'（必选文法，用 expect 保证结构）
     expect(TokenType::KwTemplate, "Expected 'template'");
     expect(TokenType::Less, "Expected '<' after 'template'");
 
-    std::cout << "  [parse:template]   parsing parameter list <";
+    logParse("  [parse:template]   parsing parameter list <");
 
     // 解析形参表 —— 形参位扫到哪种写法 ⇒ 建出哪种 TemplateParam：
     //   'typename'|'class' IDENT      ⇒ {Type, "T"}            类型形参
@@ -1153,12 +1159,12 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
                 param.kind = TemplateParamKind::Type;
                 bool isClassKw = check(TokenType::KwClass);
                 advance();
-                std::cout << (isClassKw ? "class " : "typename ");
+                logParse("{}", isClassKw ? "class " : "typename ");
 
                 if (check(TokenType::Identifier)) {
                     param.name = advance().text;
-                    std::cout << std::format("{}", param.name);
-                    std::cout << std::format(
+                    logParse("{}", param.name);
+                    logParse(
                         "\n  [parse:template]   ★ type parameter registered: '{}'\n",
                         param.name);
                 } else {
@@ -1166,7 +1172,7 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
                     // 用不可写字符是刻意的——保证不会与任何真实标识符撞车。
                     param.name = "$unnamed" + std::to_string(unnamedSeq++);
                     param.isUnnamed = true;
-                    std::cout << std::format(
+                    logParse(
                         "(unnamed) ⇒ 内部合成名 '{}'\n  [parse:template]   "
                         "★ type parameter registered: '{}' (nameless, [temp.param]/3)\n",
                         param.name, param.name);
@@ -1238,7 +1244,7 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
                 advance();
                 param.name = expect(TokenType::Identifier,
                     "Expected name of the template template parameter").text;
-                std::cout << std::format(
+                logParse(
                     "template <...({})> class {}\n  [parse:template]   "
                     "★ template template parameter registered: '{}' "
                     "(accepts a template with {} parameter(s), [temp.param]/4)\n",
@@ -1250,8 +1256,8 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
                 param.nonType = parseType();
                 const Token& paramName = expect(TokenType::Identifier, "Expected parameter name after type in template parameter");
                 param.name = paramName.text;
-                std::cout << std::format("{} {}", param.nonType->toString(), param.name);
-                std::cout << std::format("\n  [parse:template]   ★ non-type parameter registered: {} '{}'\n",
+                logParse("{} {}", param.nonType->toString(), param.name);
+                logParse("\n  [parse:template]   ★ non-type parameter registered: {} '{}'\n",
                     param.nonType->toString(), param.name);
             }
 
@@ -1300,7 +1306,7 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
                     param.defaultArg = TemplateArg::ofType(parseType());
                 }
                 param.hasDefault = true;
-                std::cout << std::format(
+                logParse(
                     "  [parse:template]   ★ default template argument: '{}' = {}\n",
                     param.name, param.defaultArg.toString());
             }
@@ -1316,17 +1322,17 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
             decl->templateParams.push_back(
                 std::make_shared<TemplateParam>(std::move(param)));
             frame.count = decl->templateParams.size();   // ← 可见范围同步扩张
-            std::cout << std::format(
+            logParse(
                 "  [parse:template]   ↗ register tparam '{}' into scope\n",
                 decl->templateParams.back()->name);
 
-        } while (match(TokenType::Comma) && (std::cout << ", ", true));
+        } while (match(TokenType::Comma) && (logParse("{}", ", "), true));
     }
     else {
-        std::cout << "  [parse:template] ★ empty parameter list — explicit (full) specialization\n";
+        logParse("  [parse:template] ★ empty parameter list — explicit (full) specialization\n");
     }
 
-    std::cout << ">\n";
+    logParse(">\n");
 
     expect(TokenType::Greater, "Expected '>' after template parameters");
 
@@ -1355,7 +1361,7 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
     //   类型关键字 / 标识符（如 T、int） → 函数模板（返回类型可以是模板参数名 T）
     //   其他                           → 报错
     if (check(TokenType::KwClass) || check(TokenType::KwStruct)) {
-        std::cout << std::format("  [parse:template]   parsing class body for template...\n");
+        logParse("  [parse:template]   parsing class body for template...\n");
         // 类名后可能跟模板 id（Box<T*, T> / Box<int*, int>）—— 那是特化，
         // 由 parseClassDecl 把尖括号里的模式回填进 specPattern（[temp.class.spec]）。
         decl->classTemplate = parseClassDecl(&decl->specPattern);
@@ -1384,7 +1390,7 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
             decl->specKind = decl->templateParams.empty()
                                  ? TemplateSpecKind::ExplicitSpec
                                  : TemplateSpecKind::PartialSpec;
-            std::cout << std::format(
+            logParse(
                 "  [parse:template] ★ {} specialization of '{}' with pattern <{}>\n",
                 decl->isExplicitSpec() ? "EXPLICIT (full)" : "PARTIAL",
                 decl->templateName(),
@@ -1409,11 +1415,11 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
         //（它同时认 `using X = T;` 与 `typedef T X;` 两种写法）。
         // 注：`template<...> typedef ...` 在 C++ 里【非法】（typedef 没有
         //   模板形式），这里若真出现 KwTypedef，会落到下面的 else 报错。
-        std::cout << std::format("  [parse:template]   parsing alias template...\n");
+        logParse("  [parse:template]   parsing alias template...\n");
         decl->aliasTemplate = parseTypeAliasDecl();
     }
     else if (current().isTypeKeyword() || check(TokenType::Identifier)) {
-        std::cout << std::format("  [parse:template]   parsing function signature for template...\n");
+        logParse("  [parse:template]   parsing function signature for template...\n");
         decl->funcTemplate = parseFunctionDecl();
     }
     else {
@@ -1421,63 +1427,64 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
             "Expected 'class' or a function signature after template parameter list");
     }
 
-    std::cout << std::format("  [parse:template] ◀ {} template '{}' with {} parameter(s) stored as blueprint\n",
+    logParse("  [parse:template] ◀ {} template '{}' with {} parameter(s) stored as blueprint\n",
         decl->isClassTemplate()      ? "class"
         : decl->isAliasTemplate()    ? "alias"
         : decl->isDeductionGuide()   ? "deduction-guide"
                                      : "function",
         decl->templateName(), decl->typeParams.size());
 
-    // 打印蓝图摘要
-    std::cout << std::format("  [parse:template]   blueprint summary:\n");
+    // 打印蓝图摘要：整段拼进一个 string 后单点输出（B32 收口 —— 链式 cout
+    // 散点会让试探缓冲按段截断；拼一行束保证整条摘要要么全进缓冲要么全出）。
     // ★ 形参形态只能从 templateParams 读（PITFALLS I4）：
     //   typeParams 是裸名字表，分不出 `template<int N>` 的 N 是值 ——
     //   旧实现一律打 "typename N"，把 NTTP 说成类型形参。
-    std::cout << std::format("    template <");
+    std::string summary = "  [parse:template]   blueprint summary:\n    template <";
     for (size_t i = 0; i < decl->templateParams.size(); i++) {
-        if (i > 0) std::cout << ", ";
+        if (i > 0) summary += ", ";
         const TemplateParam& p = *decl->templateParams[i];
         if (p.kind == TemplateParamKind::Type) {
-            std::cout << "typename " << p.name;
+            summary += "typename " + p.name;
         } else if (p.kind == TemplateParamKind::NonType) {
             // NTTP：形参写成「类型 + 名字」（`int N` / `bool B`），不是 typename
-            std::cout << (p.nonType ? p.nonType->toString() : "?") << " " << p.name;
+            summary += (p.nonType ? p.nonType->toString() : "?") + " " + p.name;
         } else {
             // 模板模板形参：`template <...> class C`
-            std::cout << "template <...> class " << p.name;
+            summary += "template <...> class " + p.name;
         }
     }
     if (decl->isClassTemplate()) {
-        std::cout << std::format("> class {} {{ ... }}\n", decl->templateName());
+        summary += std::format("> class {} {{ ... }}\n", decl->templateName());
     } else if (decl->isAliasTemplate()) {
-        std::cout << std::format("> using {} = {}\n", decl->templateName(),
+        summary += std::format("> using {} = {}\n", decl->templateName(),
             decl->aliasTemplate->underlyingType
                 ? decl->aliasTemplate->underlyingType->toString() : "?");
     } else if (decl->isDeductionGuide()) {
         // 指引没有类体/函数体可言，摘要只报形参表
-        std::cout << std::format("> {}(", decl->templateName());
+        summary += std::format("> {}(", decl->templateName());
         for (size_t i = 0; i < decl->guide->parameters.size(); i++) {
-            if (i > 0) std::cout << ", ";
-            std::cout << decl->guide->parameters[i].type->toString();
+            if (i > 0) summary += ", ";
+            summary += decl->guide->parameters[i].type->toString();
         }
-        std::cout << ") -> " << decl->templateName() << "<...>  (deduction guide)\n";
+        summary += ") -> " + decl->templateName() + "<...>  (deduction guide)\n";
     } else {
-        std::cout << std::format("> {} {}(",
+        summary += std::format("> {} {}(",
             decl->funcTemplate->returnType ? decl->funcTemplate->returnType->toString() : "?",
             decl->templateName());
         for (size_t i = 0; i < decl->funcTemplate->parameters.size(); i++) {
-            if (i > 0) std::cout << ", ";
-            std::cout << decl->funcTemplate->parameters[i].type->toString() << " "
-                      << decl->funcTemplate->parameters[i].name;
+            if (i > 0) summary += ", ";
+            summary += decl->funcTemplate->parameters[i].type->toString() + " "
+                     + decl->funcTemplate->parameters[i].name;
         }
-        std::cout << ") { ... }\n";
+        summary += ") { ... }\n";
     }
+    logParse("{}", summary);
 
     // ── 帧出栈 ──
     // ★ 这里【什么都不用写】：frame 是栈上局部对象，函数返回时析构，析构里回写
     //   m_currentFrame = parent 完成出栈；异常路径由栈展开同样保证
     //   （对照 clang 的 MultiParseScope）。
-    std::cout << "  [parse:template]   ↘ tparam scope popped\n";
+    logParse("  [parse:template]   ↘ tparam scope popped\n");
 
     return decl;
 }
@@ -1591,7 +1598,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
         // TemplateArg。此前只收类型位，于是 `enable_if<true, T>` 这种
         // "用 NTTP 选中特化"的惯用法直接不可写。
         *outSpecPattern = parseTemplateArgumentList();
-        std::cout << std::format("  [parse:class] ★ specialization pattern for '{}'\n",
+        logParse("  [parse:class] ★ specialization pattern for '{}'\n",
             decl->name);
     }
 
@@ -1640,7 +1647,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
     //   后续 Sema 按"不完整类型"限制使用（本项目不做该检查，教学简化）。
     if (match(TokenType::Semicolon)) {
         decl->isForwardDecl = true;   // ★ 让 Sema 跳过成员生成与布局计算
-        std::cout << std::format(
+        logParse(
             "  [parse:class] ★ forward declaration of '{}' (no body) [dcl.type.elab]\n",
             decl->name);
         return decl;
@@ -1697,7 +1704,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             expect(TokenType::Semicolon, "Expected ';' after alias declaration");
             decl->typeAliases[aliasTok.text] = target;
             decl->typeAliasOrder.push_back(aliasTok.text);
-            std::cout << std::format("  [parse:alias] using {} = {}\n",
+            logParse("  [parse:alias] using {} = {}\n",
                 aliasTok.text, target->toString());
             continue;
         }
@@ -1709,7 +1716,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             expect(TokenType::Semicolon, "Expected ';' after typedef");
             decl->typeAliases[aliasTok.text] = target;
             decl->typeAliasOrder.push_back(aliasTok.text);
-            std::cout << std::format("  [parse:alias] typedef {} {}\n",
+            logParse("  [parse:alias] typedef {} {}\n",
                 target->toString(), aliasTok.text);
             continue;
         }
@@ -1823,7 +1830,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             memTmpl->isMemberTemplate = true;
             decl->memberTemplates.push_back(memTmpl);
 
-            std::cout << std::format(
+            logParse(
                 "  [parse:member] ★ '{}' 是成员模板（{} 个模板形参，[temp.mem]）"
                 "—— 调用点按实参推导实例化\n",
                 method->name, memTmpl->templateParams.size());
@@ -1876,7 +1883,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             method->isVirtual = isVirtual;
             method->isStatic  = isStatic;
             if (isStatic) {
-                std::cout << std::format(
+                logParse(
                     "  [parse:member] ★ '{}' 是 static 成员函数（无隐式 this，"
                     "调用不传对象 [class.static]/2）\n", method->name);
             }
@@ -1912,7 +1919,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
                 sm.isConstexpr = m_pendingConstexpr;   // parseType 留下的前缀
                 m_pendingConstexpr = false;
                 decl->staticDataMembers.push_back(std::move(sm));
-                std::cout << std::format(
+                logParse(
                     "  [parse:member] ★ '{}' 是 static 数据成员（不占对象内存，"
                     "存储在类外定义 [class.static.data]）\n", sm.name);
                 continue;
@@ -2017,7 +2024,7 @@ FuncDeclPtr Parser::parseFunctionDecl(bool isVirtual, const std::string& ownerCl
         }
         advance();
         decl->isConstMethod = true;
-        std::cout << std::format(
+        logParse(
             "  [parse:fct] ★ '{}' 是 const 成员函数（后置 const，"
             "this 类型 T* → const T*，[dcl.fct]/7）\n", decl->name);
     }
@@ -2064,7 +2071,7 @@ std::vector<Parameter> Parser::parseParameterList() {
         //     void f(int, int)       ⇒ $unnamed0 + $unnamed1
         if (check(TokenType::Comma) || check(TokenType::RParen)) {
             param.name = "$unnamed" + std::to_string(unnamedSeq++);
-            std::cout << std::format(
+            logParse(
                 "  [parse:param] (unnamed) ⇒ 内部合成名 '{}' ([dcl.fct]/3)\n", param.name);
         } else {
             const Token& nameToken = expect(TokenType::Identifier, "Expected parameter name");
@@ -2331,7 +2338,7 @@ StmtPtr Parser::parseSwitchStmt() {
     ExprPtr cond = parseExpression();
     expect(TokenType::RParen, "Expected ')' after switch condition");
     StmtPtr body = parseStatement();
-    std::cout << "  [parse:stmt] switch (...)  <body>\n";
+    logParse("  [parse:stmt] switch (...)  <body>\n");
     auto stmt = std::make_shared<SwitchStmt>(std::move(cond), std::move(body));
     stmt->location = loc;
     return stmt;
@@ -2382,7 +2389,7 @@ StmtPtr Parser::parseDoWhileStmt() {
     ExprPtr cond = parseExpression();
     expect(TokenType::RParen, "Expected ')' after do-while condition");
     expect(TokenType::Semicolon, "Expected ';' after do-while");
-    std::cout << "  [parse:stmt] do <body> while (...)\n";
+    logParse("  [parse:stmt] do <body> while (...)\n");
     auto stmt = std::make_shared<DoWhileStmt>(std::move(body), std::move(cond));
     stmt->location = loc;
     return stmt;
@@ -2915,7 +2922,7 @@ ExprPtr Parser::parsePrimaryExpr() {
         for (char ch : tok.text) val = (val << 8) | static_cast<unsigned char>(ch);
         auto expr = std::make_shared<CharLiteralExpr>(val);
         expr->location = loc;
-        std::cout << std::format("  [parse:literal] '{}' ⇒ 字符码点 {}\n",
+        logParse("  [parse:literal] '{}' ⇒ 字符码点 {}\n",
                                  escapeCharText(tok.text), val);
         return expr;
     }
@@ -2973,7 +2980,7 @@ ExprPtr Parser::parsePrimaryExpr() {
         expect(TokenType::RParen, "Expected ')' to close dynamic_cast");
         auto expr = std::make_shared<DynamicCastExpr>(clsTok.text, std::move(operand));
         expr->location = loc;
-        std::cout << std::format("  [parse] dynamic_cast<{}*>(operand)\n", clsTok.text);
+        logParse("  [parse] dynamic_cast<{}*>(operand)\n", clsTok.text);
         return expr;
     }
 
@@ -2989,7 +2996,7 @@ ExprPtr Parser::parsePrimaryExpr() {
         // 实参暂挂在节点上，语义阶段实例化后改写 className 为实例名。
         if (check(TokenType::Less)) {
             expr->templateArgs = parseTemplateArgumentList();
-            std::cout << std::format(
+            logParse(
                 "  [parse:new] ★ template-id: new {}<{} argument(s)>\n",
                 expr->className, expr->templateArgs.size());
         }
@@ -3023,28 +3030,33 @@ ExprPtr Parser::parsePrimaryExpr() {
         //   Cls<int>::value     ⇒ 后跟 '::' ⇒ 类型限定静态成员（std 垫片 is_range<T>::value
         //                          依赖此写法）
         //   a < b > c           ⇒ 都不是 ⇒ 回滚，把 '<' 交还给比较表达式解析
-        // ★ 试探法三步曲（与类体内方法/字段判定同一模式）：
-        //   ① saved = m_pos 存档；② try 块内空跑实参表 —— parseType 中途报错即"这不是
-        //   template-id"的信号（异常即失败信号）；③ 失败则 m_pos = saved 回滚。
-        // 对照 clang：ParseImplicitTemplateId 的简化版。
+        // ★ 试探-回滚升级版（B32，对照 clang TentativeParsingAction）：
+        //   TokenCheckpoint 构造 ⇒ 快照 m_pos + m_stopAtGreater + 日志进缓冲；
+        //   空跑实参表 —— parseType 中途抛 ParseError 即"这不是 template-id"的信号；
+        //   成立 ⇒ cp.commit()（保留进度，缓冲冲刷 —— 成功路径输出逐字节不变）；
+        //   不成立 ⇒ 析构全维度回卷 + 缓冲丢弃（幽灵 [parse:targ] 行由此根治）。
+        // ★ 只捕获 ParseError（语法错误这一"预期信号"）——旧代码 catch
+        //   std::exception 全集会把试探内部的真 bug（越界/logic_error）吞成
+        //   "不是模板"，静默降级（BUGS.md B31 附带问题，主线 I 第 3 项）。
         if (check(TokenType::Less)) {
-            size_t saved = m_pos;
             std::vector<TemplateArg> explicitArgs;
-            bool isTemplateId = true;
-            try {
-                // parseTemplateArgumentList 自消费 '<' 与 '>'；
-                // 其中 parseType 对非类型实参抛异常（如 a<b 里的 b 不是类型），
-                // 异常即"这不是 template-id"的信号。
-                explicitArgs = parseTemplateArgumentList();
-                if (!check(TokenType::LParen) && !check(TokenType::ColonColon)) {
-                    isTemplateId = false;
+            bool isTemplateId = false;
+            {
+                TokenCheckpoint cp(*this);
+                try {
+                    // parseTemplateArgumentList 自消费 '<' 与 '>'；
+                    // 其中 parseType 对非类型实参抛异常（如 a<b 里的 b 不是类型），
+                    // 异常即"这不是 template-id"的信号。
+                    explicitArgs = parseTemplateArgumentList();
+                    isTemplateId = check(TokenType::LParen) || check(TokenType::ColonColon);
+                } catch (const ParseError&) {
+                    isTemplateId = false;   // 语法错误 = 这不是 template-id（预期路径）
                 }
-            } catch (const std::exception&) {
-                isTemplateId = false;
-            }
+                if (isTemplateId) cp.commit();
+            }   // 未 commit ⇒ 回卷 + 试探日志整体废弃
             if (isTemplateId) {
                 expr->explicitTemplateArgs = std::move(explicitArgs);
-                std::cout << std::format("  [parse] template-id: {}<{} explicit arg(s)>\n",
+                logParse("  [parse] template-id: {}<{} explicit arg(s)>\n",
                     name, expr->explicitTemplateArgs.size());
 
                 // ── 类型限定访问：Cls<Args>::member ──
@@ -3057,14 +3069,13 @@ ExprPtr Parser::parsePrimaryExpr() {
                     auto me = std::make_shared<MemberExpr>(expr, memTok.text, /*arrow=*/false);
                     me->isTypeAccess = true; // 标明这是一个类型访问，不是一个对象取值
                     me->location = loc;
-                    std::cout << std::format(
+                    logParse(
                         "  [parse] 类型限定访问: <template-id>::{} (static member)\n",
                         memTok.text);
                     return me;
                 }
-            } else {
-                m_pos = saved; // 回滚：这是 'a < b' 比较
             }
+            // 不是 template-id：checkpoint 已回卷，'< 交给比较表达式解析
         }
 
         return expr;
