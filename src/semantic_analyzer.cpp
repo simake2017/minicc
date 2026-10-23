@@ -1249,7 +1249,7 @@ SemanticAnalyzer::SemanticAnalyzer() {
         [this](const std::string& name) -> std::optional<ConstantFolder::IntegralValue> {
             // ① 直查全名（`A::limit` 粘连名、普通 const 变量）
             if (auto v = lookupConstValue(name)) return v;
-            // ② 类作用域静态成员的【裸名】（B31）：成员函数体里写 `limit`，
+            // ② 类作用域静态成员的【裸名】（B33）：成员函数体里写 `limit`，
             //   折叠先于 inferVar 改名执行（ReturnStmt::visit 先 fold 后 infer），
             //   这里按 inferVar 第 2.5 步的同一判据（当前类 + 基类链 BFS）补查
             //   "类名::裸名"。查不到维持 nullopt，VarExpr 原样保留走符号表。
@@ -1514,7 +1514,7 @@ void SemanticAnalyzer::registerConstVar(
 void SemanticAnalyzer::processGlobalVarDecl(GlobalVarDeclPtr decl) {
     decl->declaredType = resolveType(decl->declaredType);
 
-    // ── static 数据成员的类外定义：`int A::count = 7;`（[class.static.data]；B31）──
+    // ── static 数据成员的类外定义：`int A::count = 7;`（[class.static.data]；B33）──
     // Parser 把名字拼成了 "A::count"（命名空间类则是 "N::A::count"）。这不是新
     // 变量 —— 是给已声明的 static 成员【提供存储】：校验四件套后走常规全局变量
     // 路径发射（asmSymbol("A::count") = .data 段标签 A__count，读写两端同源于它）。
@@ -2124,7 +2124,7 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
             field.name, field.type ? field.type->toString() : "?");
     }
 
-    // ── static 数据成员注册（[class.static.data]；BUGS.md B31）──────────────
+    // ── static 数据成员注册（[class.static.data]；BUGS.md B33）──────────────
     // 三个落点，一次做完（本类只注册一次，实例类经 instantiate 的克隆各注册各的）：
     //   ① 符号表 define "类名::成员" —— inferVar 类内路径 / inferMember 两分支的
     //      查找源（resolveQualifiedField 第二源、裸名回退都查它）；
@@ -3820,7 +3820,7 @@ TypePtr SemanticAnalyzer::inferVar(VarExpr& expr) {
                       expr.location);
             }
             if (hit.statik) {
-                // ── static 数据成员（B31）：不占布局、无偏移可回填。把名字换成
+                // ── static 数据成员（B33）：不占布局、无偏移可回填。把名字换成
                 //   符号表里注册的全名（"A::count"）—— CodeGen 的 VarExpr 全局
                 //   路径按名字净化后即是 .data 段标签，一行不用改。const 整型族
                 //   类内初值已进编译期常量表，更早被折叠成字面量，走不到这里。
@@ -3885,7 +3885,7 @@ TypePtr SemanticAnalyzer::inferVar(VarExpr& expr) {
             }
         }
 
-        // 2.5 static 数据成员的类作用域裸名（[class.static.data]；B31）
+        // 2.5 static 数据成员的类作用域裸名（[class.static.data]；B33）
         // 成员函数体内写裸名 `count` 等价于 `A::count`（类作用域查找的一部分，
         // [class.member.lookup] 对静态/非静态成员同链）——static 成员不在布局里，
         // 步骤 2 查不到。顺序在实例字段【之后】：同名时实例字段隐藏静态成员
@@ -5555,7 +5555,7 @@ bool SemanticAnalyzer::isClassOrBaseOf(const std::string& derived,
 //      sourceClass 只在"与基类撞名被加前缀"时才落名）
 //   ③ sourceClass 比 qualifier 更靠下（Q 是它的祖辈）—— 字段其实声明在 Q 里，
 //      只是经过若干层才带到本类的布局
-// 【B31 第二查找源】布局三条件全落空 ⇒ 符号表查 "qualifier::member"：static 数据
+// 【B33 第二查找源】布局三条件全落空 ⇒ 符号表查 "qualifier::member"：static 数据
 //   成员不占布局、是"挂在类名上的全局符号"（[class.static.data]）。顺序在实例字段
 //   【之后】是刻意的 —— 派生类的实例字段隐藏基类 static 成员（[class.member.lookup]/3），
 //   反了会静默绑错（B14 那一类"隐藏方向做反"）。
@@ -5682,7 +5682,7 @@ TypePtr SemanticAnalyzer::inferMember(MemberExpr& expr) {
                       expr.location);
             }
             if (hit.statik) {
-                // ── static 数据成员（B31）：回填全局符号，CodeGen 直接 RIP 寻址，
+                // ── static 数据成员（B33）：回填全局符号，CodeGen 直接 RIP 寻址，
                 //   对象表达式照常求值（[expr.ref]：postfix 表达式被求值，值弃用）。
                 expr.resolvedStaticSymbol = hit.statik->name;
                 expr.memberName = member;
@@ -5740,7 +5740,7 @@ TypePtr SemanticAnalyzer::inferMember(MemberExpr& expr) {
         return fieldInfo->type;
     }
 
-    // ── static 数据成员的裸名访问 `obj.count`（B31）────────────────────────
+    // ── static 数据成员的裸名访问 `obj.count`（B33）────────────────────────
     // 布局落空 ⇒ 符号表查 "类名::裸名"（沿基类链，与 resolveQualifiedField 第二源
     // 同一形状）：`a.count` / `a.A::count` 是同一成员的两种写法。回填全局符号后
     // CodeGen 走 RIP 寻址；对象表达式照常求值（[expr.ref]，值弃用）。

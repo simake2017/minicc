@@ -8,7 +8,7 @@
 // 预期行为：rc=1，报错文案
 //   non-const static data member must be initialized out of line
 // 对照 clang：clang++-18 -std=c++20 同样 rc=1，报错逐字相同（探针校准）。
-// 回归背景（docs/BUGS.md B31）：修复前 Parser 对所有 static 数据成员一律
+// 回归背景（docs/BUGS.md B33）：修复前 Parser 对所有 static 数据成员一律
 //   "not implemented" 硬性拒收，根本走不到这条判据。
 // =============================================================================
 

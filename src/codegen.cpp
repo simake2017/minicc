@@ -1707,7 +1707,7 @@ void CodeGen::visit(AssignStmt& stmt) {
         } break;
         case NodeKind::Member: {
             auto mem = std::static_pointer_cast<MemberExpr>(stmt.target);
-            // ─── static 数据成员写（B31）：obj.count = v / obj.A::count = v ───
+            // ─── static 数据成员写（B33）：obj.count = v / obj.A::count = v ───
             // 与读路径对称：直接写全局符号，不碰对象（赋值目标语境里对象
             // 表达式不求值——[expr.ass] 的左值不需要对象值，static 成员尤其
             // 如此：它没有 this 语义）。rax 已是右值（函数开头统一求值）。
@@ -2714,7 +2714,7 @@ void CodeGen::emitVirtualCall(
 void CodeGen::visit(MemberExpr& expr) {
     emitComment(std::format("member access: .{}", expr.memberName));
 
-    // ── static 数据成员（B31）：全局符号 RIP 寻址，不走基址+偏移 ──
+    // ── static 数据成员（B33）：全局符号 RIP 寻址，不走基址+偏移 ──
     // Sema 回填 resolvedStaticSymbol（"A::count" 全名，asmSymbol 净化后即
     // .data 段标签）。对象表达式【照常求值】（[expr.ref]：postfix 表达式被
     // 求值）——副作用保留（`make().count` 仍会调 make()），值弃用。

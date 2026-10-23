@@ -314,7 +314,7 @@ struct MemberExpr : Expression {
     int      resolvedFieldOffset = -1;
     uint32_t resolvedFieldSize   = 0;
 
-    // ── static 数据成员访问（[class.static.data]；BUGS.md B31）────────────────
+    // ── static 数据成员访问（[class.static.data]；BUGS.md B33）────────────────
     // 非空 ⇒ 这个 . 访问的是【静态成员】：不占对象内存、没有偏移，CodeGen 不该
     // 按"基址+偏移"寻址，而要直接读写全局符号（值 = 本字段，即符号表里注册的
     // "类名::成员" 全名，asmSymbol 净化后即是 .data 段标签）。
@@ -324,7 +324,7 @@ struct MemberExpr : Expression {
     // `obj.count` 走 inferMember 的普通分支回退，同样回填这里（单一消费点）。
     std::string resolvedStaticSymbol;
 
-    // ── 类内初始化的 static const 成员的【编译期折叠】（B31）────────────────
+    // ── 类内初始化的 static const 成员的【编译期折叠】（B33）────────────────
     // 这类成员没有存储（声明点只注册了常量表，不发全局符号），读取必须替换成
     // 字面量 —— 否则 CodeGen 按全局符号 RIP 寻址会链接失败（undefined
     // reference）。inferMember 两条 static 分支用 lookupStaticConst 命中后
@@ -867,7 +867,7 @@ struct StaticConstMember {
     TypePtr type;          // 常量自身的类型（bool / int …）
 };
 
-// ─── static 数据成员【声明】（[class.static.data]；BUGS.md B31）───────────────
+// ─── static 数据成员【声明】（[class.static.data]；BUGS.md B33）───────────────
 // 与 staticConsts（纯编译期常量表）互补：这是完整的静态数据成员 ——
 //   占独立存储（类外定义 `int A::count = 7;` 发射全局符号），不占对象内存、
 //   不进 classLayout（sizeof(A) 不含它）。
@@ -909,7 +909,7 @@ struct ClassDecl : Declaration {
     //   type 造对应字面量，而不是一律给 int。
     std::unordered_map<std::string, StaticConstMember> staticConsts;
 
-    // ── static 数据成员【声明表】（[class.static.data]；BUGS.md B31）──────────
+    // ── static 数据成员【声明表】（[class.static.data]；BUGS.md B33）──────────
     // Parser 类体分支解析 `static int count;` / `static const int limit = 7;` 的产物。
     // 与 staticConsts 的关系：类内给了初值的 const 整型族成员【同时】登记进
     //   staticConsts（值在声明点已确定，`Trait<T>::value` 折叠路由此对普通类可用）；

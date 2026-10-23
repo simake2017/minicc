@@ -1719,7 +1719,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
         //   "类型 + 名字 + '('" 命中后走 isMethod 分支。
         // static 数据成员（`static int count;`）：不占对象内存、无偏移，靠前瞻
         //   "类型 + 名字 + ['=' 常量式] + ';" 落到字段分支里的专用解析
-        //   （BUGS.md B31；理论 [class.static.data]，存储由类外定义提供）。
+        //   （BUGS.md B33；理论 [class.static.data]，存储由类外定义提供）。
         // ★ 位置在成员模板【之前】：`template <...> static T f(T)` 的 template 在外层，
         //   但 isStatic/isVirtual 的声明必须先于任何使用它们的成员分支。
         bool isStatic = false;
@@ -1883,7 +1883,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             decl->methods.push_back(method);
         } else {
             if (isStatic) {
-                // ── static 数据成员（[class.static.data]；BUGS.md B31）──────────
+                // ── static 数据成员（[class.static.data]；BUGS.md B33）──────────
                 // `static int count;` / `static const int limit = 7;`
                 // 与 static 成员函数同起点（都认 'static' 前缀），靠前瞻区分：
                 //   static + 类型 + 名字 + '('  ⇒ 方法（上面 isMethod 分支）

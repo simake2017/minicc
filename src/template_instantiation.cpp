@@ -548,7 +548,7 @@ ClassDeclPtr TemplateInstantiator::instantiate(
         newClass->memberTemplates.push_back(clonedMt);
     }
 
-    // 5.7 克隆 static 数据成员（[class.static.data]；BUGS.md B31）
+    // 5.7 克隆 static 数据成员（[class.static.data]；BUGS.md B33）
     // 实例类各持各的声明（processClassDecl 会按实例名注册 "Box_int::value"），
     // 类型随形参替换（`static const int size = sizeof(T)` 这类用法由此成立），
     // 初始化式走 cloneExpr（表达式位置上的 T 一并替换）。

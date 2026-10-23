@@ -1,6 +1,6 @@
 # 44 — static 数据成员（[class.static.data]）：挂在类名上的全局变量
 
-> 对应 BUGS.md **B31**。修复前类体内 `static int count;` 在 Parser 被
+> 对应 BUGS.md **B33**。修复前类体内 `static int count;` 在 Parser 被
 > 硬性拒收（"static data members are not implemented"），整条特性缺失。
 > 本文记：存储模型、三路径查找的判据单点、const 成员的编译期折叠、
 > 类外定义的四条校验，以及两个值得记住的坑（折叠时序、命名空间误伤）。
