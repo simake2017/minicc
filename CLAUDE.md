@@ -558,6 +558,28 @@ CodeGen：局部数组栈分配与零初始化，全局数组 `.data` 节发射 
 测试 tests/lang/test_basics_10_array.cpp（五项全通，与 clang++-18 对拍一致）；
 全量 ctest **345** 全绿 / 0 警告 / logdiff 140 个集成测试逐字节零差异。
 
+✅ **static 数据成员已完成（[class.static.data]，BUGS.md B33，docs/learn/44）** ——
+修复前类体内 `static int count;` 被 Parser 硬性拒收（整条特性缺失）。存储模型：
+static 成员不进类布局 = "挂在类名上的全局变量"，类内只声明、类外定义出存储
+（全局符号 `A::count`/`A__count`，读写同源），漏定义 odr-use ⇒ 链接期响亮报错
+（与 clang 的 ld 报错同形态）。类内初始化的 const 整型族/constexpr 是**无存储的
+编译期常量**（判据要剥 Const 再查家族——第一版误拒 `const int`），双登记
+staticConsts + 编译期常量表（`Buf<A::twice>` NTTP 由此可用）。读取三路径
+（`A::count` 符号表全名 / `a.count` 布局落空→符号表回退 / `a.A::count`
+resolveQualifiedField 第二源）判据单点，实例字段先于 static（[class.member.lookup]/3
+隐藏顺序）；const 成员读取经 `staticConstFolded/Value` 回填槽折叠成立即数
+（MemberExpr 回填槽的又一例）。★ 两个坑：① ReturnStmt 先 fold 后 infer ⇒ 成员函数
+裸名 `limit` 折叠时还没改名 —— constResolver 补类作用域 BFS 回查；② 类外定义校验
+第一版判据"名字含 ::"把命名空间成员 `int Math::g_factor` 误伤 —— 必须收窄为
+"限定者在类注册表"。类外定义四校验（类存在/声明过/**equals** 同类型——
+typeCompatible 会误放行 long vs int/ODR 单定义）文案与 clang++-18 逐字校准。
+模板类静态成员走实例化步骤 5.7 克隆到实例类。测试 tests/lang/test_basics_13
+（13 检查点，clang 对拍一致）+ basics_14..18 五个负例；全量 ctest **346** 全绿 /
+既有 149 个集成用例逐字节零漂移，基线 149 → 155。台账编号 B33（rebase 时与远端
+新占的 B31/B32 撞号，已重编号）。边界：模板 static 类外定义 `template<class T>
+int C<T>::tag = 1;` 未做（Parser 响亮拒收）、常量成员写检查、odr-use 探测、
+foldStaticConst 挂点仍只在变量初始化式。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、
