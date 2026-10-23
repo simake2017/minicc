@@ -2211,7 +2211,30 @@ Pass 1 前向收集或 Lexer 期建），消歧时先查表：名字在表中 �
 注意与 docs/learn/39 §"刻意不收 Less/Greater"的判据协同，别把 `>` 收进
 `isExprContinuation`（tmpl 21..26 会全线漂移）。
 
-**状态**：⬜ 未修
+**正确的写法**（clang 的做法，也是生产方式）：
+
+1. **消歧 = 只读查询，不是全量语义**。clang 的 Parser 持 `Actions`（Sema 句柄），
+   在 `<` 处回调 `isTemplateName(...)` 问一个 bit 的问题，决议权仍在 Sema。
+   对 minicc 的轻量版：Parser 持只读模板名登记表，查不到就按比较运算——
+   **查询面只到"名字的种类"，不扩大成"方法存在性 lookup"**。
+2. **试探失败用回卷，不用异常**。clang 的 tentative parsing 是"存档 token 游标 →
+   空跑 → 不对就回卷"，全程零异常——`a < b > c` 是常见形态，不是异常情况。
+   且异常版有个真隐患：catch 的是 `std::exception` 全集，试探内部抛出**真 bug**
+   （logic_error / 越界）会被一并吞成"不是模板"，错误静默降级为比较运算。
+
+```cpp
+// 正确形态示意（取代 try/catch 三步曲）
+bool isTemplateId = false;
+{
+    TokenCheckpoint cp(this);            // RAII：析构即回卷（不止 m_pos，见 B32）
+    auto args = parseTemplateArgumentList();
+    isTemplateId = m_templateNames.count(baseName)          // ← 只读登记表查询
+                && (check(TokenType::LParen) || check(TokenType::ColonColon));
+    if (isTemplateId) cp.commit();       // 确认后才释放存档
+}                                        // 未 commit ⇒ 全状态回卷
+```
+
+**状态**：⬜ 未修（已列入 ROADMAP 主线 I 第 1 项）
 
 ---
 
@@ -2253,4 +2276,36 @@ int main() {
 （把日志收口成一个小宏/辅助函数，避免 5 处散落判断日后漏改。）
 不改 `parseIntLiteral` 的刻意不打日志约定（learn/39）。
 
-**状态**：⬜ 未修
+**正确的写法**（两条生产惯例，缺一不可）：
+
+1. **回滚要"存档点"化，不能只救一个字段**。生产 parser 的试探解析把"存档 +
+   回卷"做成 RAII 对象（clang 的 `TentativeParsingAction` / `TPResult`）：
+   构造时快照全部可变状态，析构时整体回卷，`commit()` 后才放手。
+   新增状态维度时**编译器逼着你**把它加进快照——这就是防止"回滚漏维度"
+   （本条）复发的结构保证，而不是靠 Code Review 记性好。
+
+```cpp
+class TokenCheckpoint {
+    Parser& p;  size_t pos;  bool stopAtGreater;  bool committed = false;
+public:
+    explicit TokenCheckpoint(Parser& p) : p(p), pos(p.m_pos),
+        stopAtGreater(p.m_stopAtGreater) {
+        p.m_quietDepth++;                    // 试探期间顺带静默（顺手治本条）
+    }
+    ~TokenCheckpoint() {
+        p.m_quietDepth--;                    // 静默总是成对退出（含异常路径）
+        if (!committed) {                    // 未确认 ⇒ 全维度回卷
+            p.m_pos = pos;
+            p.m_stopAtGreater = stopAtGreater;
+        }
+    }
+    void commit() { committed = true; }      // 确认：保留 token 进度
+};
+```
+
+2. **日志收口成单一出口**。散落 5+ 处的 `std::cout << std::format(...)` 全收进
+   `Parser::logParse(fmt, args...)` 一个辅助函数（项目里符号定名、择优早已
+   "判据单点"，日志却一直是散点——同一个原则两处执行力度不同）。
+   收口后静默开关、未来加时间戳/日志级别都是改一处。
+
+**状态**：⬜ 未修（已列入 ROADMAP 主线 I 第 2 项）
