@@ -639,6 +639,29 @@ movq 回退路径（8 字节读 4 字节 int 字段），修复后走正确 movl
 重刷），基线 151 → 152，ctest 346 全绿。边界：const 写检查仍未做（ROADMAP ⑥）
 ——`const a.v = 5` minicc 宽松放行（clang 拒收），宽方向。
 
+✅ **语句层 [stmt.ambig] 前瞻重写已完成（BUGS.md B35）** ——
+起点是用户提议"2245 手写跳过人能不能先用 parseType 通用解析"（并先登记
+B35）。旧前瞻是 parseType 语法的**残缺复制品**：`<` 跳过只认第一个标识符
+后的位置 ⇒ `N::B<Box> x;`（限定名+模板 id）漏跳被拒收；无"是不是模板名"
+判据 ⇒ `a < b > c;` 全变量比较链被误判成声明 `a<b> c`（B31 的语句层兄弟）。
+修法两层：① parseStatement 标识符前瞻分支重写为「TokenCheckpoint +
+parseType() 试探」（对照 clang TryAnnotateTypeToken + tentative parse）——
+限定名/模板 id/嵌套/typename 全收，消掉第二份语法；B16 无声明符声明判据
+等价移植（模板 id 语法 = 本层或嵌套限定者链任一层有实参表，刻意不收裸
+`S;`）。成功路径输出与旧实现逐字节一致（**152 份基线零漂移实证**——
+B32 缓冲-冲刷机制的贡献：试探日志 commit 才出、回卷整体丢弃）。
+② **B31 登记表第一层闸的语句层对称应用**：类型链里任一模板 id 层基名
+不在表 ⇒ 全部推翻——否则 `a<b>c` 被 parseType 语法无误地解析成"模板 id
++ 声明符"继续误判（语法无懈可击，必须问"名字的种类"这一个 bit）。
+③ 附带 Sema 修复：resolveType 限定名模板 id 归一（`N::B<Box>` ⇒ 蓝图
+裸名 B——蓝图按书写名登记、TemplateDecl 不被命名空间前缀化；归一到同一
+实例 B_int 缓存键不变；宽方向：N::B 真不存在时误绑全局 B，记边界）。
+测试 tests/lang/test_basics_22（N::B<Box> 声明 + a<b>c 比较链 + 回归，
+clang 对拍；**突变验证 2 条**：摘语句层闸 ⇒ a<b>c 退回误判；摘限定名归一
+⇒ N::B unknown）；既有 152 份基线零漂移，基线 +1 → 153，ctest 346 全绿。
+★ 遗留同类现场：类体方法/字段判定（~1862）与顶层 parseDeclaration（~890）
+两处试探仍手写（B32 批次登记的"[parse:type] 成对重复"），单独成批再收。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

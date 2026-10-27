@@ -46,6 +46,7 @@
 | [B31](#b31-模板-id-试探把-abc-误判为模板调用拒收合法程序) | 模板-id 试探只看"后跟 `(`/`::`" ⇒ `a<b>(c)` 全变量比较链被**拒收合法程序**（clang 按 `(a<b)>(c)` 接受） | `src/parser.cpp` parsePrimaryExpr 歧义消解三步曲 | 中（罕见写法，但方向性分歧） | ✅ 已修 |
 | [B32](#b32-模板-id-试探回滚只撤-m_pos不撤日志幽灵-parsetarg-行) | 试探失败回滚只撤 `m_pos`，`[parse:targ]` 日志已打印撤不回 ⇒ 幽灵日志行（"日志即契约"基线被污染） | `src/parser.cpp` parsePrimaryExpr + parseTemplateArgumentList | 低（纯日志，不影响正确性） | ✅ 已修 |
 | [B34](#b34-const-类对象端到端缺失成员访问误报--掉标量路径-sigsegv--拷贝静默退化) | const 类对象三层判据不看穿 Const 包壳：成员访问误报（拒收）/ 掉标量路径读成员当指针解引用（SIGSEGV）/ 拷贝初始化静默退化成默认构造（算错） | `src/semantic_analyzer.cpp` inferMember + 拷贝/构造升级；`src/codegen.cpp` 类表查询 7 处 | 高（miscompile + 静默算错 + 拒收，一层包壳三层错） | ✅ 已修 |
+| [B35](#b35-语句层前瞻只认固定-token-顺序限定名模板-id-与全变量比较链双双被拒收) | parseStatement 2245 前瞻是 parseType 语法的【残缺复制品】：`<` 跳过只认第一个标识符后的位置 ⇒ `N::B<Box> x;`（限定名+模板 id）漏跳被拒收；无任何"是不是模板名"的判据 ⇒ `a < b > c;` 全变量比较链被误判成声明 `a<b> c`（B31 的语句层兄弟） | `src/parser.cpp` parseStatement 类名前瞻分支（2245-2323 手写 token 跳过人） | 中（罕见写法 ×2，但都是拒收合法程序 + 语法复制品是维护隐患） | ✅ 已修 |
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
 > B13/B14/B15 三条根因相同 —— 见文末[小结](#小结-字符串兼任-id-与路径)。
@@ -2476,3 +2477,92 @@ movl 路径；rc/运行输出逐字节不变，基线已重刷。这也回答了
 
 **文档**：本条。
 
+
+---
+
+## B35. 语句层前瞻只认固定 token 顺序：限定名模板 id 与全变量比较链双双被拒收
+
+**来源**：复盘 parseStatement 2245 前瞻分支（B31/B34 两次会话都路过它）时
+确认。该分支是 [stmt.ambig] 的语句层实现：标识符开头既可能是 `MyClass obj;`
+（声明）也可能是 `foo(x);` / `a = 3;`（表达式），LL(1) 判不了，用"跳过
+`名 [<...>] [::]* [*&]*` 后看下一个是不是标识符"的启发式下注。
+
+**复现**
+
+```cpp
+namespace N { template<class T> struct B { T v; }; }
+class Box { public: int x; };
+int main() {
+    N::B<Box> y;          // clang rc=0；minicc "Undefined variable 'N::B'"
+    int a=1; int b=2; int c=3;
+    a < b > c;            // clang rc=0（仅 -Wunused-comparison）；minicc 误判声明
+}
+```
+
+| 程序 | minicc（修前） | clang++-18 |
+|---|---|---|
+| `N::B<Box> x;`（限定名 + 模板 id） | ❌ `Undefined variable 'N::B'`（前瞻的 `<` 跳过只发生在【第一个】标识符后，`::B<Box>` 那段没人跳） | ✅ rc=0 |
+| `a < b > c;`（全变量比较链） | ❌ 误判成声明 `a<b> c`，Sema 报错（报错文案自己都承认"本实现的前瞻会把它当成变量声明……试探法近似"） | ✅ rc=0 |
+
+**性质**：两处都是**拒收合法程序**；且根因是架构性的——
+
+**根因**：2245 的"手写 token 跳过人"是 parseType 语法的**残缺复制品**。
+同一个类型语法（限定名 / 模板 id / 嵌套模板实参 / typename 前缀）在
+两份代码里各写一遍判定：parseType 写全了，跳过人只认了其中一个固定
+token 顺序（`名 <...> :: ...`——`名 :: ... <...>` 就漏）。token.h:236
+对 isTypeKeyword 的警告（"同一语义在两条路径上判定，改一边要核对另一边"）
+在这里以 bug 形式兑现。B32 批次已把"试探-回滚"升级为 TokenCheckpoint
+RAII + 日志缓冲，B31 落地了模板名登记表——改写所需的机制都已就位，
+缺的只是动手。
+
+**要修的话**（对照 clang TryAnnotateTypeToken + tentative parse）：
+
+1. **试探 parseType 取代手写跳过人**：TokenCheckpoint 存档 → parseType()
+   通用解析（限定名/模板 id/嵌套/typename/const 全收）→ 成功且后跟
+   标识符 ⇒ 声明（commit，类型已解析好直接传 parseVarDeclStmt）；
+   `;` ⇒ 可能 B16 无声明符声明（再过 isDeclaratorlessDecl）。失败或
+   形态不符 ⇒ 析构回卷走表达式，试探日志随缓冲整体丢弃（B32 机制）。
+2. **模板名登记表第一层闸**（B31 同款）：试探成功但类型是模板 id 且
+   基名不在登记表 ⇒ 全部推翻回卷——否则 `a < b > c;` 会被 parseType
+   成功解析成"模板 id a<b> + 声明符 c"继续误判（语法上无懈可击，
+   必须问"名字的种类"这一个 bit，这正是 B31 确立的做法在语句层的
+   对称应用）。成功路径日志与今天"回滚后正式 parseType"逐字节一致。
+
+**范围**：只收 parseStatement 的 2245 分支；类体方法/字段判定（1862）
+与顶层 parseDeclaration（890）两处同族现场（CLAUDE.md B32 批次已登记
+"[parse:type] 成对重复"）单独成批。
+
+**状态**：✅ 已修。
+**修法**（与"要修的话"一致，两层）：
+
+1. **Parser（parseStatement 标识符前瞻分支重写）**：手写 token 跳过人
+   换成「TokenCheckpoint + parseType() 通用解析」（对照 clang
+   TryAnnotateTypeToken + tentative parse）——限定名/模板 id/嵌套/
+   typename 全收，消掉第二份残缺语法；成功后标识符 ⇒ 声明、';' 且带
+   模板 id 语法 ⇒ B16 无声明符声明（等价旧 sawTypeIdSyntax，刻意不收
+   裸 `S;`，留表达式路径给 Sema）。失败/推翻 ⇒ 析构回卷，试探日志随
+   B32 缓冲整体丢弃。成功路径输出与旧实现"回滚后正式 parseType"
+   **逐字节一致**（152 份基线零漂移实证）。
+2. **登记表第一层闸（B31 同款，语句层对称应用）**：类型（含嵌套限定者
+   链 t→nestedQualifier）里任一模板 id 层的基名不在登记表 ⇒ 全部推翻
+   ——否则 `a < b > c;` 会被 parseType 语法无误地解析成"模板 id a<b> +
+   声明符 c"继续误判（语法层面无懈可击，必须问"名字的种类"这一个 bit）。
+3. **附带 Sema 修复**：resolveType 模板 id 分支补限定名归一 ——
+   `N::B<Box>` 剥命名空间前缀取末段查蓝图表（蓝图按书写名登记，
+   TemplateDecl 在 processNamespaceDecl 走 default 不被前缀化；
+   `N::B<int>` 与 `B<int>` 归一到同一实例 B_int，缓存键不变）。
+   ★ 宽方向：`N::B` 真不存在而全局有 B 时会误绑，记边界。
+
+**回归用例**：`tests/lang/test_basics_22_stmt_ambig_tentative_parsetype.cpp`
+（N::B<Box> y; 语句层声明 + a<b>c 比较链 + 普通类/模板 id/引用/平凡拷贝
+回归，rc=0 与 clang 对拍）。**突变验证 2 条**：摘语句层登记表闸 ⇒
+`a<b>c` 退回误判声明（原文案复现）；摘 Sema 限定名归一 ⇒ `N::B` unknown
+复现——逐条实跑变红、恢复转绿。
+
+**日志漂移**：既有 152 份基线**逐字节零漂移**（含所有错误用例——
+`a<b>c` 修正没碰任何既有用例的消息）；基线 +1 新文件 → 153。
+ctest 346 全绿，build 0 警告。
+
+**遗留同类现场**：类体方法/字段判定（parser.cpp ~1862）与顶层
+parseDeclaration（~890）两处试探仍各自手写（CLAUDE.md B32 批次登记的
+"[parse:type] 成对重复"），单独成批再收。

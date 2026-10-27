@@ -2238,88 +2238,65 @@ StmtPtr Parser::parseStatement() {
     }
 
     // 类名开头的变量声明（需要向前看）
-    // 歧义：标识符开头既可能是 `MyClass obj;`（声明），也可能是
-    //       `foo(...);` / `a = 3;`（表达式）。LL(1) 单 Token 无法区分，
-    //       采用试探法：存档 → 跳过头个标识符和连续 '*' → 若下一个还是
-    //       标识符则判定为声明 → 回滚后重新正式解析；否则回滚走表达式分支。
+    // 歧义：标识符开头既可能是 `MyClass obj;`（声明），也可能是 `foo(...);` /
+    //       `a = 3;` / `a < b > c;`（表达式）。LL(1) 单 Token 无法区分。
+    // ★ B35：试探法从"手写 token 跳过人"升级为「TokenCheckpoint + parseType
+    //   通用解析」（对照 clang TryAnnotateTypeToken + tentative parse）：
+    //   · 旧跳过人只认 `名 [<...>] [::]* [*&]*` 的固定顺序，`N::B<Box> x;`
+    //     的 `::B<Box>` 段没人跳（BUGS.md B35 拒收合法程序）；parseType 是
+    //     类型语法的唯一权威解析器（限定名/模板 id/嵌套/typename 全收），
+    //     不再维护第二份残缺语法（token.h:236 "同一语义两条路径"警告的兑现）。
+    //   · 成功后看下一个 token：标识符 ⇒ 声明（类型已解析好，直接传
+    //     parseVarDeclStmt）；';' 且带模板 id 语法 ⇒ B16 无声明符声明。
+    //   · ★ B31 同款登记表第一层闸：类型（含嵌套限定者链）里任一模板 id 层
+    //     的基名不在登记表 ⇒ 全部推翻回卷 —— 否则 `a < b > c;` 会被 parseType
+    //     语法无误地解析成"模板 id a<b> + 声明符 c"继续误判（语法层面无懈可
+    //     击，必须问"名字的种类"这一个 bit，正是 B31 确立的做法在语句层的
+    //     对称应用）。
+    //   · 失败/推翻 ⇒ 析构回卷走表达式；试探日志随缓冲整体丢弃（B32 机制）。
+    //     成功路径的输出与旧实现"回滚后正式 parseType"逐字节一致。
     if (check(TokenType::KwTypename) || check(TokenType::Identifier)) {
-        // 向前看：如果是 标识符 标识符 ; 或 标识符 标识符 = → 变量声明
-        size_t savedPos = m_pos;
-        // ★ B16：本轮回溯只看"类型 id 语法"吃了没有（`<...>` 模板实参表 / `::` 限定名）。
-        //   这两种构造在【表达式】里不可能出现，故一旦见到就坐实了"这是类型"。
-        //   用途见下方"无声明符的声明"分支：裸 `S;`（无后缀）不能靠 Token 前瞻定性
-        //   —— 它也可能是【同名对象】的表达式语句，得查符号表才知道（留待 Sema）。
-        bool sawTypeIdSyntax = false;
-        // `typename T::type v;`：typename 只是消歧前缀，跳过它再看名字
-        if (check(TokenType::KwTypename)) advance();
-        advance();  // 跳过首个标识符（类型名本身）—— 纯前瞻，只要推进游标
-
-        // P3 模板 id 前缀 —— `Box<int> b;` / `Map<int, double> m;`
-        // 标识符后紧跟 '<' → 按深度配对跳过整段实参表。实参只可能是类型
-        // （不含比较表达式），所以 '<'/'>' 直接计深度即可；嵌套
-        // `Box<Box<int>>` 的 '>>' 词法阶段就是两个 Greater token。
-        // 对照 clang：isDeclarationSpecifier → TryAnnotateTypeToken 会把
-        // 模板 id 注解为类型 Token，教学版用"跳过 + 回滚"的试探法等价实现。
-        if (check(TokenType::Less)) {
-            sawTypeIdSyntax = true;
-            int depth = 1;
-            advance();  // 消费 '<'
-            while (!isAtEnd() && depth > 0) {
-                if (check(TokenType::Less)) depth++;
-                else if (check(TokenType::Greater)) depth--;
-                advance();
+        TypePtr type;
+        bool isDecl = false;
+        {
+            TokenCheckpoint cp(*this);
+            try {
+                type = parseType();
+                if (check(TokenType::Identifier)) {
+                    isDecl = true;
+                } else if (check(TokenType::Semicolon)) {
+                    // B16 无声明符声明：仅当类型带模板 id 语法（本层或嵌套
+                    // 限定者链上任一层的 '<...>' 实参表）——等价旧 sawTypeIdSyntax。
+                    // 裸 `S;` 刻意不算：它也可能是同名对象的表达式语句，
+                    // Token 前瞻分不出来，留表达式路径给 Sema 查符号表消歧。
+                    bool hasTemplIdSyntax = false;
+                    for (TypePtr t = type; t; t = t->nestedQualifier) {
+                        if (!t->templateArgs.empty()) { hasTemplIdSyntax = true; break; }
+                    }
+                    isDecl = hasTemplIdSyntax && isDeclaratorlessDecl(type);
+                }
+                // 登记表第一层闸（B35）：模板 id 层的基名不在登记表 ⇒ 比较链
+                if (isDecl) {
+                    for (TypePtr t = type; t; t = t->nestedQualifier) {
+                        if (!t->templateArgs.empty()
+                            && !isKnownTemplateName(t->name)) {
+                            isDecl = false;
+                            break;
+                        }
+                    }
+                }
+            } catch (const ParseError&) {
+                isDecl = false;   // 类型解析失败 = 这不是声明（预期路径）
             }
-        }
-
-        // ★ 限定名后缀：`Box<int>::type v;` / `Plain::Int y;`
-        // 类型名后面跟 `::` 说明用的是【成员类型】而不是同名对象。
-        // 对照 clang：isDeclarationSpecifier 里 TryAnnotateTypeToken 会把
-        //   `Cls<...>::member` 整体注解成一个类型 Token（ParseCXXScopeSpecifier
-        //   之后的 nested-name-specifier 处理），教学版同样用"跳过后回滚"近似。
-        // ★ 注意：纯 `N::C;` 不设置 sawTypeIdSyntax，保留给 Sema 经符号表消歧（[stmt.ambig]）
-        while (check(TokenType::ColonColon)) {
-            advance();  // 消费 '::'
-            if (!check(TokenType::Identifier)) break;
-            advance();  // 成员名
-        }
-
-        // ★ 这里必须把 '*'、'&'、'&&' 一起跳过 —— 它们是【声明符】的一部分，不是类型名
-        //   的一部分。只跳 '*' 会让 `S& r = a;` / `Box<int>& r = b;` 的前瞻停在 '&' 上，
-        //   发现下一个不是 Identifier 而被误判成表达式语句（"Expected ';' after expression"）。
-        //   内建类型（`int& r = a;`）不走这条前瞻，故该洞只在【标识符开头的类型】上暴露。
-        // 对照 clang：ParseDeclarator 的指针/引用算子循环，两者同处一层。
-        while (check(TokenType::Star) || check(TokenType::Ampersand) ||
-               check(TokenType::AmpAmp)) {
-            advance();
-        }
-
-        if (check(TokenType::Identifier)) {
-            // 是变量声明：回滚到存档点，让 parseType 从头正式解析类型
-            m_pos = savedPos;
-            TypePtr type = parseType();
-            return parseVarDeclStmt(type);
-        }
-
-        // ★ B16：无声明符的声明 —— `A<int*, int**>;` / `Box<int>::type;`
-        //   前瞻整段类型 id 之后停在 ';' 上。修复前这里一路回滚走表达式分支，
-        //   把 `A` 当标识符表达式、撞死在第 2 个实参的 `int` 上 ——
-        //   报错位置指向实参中间，离根因（少了声明符）很远。
-        //   只有 sawTypeIdSyntax 为真才认：`<...>` / `::` 在表达式里不可能出现，
-        //   故可无歧义地判为声明。裸 `S;`（类名无后缀）不走这条 ——
-        //   它也可能是同名对象的表达式语句，Token 前瞻分不出来，得查符号表。
-        if (sawTypeIdSyntax && check(TokenType::Semicolon)) {
-            m_pos = savedPos;
-            TypePtr type = parseType();
-            if (check(TokenType::Semicolon) && isDeclaratorlessDecl(type)) {
+            if (isDecl) cp.commit();
+        }   // 未 commit ⇒ 全状态回卷 + 试探日志整体废弃
+        if (isDecl) {
+            if (check(TokenType::Semicolon)) {   // B16 无声明符声明
                 advance();
                 return std::make_shared<EmptyStmt>();
             }
-            // 形态不符（如 `A<int*>&;`）⇒ 回滚保持旧行为，仍按表达式语句报错
-            m_pos = savedPos;
+            return parseVarDeclStmt(type);
         }
-
-        // 不是变量声明，恢复位置，当作表达式语句
-        m_pos = savedPos;
     }
 
     return parseExprOrAssignStmt();

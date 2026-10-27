@@ -918,6 +918,28 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
         // 判定条件：携带非空实参，且该名字是已登记的类模板蓝图（m_classTemplates，O(1)）。
         // （普通已实例化类如 Box_int 实参为空，走下面的符号表替换。）
         if (!type->templateArgs.empty()) {
+            // ── ★ B35：限定名模板 id `N::B<Box>` ——蓝图按【书写名】（裸名）登记
+            // （processNamespaceDecl 只前缀化 Function/Class/GlobalVar/Enum，
+            // TemplateDecl 走 default 原样过去），故限定名查表落空。剥掉命名空间
+            // 前缀取末段再查 —— 语义正确：`N::B<int>` 与 `B<int>` 是【同一实例】
+            // （实例名/缓存键都归一到 B_int）。对照 clang：QualifiedNameLookup
+            // 沿 DeclContext 链找到蓝图。宽方向：`N::B` 真不存在时会误绑全局 B
+            //（误绑是响亮方向的反面，先记边界）。
+            if (!m_aliasTemplates.count(type->name)
+                && !m_classTemplates.count(type->name)) {
+                if (auto sep = type->name.rfind("::");
+                    sep != std::string::npos) {
+                    const std::string tail = type->name.substr(sep + 2);
+                    if (m_aliasTemplates.count(tail)
+                        || m_classTemplates.count(tail)) {
+                        std::cout << std::format(
+                            "  [resolve] 限定模板名 '{}' ⇒ 裸名 '{}'（蓝图按书写名登记，B35）\n",
+                            type->name, tail);
+                        type->name = tail;
+                    }
+                }
+            }
+
             // ── 别名模板 id X<int>（[temp.alias]）──
             // ★ 必须排在类模板分支【前面】：别名与类模板在语法上长得一模一样
             // （都是 名字<实参>），只能靠注册表区分。先问别名表，命中即解糖。
