@@ -3170,6 +3170,13 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
     registerConstVar(decl.name, decl.declaredType, decl.initializer,
                      decl.isConstexpr, decl.location);
 
+    // ★ B34：类性判定的剥壳类型 —— `const Box<int> b = Box<int>(7);` 的
+    //   type 是 Const(Box_int)，isClass() 为假会漏掉构造/拷贝升级（const
+    //   语义只管写检查，minicc 未做）。日志/符号表仍用原 type。
+    auto bareForClass = [](const TypePtr& t) {
+        return t && t->isConst() ? t->stripConst() : t;
+    };
+
     if (decl.initializer) {
         // ── 推导初始化表达式的类型 ──
         std::cout << std::format("  [var decl] {} : {} = ",
@@ -3229,10 +3236,10 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
         // [class.copy.elision] 允许且 clang 默认这么做），临时对象永不物化。
         // ★ 放在 if/else 之外：auto 变量 `auto b = Box<int>(7);` 反推完类型后
         //   同样要升级，否则 CodeGen 走"默认构造"分支发不存在的 0 参符号。
-        if (type->isClass() && decl.initializer->kind == NodeKind::Call) {
+        if (bareForClass(type)->isClass() && decl.initializer->kind == NodeKind::Call) {
             auto ce = std::static_pointer_cast<CallExpr>(decl.initializer);
             if (ce->isCtorCall) {
-                if (!ce->ctorClassType->equals(type)) {
+                if (!ce->ctorClassType->equals(bareForClass(type))) {
                     error(std::format(
                         "Type mismatch in '{}': declared '{}', got '{}'",
                         decl.name, type->toString(),
@@ -3256,8 +3263,9 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
         // 此处改判平凡拷贝：CodeGen 按布局发 memcpy。
         // ★ init 限 Var/Member：函数返回同类对象（`Box<int> b = f();`）不涉及。
         // ★ 同样放在 if/else 之外：auto 变量 `auto b = a;` 反推成同类后走此分支。
-        else if (type->isClass() && initType && initType->isClass()
-                 && type->equals(initType)
+        // ★ B34：const 版同为平凡拷贝（`const ClassA a = tmp;`）——剥壳再比。
+        else if (bareForClass(type)->isClass() && initType && bareForClass(initType)->isClass()
+                 && bareForClass(type)->equals(bareForClass(initType))
                  && (decl.initializer->kind == NodeKind::Var
                      || decl.initializer->kind == NodeKind::Member)) {
             decl.isTrivialCopy = true;
@@ -3285,8 +3293,8 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
         for (auto& a : decl.ctorArgs) ctorArgTypes.push_back(inferType(a));
         m_inferDepth--;
 
-        if (type->isClass()) {
-            auto cit = m_classDecls.find(type->name);
+        if (bareForClass(type)->isClass()) {
+            auto cit = m_classDecls.find(bareForClass(type)->name);
             if (cit != m_classDecls.end()) {
                 std::vector<FuncDeclPtr> ctors;
                 for (auto& method : cit->second->methods) {
@@ -5659,6 +5667,14 @@ TypePtr SemanticAnalyzer::inferMember(MemberExpr& expr) {
     //   non-class type 'Vec&&'" —— 明明 Vec 有这个成员。
     if (actualType && actualType->isReference()) {
         actualType = actualType->referencedType;
+    }
+
+    // ── 剥顶层 const：成员【查找】不受对象 cv 限定影响（[class.mfct.non-static]
+    //   里 const 只管写检查，写检查未做 —— ROADMAP 已列）；`const ClassA a; a.v`
+    //   查的是 ClassA 的 v。不剥 ⇒ Const(Class) 的 isClass() 为假，误报
+    //   "Cannot access member on non-class type 'const ClassA'"（拒收合法程序）。
+    if (actualType && actualType->isConst()) {
+        actualType = actualType->stripConst();
     }
 
     if (!actualType || !actualType->isClass()) {

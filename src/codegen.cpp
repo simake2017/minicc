@@ -873,6 +873,24 @@ bool CodeGen::emitDtorsOnReturn() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 顶层 const/引用剥除（类性判定专用，BUGS.md B34）
+// ─────────────────────────────────────────────────────────────────────────────
+// 对象表达式/声明类型的 resolvedType 可能带顶层 const（`const Box_int b;`
+// ⇒ VarExpr 的 resolvedType = Const(Box_int)）。CodeGen 全程不做 const 写
+// 检查，类性判定时必须剥掉 —— 否则按名字查类表落空 ⇒ const 类对象掉进标量
+// 路径：无 RAII 构造/析构、读成员被当成"变量存指针再解引用"（实测 SIGSEGV）。
+// 引用也剥（`const Box& r` 的 resolvedType 可能是 Const(LRef(Box)) 或
+// LRef(Const(Box))——cv 位置两种形态都有，learn/23；循环两种都收）。
+// ★ 只服务【类性/类表查询】：标量路径的宽度分派不受影响（非 const 类型
+//   原样穿过，既有汇编逐字节不变）。
+static TypePtr stripTopCvRef(TypePtr t) {
+    while (t && (t->isConst() || t->isReference())) {
+        t = t->isConst() ? t->stripConst() : t->referencedType;
+    }
+    return t;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 帧大小预估（序言的 subq $N 用）
 // ─────────────────────────────────────────────────────────────────────────────
 // 节点 ⇒ 计入字节数（switch 按 NodeKind 标签分派）：
@@ -896,7 +914,7 @@ uint32_t CodeGen::estimateBlockSize(std::shared_ptr<BlockStmt> block) {
                     if (asz < 8) asz = 8;
                     size = (asz + 7) / 8 * 8;
                 } else if (v->declaredType && !v->declaredType->isPointer() && m_classTypes) {
-                    auto cit = m_classTypes->find(v->declaredType->name);
+                    auto cit = m_classTypes->find(stripTopCvRef(v->declaredType)->name);
                     if (cit != m_classTypes->end() && cit->second->isClass()) {
                         size = cit->second->classLayout.totalSize;
                         if (size < 8) size = 8;
@@ -934,7 +952,7 @@ uint32_t CodeGen::estimateBlockSize(std::shared_ptr<BlockStmt> block) {
                     auto v = std::static_pointer_cast<VarDeclStmt>(f->init);
                     uint32_t size = 8;
                     if (v->declaredType && !v->declaredType->isPointer() && m_classTypes) {
-                        auto cit = m_classTypes->find(v->declaredType->name);
+                        auto cit = m_classTypes->find(stripTopCvRef(v->declaredType)->name);
                         if (cit != m_classTypes->end() && cit->second->isClass()) {
                             size = cit->second->classLayout.totalSize;
                             if (size < 8) size = 8;
@@ -1256,9 +1274,11 @@ void CodeGen::visit(VarDeclStmt& decl) {
     // ── 路径②：声明类型是类 → 栈对象（RAII 的地基）──
     // 判据：declaredType 的类名命中全局类表（auto 已在 Sema 阶段替换完，
     // 此处看到的必然是最终类型；指针/引用不属于此路径）。
+    // ★ B34：查表前剥顶层 const/引用 —— `const Box_int b;` 不剥会查
+    //   "const Box_int" 落空，掉标量路径误编译（SIGSEGV 现场）。
     if (decl.declaredType && !decl.declaredType->isPointer()
         && m_classTypes) {
-        auto cit = m_classTypes->find(decl.declaredType->name);
+        auto cit = m_classTypes->find(stripTopCvRef(decl.declaredType)->name);
         if (cit != m_classTypes->end() && cit->second->isClass()) {
             auto& layout = cit->second->classLayout;
 
@@ -1474,7 +1494,8 @@ void CodeGen::emitClassAddress(const ExprPtr& expr) {
         // 字段偏移：Sema 回填优先（限定名成员 B21），否则查布局表
         int fieldOff = mem->resolvedFieldOffset;
         if (fieldOff < 0) {
-            TypePtr cls = objIsPtr ? objType->pointeeType : objType;
+            // ★ B34：剥顶层 const/引用再查 —— const 对象的成员访问
+            TypePtr cls = stripTopCvRef(objIsPtr ? objType->pointeeType : objType);
             if (cls && cls->isClass()) {
                 auto f = cls->classLayout.findField(mem->memberName);
                 if (f) fieldOff = static_cast<int>(f->offset);
@@ -1616,6 +1637,7 @@ void CodeGen::visit(AssignStmt& stmt) {
             if (objType && objType->isPointer()) {
                 objType = objType->pointeeType;
             }
+            objType = stripTopCvRef(objType);   // ★ B34：const 容器的下标写
             std::string className = (objType && objType->isClass()) ? objType->name : "";
 
             emit("pushq %rax                  # 暂存右值（待写入的值）到栈上");
@@ -1734,6 +1756,7 @@ void CodeGen::visit(AssignStmt& stmt) {
                 if (mem->isArrow && objType->isPointer()) {
                     objType = objType->pointeeType;
                 }
+                objType = stripTopCvRef(objType);   // ★ B34：const 对象的成员写
                 if (objType->isClass()) {
                     // ★ 限定名成员 `obj.Q::m = ...`：Sema 回填的偏移优先（BUGS.md B21）。
                     if (mem->resolvedFieldOffset >= 0) {
@@ -2512,6 +2535,7 @@ void CodeGen::visit(CallExpr& expr) {
             if (mem->isArrow && objType && objType->isPointer()) {
                 objType = objType->pointeeType;
             }
+            objType = stripTopCvRef(objType);   // ★ B34：const 对象的方法调用
 
             // 检查是否是虚函数调用
             if (objType && objType->isClass() && m_classTypes) {
@@ -2750,6 +2774,7 @@ void CodeGen::visit(MemberExpr& expr) {
         if (expr.isArrow && objType->isPointer()) {
             actualType = objType->pointeeType;
         }
+        actualType = stripTopCvRef(actualType);   // ★ B34：const 对象的成员读
 
         if (actualType && actualType->isClass()) {
             // ★ 限定名成员 `obj.Q::m`：Sema 回填的偏移优先（BUGS.md B21）——

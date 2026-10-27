@@ -618,6 +618,27 @@ isExprContinuation 的判据不动，两处闸不交叉，tmpl 21..26 零漂移�
 value 回归，rc=0 与 clang 对拍；突变验证：摘闸 ⇒ 链接期炸）；既有 150 份基线
 零漂移，基线 +1 → 151。BUGS.md B31 转 ✅、ROADMAP 主线 I 第 1 项 ✅。
 
+✅ **const 类对象端到端修复已完成（BUGS.md B34）** ——
+起点是追问"`const int`/`const ClassA` 语句声明走 parser.cpp:2227/2245 哪条
+分支"（答案：KwConst ∈ isTypeKeyword，走 2227；2245 是 Identifier 分支永远
+看不到 const）——顺藤摸到一族缺陷：`const Box_int b;` 的类型是
+Const(Box_int)，类性判定全部不看穿包壳，**三种错法三种症状**：① Sema
+inferMember 只剥引用不剥 const ⇒ 成员访问误报（拒收合法程序）；② CodeGen
+visit(VarDeclStmt) 查类表落空 ⇒ const 类对象掉标量路径，读成员当指针解引用
+**实测 SIGSEGV**；③ 平凡拷贝判据 equals 不成立 ⇒ 拷贝初始化静默退化成默认
+构造（静默算错）。★ 一层包壳三层独立写错的判据，且 ②③ 被 ①的报错挡住、
+逐层才暴露。修法判据归一：CodeGen 文件级助手 `stripTopCvRef`（循环剥顶层
+const/引用，两种 cv 位置都收）应用于 7 处落点，Sema `bareForClass` 应用于
+构造升级/平凡拷贝/直接初始化，inferMember 补 const 剥除；只服务类性判定，
+标量路径/日志/符号表原 type 不动 ⇒ 非 const 程序汇编逐字节不变。
+★ **有意漂移**：test_tmpl_50 汇编 4 行改善——它此前正落在"偏移未知默认 0"
+movq 回退路径（8 字节读 4 字节 int 字段），修复后走正确 movl 偏移路径；
+回答了一个遗留疑问：该回退路径并非死代码，const 对象一直在用它。
+测试 tests/lang/test_basics_21（5 检查点，clang 对拍；突变验证：摘 VarDeclStmt
+剥壳 ⇒ rc=139 复现 segv 现场）；既有 150 份基线零漂移（tmpl_50 有意漂移已
+重刷），基线 151 → 152，ctest 346 全绿。边界：const 写检查仍未做（ROADMAP ⑥）
+——`const a.v = 5` minicc 宽松放行（clang 拒收），宽方向。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

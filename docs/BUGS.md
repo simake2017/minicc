@@ -44,7 +44,8 @@
 | [B29](#b29-全局命名空间内的类型别名存了未实例化模板-id--裸名两处都是没做完) | 全局/命名空间别名存了**未实例化模板 id** + 裸名（两处"没做完"）⇒ `IntBox b;` 报 No member / `N::IntBox` 查无此名 | `src/semantic_analyzer.cpp` processTypeAliasDecl | 小（拒收合法程序） | ✅ 已修 |
 | [B30](#b30-表达式级构造调用-boxint7-无路可走--平凡拷贝类赋值静默算错) | 表达式级构造调用 `Box<int>(7)` 无路可走 + 平凡拷贝/类赋值静默算错 | `src/semantic_analyzer.cpp` inferCall + `src/codegen.cpp` | 中（一拒收 + 一静默算错 + 链接期错配） | ✅ 已修 |
 | [B31](#b31-模板-id-试探把-abc-误判为模板调用拒收合法程序) | 模板-id 试探只看"后跟 `(`/`::`" ⇒ `a<b>(c)` 全变量比较链被**拒收合法程序**（clang 按 `(a<b)>(c)` 接受） | `src/parser.cpp` parsePrimaryExpr 歧义消解三步曲 | 中（罕见写法，但方向性分歧） | ✅ 已修 |
-| [B32](#b32-模板-id-试探回滚只撤-m_pos不撤日志幽灵-parsetarg-行) | 试探失败回滚只撤 `m_pos`，`[parse:targ]` 日志已打印撤不回 ⇒ 幽灵日志行（"日志即契约"基线被污染） | `src/parser.cpp` parsePrimaryExpr + parseTemplateArgumentList | 低（纯日志，不影响正确性） | ⬜ 未修 |
+| [B32](#b32-模板-id-试探回滚只撤-m_pos不撤日志幽灵-parsetarg-行) | 试探失败回滚只撤 `m_pos`，`[parse:targ]` 日志已打印撤不回 ⇒ 幽灵日志行（"日志即契约"基线被污染） | `src/parser.cpp` parsePrimaryExpr + parseTemplateArgumentList | 低（纯日志，不影响正确性） | ✅ 已修 |
+| [B34](#b34-const-类对象端到端缺失成员访问误报--掉标量路径-sigsegv--拷贝静默退化) | const 类对象三层判据不看穿 Const 包壳：成员访问误报（拒收）/ 掉标量路径读成员当指针解引用（SIGSEGV）/ 拷贝初始化静默退化成默认构造（算错） | `src/semantic_analyzer.cpp` inferMember + 拷贝/构造升级；`src/codegen.cpp` 类表查询 7 处 | 高（miscompile + 静默算错 + 拒收，一层包壳三层错） | ✅ 已修 |
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
 > B13/B14/B15 三条根因相同 —— 见文末[小结](#小结-字符串兼任-id-与路径)。
@@ -2427,4 +2428,51 @@ no member named / redefinition / not a class / different type，
 （+6 新文件）。全量 ctest 346 全绿。
 
 **文档**：docs/learn/44。
+
+---
+
+## B34. const 类对象端到端缺失：成员访问误报 + 掉标量路径 SIGSEGV + 拷贝静默退化 ✅ 已修
+
+**来源**：追问"`const int` / `const ClassA` 语句声明走 parser.cpp 哪个分支"时
+顺藤摸到的**一族**缺陷 —— `const Box_int b;` 的声明类型是 Const(Box_int)，
+Sema/CodeGen 的类性判定（查类表 / `isClass()`）全部不看穿这层 Const 包壳。
+
+**三种错法三种症状**（同一句 `const ClassA a = tmp; return a.v;`）：
+
+| # | 位置 | 症状 | 性质 |
+|---|---|---|---|
+| ① | Sema `inferMember`（semantic_analyzer.cpp:5660 一带） | 只剥引用不剥 const ⇒ `Cannot access member 'v' on non-class type 'const ClassA'`，rc=1 | **拒收合法程序**（clang rc=0） |
+| ② | CodeGen `visit(VarDeclStmt)`（codegen.cpp:1279 一带） | `m_classTypes->find("const Box_int")` 落空 ⇒ const 类对象掉标量路径：无 RAII 构造/析构，读成员被当"变量存指针再解引用" | **miscompile，实测 SIGSEGV（rc=139）** |
+| ③ | Sema 平凡拷贝判据 `type->equals(initType)`（semantic_analyzer.cpp:3259 一带） | const 目标与裸源类型 equals 不成立 ⇒ 拷贝初始化静默退化成默认构造，`a.v` 读出 0 | **静默算错**（返回 251 而非 0） |
+
+★ ②的 segv 现场被 ①的报错**挡住**了——修掉 ① 才暴露 ②，再修掉 ② 才暴露 ③。
+一层 const 包壳，三层各自独立写错的判据。
+
+**修法 —— 判据归一**：类性/类表查询一律剥壳。
+- CodeGen 加文件级助手 `stripTopCvRef`（循环剥顶层 const/引用，`const Box& r`
+  的 Const(LRef(Box)) / LRef(Const(Box)) 两种 cv 位置都收），应用于
+  VarDeclStmt 类表查询、帧尺寸估算两处、成员读/写字段偏移、方法调用
+  （虚表查询 + 符号拼接）、下标 set 糖共 7 处落点；
+- Sema 加 `bareForClass` 同型 lambda，应用于构造调用升级（拷贝省略）、
+  平凡拷贝、直接初始化选构造三处；
+- `inferMember` 引用剥除后补 const 剥除。
+★ 只服务类性判定：标量宽度分派、日志、符号表存的原 type 全部不动 —
+— 非 const 程序汇编逐字节不变。const 只管写检查（minicc 未做，ROADMAP
+⑥ 已列），故剥壳无语义损失；成员【查找】本就不受对象 cv 影响
+（[class.mfct.non-static]）。
+
+**回归用例**：`tests/lang/test_basics_21_const_class_object.cpp`（const int
+语句声明 / const 默认构造 + const 成员函数 / const 源→const 目标平凡拷贝 /
+const 带参构造 / const 模板类，运行钉 0，clang 对拍）。
+**突变验证**：摘 VarDeclStmt 剥壳 ⇒ rc=139（segv 现场复现），恢复 ⇒ rc=0。
+
+**有意漂移**：test_tmpl_50 的汇编 4 行改善 —— 它此前正落在"偏移未知默认 0"
+的 movq 回退路径上（8 字节读 4 字节 int 字段），修复后走正确的字段偏移
+movl 路径；rc/运行输出逐字节不变，基线已重刷。这也回答了一个遗留疑问：
+回退路径此前并非死代码，const 对象一直在用它。
+
+**日志漂移**：其余 150 个集成用例逐字节零漂移；基线 151 → 152（+1 新文件）。
+全量 ctest 346 全绿，build 0 警告。
+
+**文档**：本条。
 
