@@ -964,20 +964,30 @@ DeclPtr Parser::parseDeclaration() {
     }
 
     // 区分函数声明与全局变量声明
-    // 试探性前瞻（Tentative Lookahead）：存档 → 试探跳过类型 → 看后续是否 Identifier + '(' → 回滚
-    size_t savedPos = m_pos;
-    if (isVirtual) {
-        advance();
-    }
-    parseType(); // 试探性解析：仅用于前进 token 流以观察后续符号，返回值不保留
+    // ★ B36：试探升级为 TokenCheckpoint（对照 clang TentativeParsingAction，
+    // 与 B35 语句层同款手法）——存档 → 试探 parseType → 看后续是否
+    // Identifier + '(' → 拿判据后【整体回卷】（含试探日志），分支函数内部
+    // 重新正式 parseType。旧裸 m_pos 回滚撤不了日志 ⇒ [parse:type] 成对
+    // 重复被基线固化（CLAUDE.md B32 批次登记的同类现场，此处收口）。
+    // 只捕获 ParseError（语法失败是预期信号）；真 bug 照常响亮外抛（B32 教训）。
     bool isFunc = false;
-    if (check(TokenType::Identifier)) {
-        advance();
-        if (check(TokenType::LParen)) {
-            isFunc = true;
+    {
+        TokenCheckpoint cp(*this);
+        try {
+            if (isVirtual) {
+                advance();
+            }
+            parseType(); // 试探性解析：仅用于前进 token 流以观察后续符号，返回值不保留
+            if (check(TokenType::Identifier)) {
+                advance();
+                if (check(TokenType::LParen)) {
+                    isFunc = true;
+                }
+            }
+        } catch (const ParseError&) {
+            isFunc = false;
         }
-    }
-    m_pos = savedPos; // 回滚到初始位置，后续统一在分支函数内部正式 parseType 并构建 AST
+    }   // 永不 commit：纯试探，判据拿到即回卷（B32 缓冲随析构整体丢弃）
 
     if (isFunc) {
         return parseFunctionDecl(isVirtual);
@@ -1939,18 +1949,23 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
         }
 
         // 3. 尝试判断是普通方法还是字段
-        // 采用试探性前瞻：存档 -> 试探跳过类型 -> 检查是否为 Identifier + '(' (方法) -> 回滚
-        size_t savedPos = m_pos;
+        // ★ B36：与 parseDeclaration 同款 TokenCheckpoint 纯试探（不 commit，
+        // 拿判据即回卷含日志）——消掉类体里 [parse:type] 成对重复的另一半。
         bool isMethod = false;
-
-        parseType(); // 试探性解析：仅用于前进 token 流以观察后续符号
-        if (check(TokenType::Identifier)) {
-            advance();
-            if (check(TokenType::LParen)) {
-                isMethod = true;
+        {
+            TokenCheckpoint cp(*this);
+            try {
+                parseType(); // 试探性解析：仅用于前进 token 流以观察后续符号
+                if (check(TokenType::Identifier)) {
+                    advance();
+                    if (check(TokenType::LParen)) {
+                        isMethod = true;
+                    }
+                }
+            } catch (const ParseError&) {
+                isMethod = false;
             }
-        }
-        m_pos = savedPos; // 回滚到初始位置，后续在分支内部正式解析类型并创建 AST 节点
+        }   // 未 commit ⇒ 全状态回卷 + 试探日志整体废弃
 
         if (isMethod) {
             auto method = parseMethodDecl(decl->name, access);

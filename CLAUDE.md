@@ -662,6 +662,18 @@ clang 对拍；**突变验证 2 条**：摘语句层闸 ⇒ a<b>c 退回误判�
 ★ 遗留同类现场：类体方法/字段判定（~1862）与顶层 parseDeclaration（~890）
 两处试探仍手写（B32 批次登记的"[parse:type] 成对重复"），单独成批再收。
 
+✅ **两处剩余手写试探收口已完成（B36 批次，承接 B35）** ——
+parseDeclaration（函数 vs 全局变量判定）与类体方法/字段判定两处试探，
+照 B35 同款手法换成 TokenCheckpoint **纯试探**（永不 commit：拿判据即
+整体回卷含日志，分支函数内部重新正式 parseType），窄捕获 ParseError。
+消掉 CLAUDE.md B32 批次登记的"[parse:type] 成对重复"——**有意漂移：
+149 个集成文件各删若干行试探重复日志，共 1515 行纯删除（新增 0 行），
+rc/运行输出逐字节不变**，基线已重刷。looksLikeDeductionGuide 是纯 token
+检查（const 方法不打日志）不动。ctest 346 全绿 / build 0 警告 /
+logdiff 零差异。至此 parser.cpp 的全部试探点都过了 TokenCheckpoint：
+试探日志"机制上不可能再留痕"的覆盖面从 B32 的 1 处扩到 4 处
+（模板-id 消歧、语句层声明、顶层声明、类体成员判定）。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、
