@@ -674,6 +674,35 @@ logdiff 零差异。至此 parser.cpp 的全部试探点都过了 TokenCheckpoin
 试探日志"机制上不可能再留痕"的覆盖面从 B32 的 1 处扩到 4 处
 （模板-id 消歧、语句层声明、顶层声明、类体成员判定）。
 
+✅ **parser 阶段名字识别已完成（biz-dev-pipeline 流水线首例：spec → 设计 →
+代码；docs/specs + docs/designs 为流程产物，learn/47 为学习产物）** ——
+需求「parser 阶段实现类似 clang 的语义识别」，范围按拍板 = **多 bit 分类 +
+作用域**（B31 登记表一位扩展为四位并集 + scope 键）。新模块
+`include/name_registry.h` + `src/name_registry.cpp`（Parser 与 Sema 各持
+const 共享，判据单点）：`NameClassification` 对齐 clang `Sema::ClassifyName`
+骨架（type/namespace/template/value——value 按拍板恒 false 占位不参与判定），
+`classify`（Parser 侧全名/末段宽近似）/ `classifyQualified`（Sema 侧 scope
+精确）双查询入口。收集器 = B31 扫描骨架原样搬迁 + type 位（struct/class/
+enum/typedef/using，**template 头后不置**——`Box;` 对类模板名保持非类型
+解释）+ namespace 位（`namespace X {` 推作用域栈按花括号深度配对 /
+`namespace A = B;`）+ declval 种子（移到构造函数，空表也在）。
+**消费点 4 个**：语句层裸名 `S;` 判声明（新增，[stmt.ambig] 声明优先、
+同名跨类只看 type 位，打 `[parse:stmt]` 日志）/ 表达式模板闸 / 语句层
+模板 id 链闸（换入口，等价性保证零漂移）/ Sema 限定模板名裁决
+（**B35 尾剥改作用域精确裁决，修 B36 误绑**：N::B 不存在不再落到全局 B，
+报错 `no template named 'B' in namespace 'N'` 与 clang 逐字）。
+**签名规则**：消费点只依赖「位命中」正向判定，查不到=未知=宁宽勿窄，
+禁止反向推断。**有意漂移 2 处**（tmpl_54 的 1156 过时括注改写——旧文案
+「跳过 <...> + 回滚」自 B35 起因误导排查；新增 basics_23/24 入列），
+基线 153 → **155**，其余逐字节零漂移。全量 **362/362**（+13 NameRegistry.*
++2 集成 +3 修复陈旧假象用例）/ build 0 警告 / **突变验证 3 条**逐条实跑变红。
+**教训（learn/47 §6）**：① test_expr_parser 的 template-id 套件自 B31 起
+就红，被**没重建的 unit_tests 二进制**掩盖成绿——第三种失败面具（前两种：
+负向全绿、基线固化失败），跑测试前必须确认被测二进制是刚编的；
+② 查不到 ≠ 不是，否定查询做正向推断是这类消歧最常见的错法。
+分层红线再确认（spec 否决记录）：**Parser 不持 Sema 活句柄**——用构造期
+只读投影换分层，是空间换架构的取舍。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

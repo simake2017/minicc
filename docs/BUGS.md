@@ -47,6 +47,7 @@
 | [B32](#b32-模板-id-试探回滚只撤-m_pos不撤日志幽灵-parsetarg-行) | 试探失败回滚只撤 `m_pos`，`[parse:targ]` 日志已打印撤不回 ⇒ 幽灵日志行（"日志即契约"基线被污染） | `src/parser.cpp` parsePrimaryExpr + parseTemplateArgumentList | 低（纯日志，不影响正确性） | ✅ 已修 |
 | [B34](#b34-const-类对象端到端缺失成员访问误报--掉标量路径-sigsegv--拷贝静默退化) | const 类对象三层判据不看穿 Const 包壳：成员访问误报（拒收）/ 掉标量路径读成员当指针解引用（SIGSEGV）/ 拷贝初始化静默退化成默认构造（算错） | `src/semantic_analyzer.cpp` inferMember + 拷贝/构造升级；`src/codegen.cpp` 类表查询 7 处 | 高（miscompile + 静默算错 + 拒收，一层包壳三层错） | ✅ 已修 |
 | [B35](#b35-语句层前瞻只认固定-token-顺序限定名模板-id-与全变量比较链双双被拒收) | parseStatement 2245 前瞻是 parseType 语法的【残缺复制品】：`<` 跳过只认第一个标识符后的位置 ⇒ `N::B<Box> x;`（限定名+模板 id）漏跳被拒收；无任何"是不是模板名"的判据 ⇒ `a < b > c;` 全变量比较链被误判成声明 `a<b> c`（B31 的语句层兄弟） | `src/parser.cpp` parseStatement 类名前瞻分支（2245-2323 手写 token 跳过人） | 中（罕见写法 ×2，但都是拒收合法程序 + 语法复制品是维护隐患） | ✅ 已修 |
+| [B36](#b36-限定模板名-nb-误绑全局模板-bsema-尾剥无作用域裁决) | Sema 限定名归一只取 `::` 末段查【全局】蓝图表：N::B 真存在时正确，真不存在而全局有同名模板 B 时误绑（方向性错） | `src/semantic_analyzer.cpp` resolveType 模板 id 分支（B35 尾剥） | 中（静默走错路，报错指向派生类型） | ✅ 已修 |
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
 > B13/B14/B15 三条根因相同 —— 见文末[小结](#小结-字符串兼任-id-与路径)。
@@ -2566,3 +2567,70 @@ ctest 346 全绿，build 0 警告。
 **遗留同类现场**：类体方法/字段判定（parser.cpp ~1862）与顶层
 parseDeclaration（~890）两处试探仍各自手写（CLAUDE.md B32 批次登记的
 "[parse:type] 成对重复"），单独成批再收。
+
+## B36. 限定模板名 `N::B<...>` 误绑全局模板 B（Sema 尾剥无作用域裁决）
+
+**来源**：「parser 阶段实现类似 clang 的语义识别」需求的缺口盘点
+（docs/specs / docs/designs/parser-stage-name-recognition，2026-10-23 签字）。
+B35 修语句层时给 resolveType 补的限定名归一是**裸尾剥**：取 `::` 末段
+查【全局】蓝图表——N::B 真存在时语义正确，真不存在时有洞。
+
+**复现**
+
+```cpp
+template<class T> struct B { T w; };   // 全局模板 B（陷阱）
+namespace N {}                          // N 里【没有】B
+int main() {
+    N::B<int> y;      // clang rc=1；minicc（修前）尾剥误绑全局 B，rc=0
+    return 0;
+}
+```
+
+| 程序 | minicc（修前） | clang++-18 |
+|---|---|---|
+| `N::B<int> y;`（N 无 B，全局有模板 B） | ❌ 误绑全局 B_int，rc=0（方向性错） | ✅ rc=1 `no template named 'B' in namespace 'N'; did you mean simply 'B'?` |
+| `N::B<Box> y;`（N 真有模板 B） | ✅ rc=0 | ✅ rc=0 |
+
+**性质**：**静默走错路**——不存在的限定名落到同名全局模板上，报错指向
+派生类型或干脆编译通过（依赖实参形态），根因是「名字在哪个作用域当真」
+这个判据没有作用域维度。
+
+**根因**：B31 登记表只有「是否模板」一个 bit 且不带作用域；B35 的 Sema
+尾剥按 clang 的 QualifiedNameLookup 形状取了「沿作用域链找蓝图」的
+**结果**（归一裸名），却没取它的**判据**（作用域匹配）。判据与消费点
+分离，宽方向洞留下。
+
+**修法**（docs/designs/parser-stage-name-recognition.design.md 子流程 3.4）：
+登记表升级为多 bit + 作用域键（新模块 include/name_registry.h +
+src/name_registry.cpp：`NameClassification` 对齐 clang NameClassification
+骨架、`classifyQualified(scope,name)` 对齐 Sema::isTemplateName 的
+查询形状），Sema 尾剥改 **classifyQualified 精确裁决**：存在
+(scope=N, name=B, template 位) 才归一裸名；配不上 ⇒ 报错
+`no template named 'B' in namespace 'N'`（与 clang 逐字，did-you-mean
+建议不做——spec OOS 5）。Parser 与 Sema 共享同一张 const 表
+（spec 拍板 2：判据单点，红线 3）。单测路径 setNameRegistry 未注入时
+维持 B35 近似（兼容缺省）。
+
+**回归用例**：
+- `tests/lang/test_basics_23_name_registry.cpp`（正例：裸 S; 判声明 +
+  同名跨类声明优先 + typedef 名 + M::B<int> 归一，rc=0 与 clang 对拍）
+- `tests/lang/test_basics_24_name_registry_negative.cpp`（本条的复现，
+  rc=1 文案逐字对齐）
+- `tests/unit/test_name_registry.cpp`（NameRegistry.* 13 例：收集五规则、
+  位并集、scope 精确匹配、value 位恒 false、declval 种子）
+- **突变验证 3 条逐条实跑变红**：① 摘语句层 type 位判定 ⇒ 正例
+  [parse:stmt] 行 3→0；② 裁决回退尾剥 ⇒ 负例报错消失、误绑复活 rc=0；
+  ③ struct/class 不置 type 位 ⇒ S; 不再判声明 + 单测 TypeBit 红。
+
+**有意日志漂移**（2 处，已重刷基线 153→155 份）：
+- tmpl_54 的 unknown-type-name 括注改写（旧文案「跳过 <...> + 回滚」
+  自 B35 起因过时误导排查）。
+- 新增 basics_23/24 两份日志入列。
+
+**附带修复**：test_expr_parser 的 ExprParserTemplateId 套件自 B31 起
+其实**一直未真正通过**——B31 加了登记表第一层闸，而该套件的 snippet
+（`return foo<int>(x);`）从未声明过 foo；当时 ctest 跑的是**陈旧
+unit_tests 二进制**，绿色是假象（与 logdiff「基线会把失败固化成契约」
+同族的第三种面具：陈旧产物掩盖失败）。修复：parseExpr 辅助函数前导
+声明 `template<class T> T foo(T);`（同时守住 a<b 未登记 ⇒ 比较链的
+负向用例），声明取下标从 [0] 改末位。重建后 362/362 全绿。

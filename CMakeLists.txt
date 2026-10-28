@@ -39,6 +39,7 @@ set(SOURCES
     src/sfinae.cpp
     src/constant_folder.cpp
     src/lexer.cpp
+    src/name_registry.cpp
     src/parser.cpp
     src/type.cpp
     src/semantic_analyzer.cpp
@@ -88,10 +89,12 @@ add_executable(unit_tests
     tests/unit/test_declaratorless_decl.cpp
     tests/unit/test_member_template_in_class_template.cpp
     tests/unit/test_arg_binding.cpp
+    tests/unit/test_name_registry.cpp
     src/preprocessor.cpp
     src/sfinae.cpp
     src/constant_folder.cpp
     src/lexer.cpp
+    src/name_registry.cpp
     src/parser.cpp
     src/semantic_analyzer.cpp
     src/codegen.cpp

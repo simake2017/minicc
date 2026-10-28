@@ -45,13 +45,21 @@ namespace {
 // 辅助：把表达式文本包装进 "int test_fn() { return <expr>; }" 解析，取回表达式
 // trace 出参承接 StdoutCapture 捕获到的阶段日志流水。
 ExprPtr parseExpr(const std::string& exprStr, std::string& trace) {
-    std::string src = "int test_fn() { return " + exprStr + "; }\n";
+    // ★ B31/47 登记表第一层闸：template-id 消歧先查名字登记表，snippet 里
+    //   必须真的声明过 foo 这个函数模板，foo<int>(x) 才会进 <...> 试探
+    //   （否则按 B31 语义就是比较链——a < b 用例正是靠 a/b 未登记守住的）。
+    //   该声明自 B31 起即为必需；2026-10 重建 unit_tests 时从陈旧二进制
+    //   的假象下暴露（教训同 logdiff：陈旧产物会把失败掩盖成绿色）。
+    std::string src =
+        "template<class T> T foo(T);\n"
+        "int test_fn() { return " + exprStr + "; }\n";
     Lexer lexer(src);
     Parser parser(lexer.tokenizeAll());
     TranslationUnit unit;
     { StdoutCapture cap; unit = parser.parseTranslationUnit(); trace = cap.str(); }
     if (unit.declarations.empty()) return nullptr;
-    auto func = std::dynamic_pointer_cast<FunctionDecl>(unit.declarations[0]);
+    // 声明表 [0] 是前导的 foo 函数模板——取 test_fn（末位声明）
+    auto func = std::dynamic_pointer_cast<FunctionDecl>(unit.declarations.back());
     if (!func || !func->body || func->body->statements.empty()) return nullptr;
     auto ret = std::dynamic_pointer_cast<ReturnStmt>(func->body->statements[0]);
     return ret ? ret->value : nullptr;

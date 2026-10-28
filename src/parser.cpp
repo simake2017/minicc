@@ -52,81 +52,20 @@ namespace minicc {
 // 文法：（无）—— 仅持有 Token 流，游标 m_pos 初始化为 0（指向第一个 Token）。
 // 入参 demo：tokens = [int][main][(][)][{][return][0][;][}][Eof]
 //           构造后 m_pos = 0 → current() = [int]
-// B31：构造时做一次前向扫描收集模板名登记表（支持先使用后声明），
-//       [stmt.ambig] 消歧点据此只读查询，见 collectTemplateNames()。
+// B31/47：构造时关联名字登记表（前向收集、只读查询），
+//       [stmt.ambig] 消歧点据此只读查询，见 name_registry.h / docs/learn/46/47。
+Parser::Parser(std::vector<Token> tokens,
+               const std::shared_ptr<const NameRegistry>& names)
+    : m_tokens(std::move(tokens)), m_names(names) {
+    if (!m_names) throw std::logic_error("NameRegistry must not be null");
+}
+
+// 单测便利重载：内部自建并收集一张登记表（与主线共享表的行为等价；
+// B31 的 collectTemplateNames 已搬迁进 NameRegistry::collect）。
 Parser::Parser(std::vector<Token> tokens)
-    : m_tokens(std::move(tokens)) {
-    collectTemplateNames();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// B31：模板名登记表（前向收集 + 只读查询）
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫描策略：线性扫 token 流，遇 KwTemplate ⇒ 跳过配对的 '<...>' 形参表 ⇒
-// 按后续 token 形态判定声明种类并提取名字：
-//   template <...> struct|class X ...   ⇒ X（类模板，含偏/全特化的头）
-//   template <...> using X = ...        ⇒ X（别名模板）
-//   其它（函数模板 / 推导指引 / 成员模板）⇒ 形参表后【第一个后跟 '(' 的标识符】
-//     （函数模板 ret name(params)；指引 Name(params) -> ...；成员模板同函数形态）
-// 只收集、不验证 —— 它是语法期消歧 hint，不是决议（真错误仍由 Sema 报）。
-// ★ 循环不跳过已处理区间：形参表内部可嵌套 template 头（模板模板形参
-//   `template <class> class C`），内层名字要照常登记。
-// ★ 种子名单：Sema 内建的模板名（不经 token 流）也收进来 —— 目前只有
-//   std::declval（[declval]/1，inferCall ⓪ 内建）。漏收的症状是 RC 下降：
-//   `decltype(std::declval<T>().begin())` 被消歧成比较链（test_tmpl_35..39
-//   五个文件当场 rc=1）。std::void_t 只在类型位置按名识别、不走本消歧，不收。
-void Parser::collectTemplateNames() {
-    m_templateNames.insert("declval");   // Sema 内建 declval<T>()（含 std:: 限定形式，末段查询命中）
-    for (size_t i = 0; i < m_tokens.size(); ++i) {
-        if (m_tokens[i].type != TokenType::KwTemplate) continue;
-        // 跳过 'template' 与配对的 '<...>'（'>>' 不切 token，逐 Greater 计数即可）
-        size_t j = i + 1;
-        if (j >= m_tokens.size() || m_tokens[j].type != TokenType::Less) continue;
-        int depth = 1;
-        ++j;
-        while (j < m_tokens.size() && depth > 0) {
-            if (m_tokens[j].type == TokenType::Less) ++depth;
-            else if (m_tokens[j].type == TokenType::Greater) --depth;
-            ++j;
-        }
-        // j 现在指向 '>' 之后（或流尾）
-        if (j >= m_tokens.size()) break;
-        const Token& head = m_tokens[j];
-        if (head.type == TokenType::KwStruct || head.type == TokenType::KwClass) {
-            if (j + 1 < m_tokens.size() && m_tokens[j + 1].type == TokenType::Identifier)
-                m_templateNames.insert(m_tokens[j + 1].text);
-        } else if (head.type == TokenType::KwUsing) {
-            if (j + 1 < m_tokens.size() && m_tokens[j + 1].type == TokenType::Identifier)
-                m_templateNames.insert(m_tokens[j + 1].text);
-        } else {
-            // 函数模板 / 推导指引 / 成员模板：第一个"标识符 + '('"的名字。
-            // 返回值可能是模板 id（Box<int> foo(...)）——<...> 段里没有裸
-            // Ident+LParen 序列，扫过去不误判；扫到语句尾（';'）或 '{'（类体）
-            // 为止防跑飞。
-            for (size_t k = j; k < m_tokens.size(); ++k) {
-                const Token& t = m_tokens[k];
-                if (t.type == TokenType::Semicolon || t.type == TokenType::LBrace
-                    || t.type == TokenType::Eof)
-                    break;
-                if (t.type == TokenType::Identifier && k + 1 < m_tokens.size()
-                    && m_tokens[k + 1].type == TokenType::LParen) {
-                    m_templateNames.insert(t.text);
-                    break;
-                }
-            }
-        }
-    }
-    // ★ 不打点：构造期一行日志会漂移全部基线（150+ 份）。
-}
-
-// ── 查询：全名命中，或取 '::' 后最后一段查裸名（限定名 N::foo 的近似，
-//    边界：不同命名空间里的同名非模板函数会被误认 —— 保守方向是"宁可
-//    误判为模板进试探"，试探失败后仍回退比较运算，不会静默算错；
-//    反方向（漏登记）才会把真 template-id 误判成比较链，见 docs/learn/46。
-bool Parser::isKnownTemplateName(const std::string& name) const {
-    if (m_templateNames.count(name)) return true;
-    const auto sep = name.rfind("::");
-    return sep != std::string::npos && m_templateNames.count(name.substr(sep + 2)) > 0;
+    : m_tokens(std::move(tokens)),
+      m_names(std::make_shared<NameRegistry>()) {
+    const_cast<NameRegistry&>(*m_names).collect(m_tokens);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2274,6 +2213,7 @@ StmtPtr Parser::parseStatement() {
     if (check(TokenType::KwTypename) || check(TokenType::Identifier)) {
         TypePtr type;
         bool isDecl = false;
+        std::string bareDeclName;   // 裸名声明判定的名字（commit 后打 [parse:stmt]）
         {
             TokenCheckpoint cp(*this);
             try {
@@ -2286,19 +2226,29 @@ StmtPtr Parser::parseStatement() {
 
                     // B16 无声明符声明：仅当类型带模板 id 语法（本层或嵌套
                     // 限定者链上任一层的 '<...>' 实参表）——等价旧 sawTypeIdSyntax。
-                    // 裸 `S;` 刻意不算：它也可能是同名对象的表达式语句，
-                    // Token 前瞻分不出来，留表达式路径给 Sema 查符号表消歧。
                     bool hasTemplIdSyntax = false;
                     for (TypePtr t = type; t; t = t->nestedQualifier) {
                         if (!t->templateArgs.empty()) { hasTemplIdSyntax = true; break; }
                     }
                     isDecl = hasTemplIdSyntax && isDeclaratorlessDecl(type);
+                    // ★ 裸 `S;`（无模板 id 语法、无声明符）：parser 名字识别
+                    //   新增消费点（spec §2 步骤 2 / 设计 3.2）——查登记表的
+                    //   type 位：命中 ⇒ 声明解释（[stmt.ambig]「能当声明就当
+                    //   声明」；`int S; struct S;` 并存时声明优先，与 clang 同）。
+                    //   查不到 = 位未命中 = 走表达式（宁宽勿窄，spec 异常 1），
+                    //   Sema 对未声明名的报错兜底。替换 B35「裸 S; 刻意不算、
+                    //   留表达式路径给 Sema」的注释策略——当时登记表只有模板位。
+                    if (!isDecl && !hasTemplIdSyntax
+                        && names().classify(type->name).isType) {
+                        isDecl = true;
+                        bareDeclName = type->name;   // commit 后打日志
+                    }
                 }
                 // 登记表第一层闸（B35）：模板 id 层的基名不在登记表 ⇒ 比较链
                 if (isDecl) {
                     for (TypePtr t = type; t; t = t->nestedQualifier) {
                         if (!t->templateArgs.empty()
-                            && !isKnownTemplateName(t->name)) { // mrd 如果是模板但是名字又不是模板
+                            && !names().isTemplateName(t->name)) { // mrd 如果是模板但是名字又不是模板
                             isDecl = false;
                             break;
                         }
@@ -2310,7 +2260,10 @@ StmtPtr Parser::parseStatement() {
             if (isDecl) cp.commit();
         }   // 未 commit ⇒ 全状态回卷 + 试探日志整体废弃
         if (isDecl) {
-            if (check(TokenType::Semicolon)) {   // B16 无声明符声明
+            if (check(TokenType::Semicolon)) {   // B16 无声明符声明 / 裸名声明
+                if (!bareDeclName.empty())
+                    logParse("  [parse:stmt] '{}' 判为声明（type 位）\n",
+                             bareDeclName);
                 advance();
                 return std::make_shared<EmptyStmt>();
             }
@@ -3114,7 +3067,7 @@ ExprPtr Parser::parsePrimaryExpr() {
         //   全变量比较链被误判（试探解析把 a 当模板名，"实参表"竟也成立，
         //   直到 Sema 才炸）。名字在表中也未必是（变量可以遮蔽模板名），
         //   仍走试探——试不出来回退比较，方向保守。
-        if (check(TokenType::Less) && isKnownTemplateName(name)) {
+        if (check(TokenType::Less) && names().isTemplateName(name)) {
             std::vector<TemplateArg> explicitArgs;
             bool isTemplateId = false;
             {

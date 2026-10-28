@@ -23,6 +23,7 @@ SRCS=(
     sfinae.cpp
     constant_folder.cpp
     lexer.cpp
+    name_registry.cpp
     parser.cpp
     type.cpp
     semantic_analyzer.cpp

@@ -918,24 +918,41 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
         // 判定条件：携带非空实参，且该名字是已登记的类模板蓝图（m_classTemplates，O(1)）。
         // （普通已实例化类如 Box_int 实参为空，走下面的符号表替换。）
         if (!type->templateArgs.empty()) {
-            // ── ★ B35：限定名模板 id `N::B<Box>` ——蓝图按【书写名】（裸名）登记
+            // ── ★ B35→47：限定名模板 id `N::B<Box>` ——蓝图按【书写名】（裸名）登记
             // （processNamespaceDecl 只前缀化 Function/Class/GlobalVar/Enum，
-            // TemplateDecl 走 default 原样过去），故限定名查表落空。剥掉命名空间
-            // 前缀取末段再查 —— 语义正确：`N::B<int>` 与 `B<int>` 是【同一实例】
-            // （实例名/缓存键都归一到 B_int）。对照 clang：QualifiedNameLookup
-            // 沿 DeclContext 链找到蓝图。宽方向：`N::B` 真不存在时会误绑全局 B
-            //（误绑是响亮方向的反面，先记边界）。
+            // TemplateDecl 走 default 原样过去），故限定名查表落空。
+            // B35 的做法是「剥 :: 末段查全局蓝图表」——语义对（`N::B<int>` 与
+            // `B<int>` 是【同一实例】），但宽方向有洞：N::B 真不存在时会误绑
+            // 全局 B（方向性错）。parser 名字识别（spec §2 步骤 4）后改为
+            // 经名字登记表做【作用域精确裁决】：存在 (scope=N, name=B,
+            // template 位) 条目才归一裸名；配不上 ⇒ 报错，与 clang 逐字
+            // （clang/lib/Sema/SemaDecl.cpp 的 QualifiedNameLookup 沿
+            // DeclContext 链查找 + err_no_template_named 诊断）。
             if (!m_aliasTemplates.count(type->name)
                 && !m_classTemplates.count(type->name)) {
                 if (auto sep = type->name.rfind("::");
                     sep != std::string::npos) {
+                    const std::string scope = type->name.substr(0, sep);
                     const std::string tail = type->name.substr(sep + 2);
-                    if (m_aliasTemplates.count(tail)
-                        || m_classTemplates.count(tail)) {
+                    bool resolved = false;
+                    if (m_names) {
+                        // 主线：登记表裁决（唯一依据，不做末段回退）
+                        resolved = m_names->classifyQualified(scope, tail)
+                                       .isTemplate;
+                    } else {
+                        // 单测兼容缺省（setNameRegistry 未注入）：
+                        // 维持 B35 裸尾剥近似
+                        resolved = true;
+                    }
+                    if (resolved) {
                         std::cout << std::format(
                             "  [resolve] 限定模板名 '{}' ⇒ 裸名 '{}'（蓝图按书写名登记，B35）\n",
                             type->name, tail);
                         type->name = tail;
+                    } else {
+                        error(std::format(
+                            "no template named '{}' in namespace '{}'",
+                            tail, scope), SourceLocation{});
                     }
                 }
             }
@@ -1151,10 +1168,9 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
             }
             error(std::format(
                 "unknown type name '{}' —— 该名字没有作为类/类型被声明过。"
-                "（若原文是比较表达式如 `a < b > c;`，本实现的前瞻会把它当成"
-                "变量声明：C++ 的 [stmt.ambig] 规定「能当声明就当声明」，"
-                "这需要解析期符号表；本实现用「跳过 <...> + 回滚」的试探法近似，"
-                "详见 docs/learn/22 的已知边界）",
+                "（语句层的声明/表达式歧义（`a < b > c;`、裸 `S;`）已由解析期"
+                "名字登记表在语法期消歧（B35/47，docs/learn/46/47）；能走到"
+                "这一步的 `名字 标识符/;` 是【真正的】未知类型名。）",
                 type->name), SourceLocation{});
         }
     }

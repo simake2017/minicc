@@ -28,6 +28,7 @@
 #include "ast.h"
 #include "ast_visitor.h"
 #include "constant_folder.h"
+#include "name_registry.h"
 #include "type.h"
 #include "template_instantiation.h"
 #include <string>
@@ -247,6 +248,13 @@ public:
     // 获取符号表（供调试输出）
     SymbolTable& getSymbolTable() { return m_symbolTable; }
 
+    // ── parser 名字识别（spec §2 步骤 4 / 设计 3.4）：限定模板名 N::B 的
+    // 作用域裁决与 Parser 的消歧【同源一张表】（spec 拍板 2）。analyze 前注入；
+    // 未注入时 Sema 维持 B35 的裸尾剥近似（单测路径的兼容缺省）。
+    void setNameRegistry(std::shared_ptr<const NameRegistry> names) {
+        m_names = std::move(names);
+    }
+
     // ── 诊断可视化（--dump-* 系列）──
     // dumpHierarchy: 类层次结构图（继承树 + 每个类详情框 + typeinfo 链）
     // dumpLayout: 三层内存布局详图（对象 → vtable(含[-2][-1]) → typeinfo 链）
@@ -255,6 +263,9 @@ public:
     void dumpLayout(const std::unordered_map<std::string, TypePtr>& classTypes);
 
 private:
+    // ── parser 名字识别：限定名裁决的只读依据（可为 null = 单测兼容路径）──
+    std::shared_ptr<const NameRegistry> m_names;
+
     // ── 符号表管理 ──
     SymbolTable m_symbolTable;
 

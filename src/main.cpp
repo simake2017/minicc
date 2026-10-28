@@ -37,6 +37,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "semantic_analyzer.h"
+#include "name_registry.h"
 #include "preprocessor.h"
 #include "template_instantiation.h"
 #include "codegen.h"
@@ -44,6 +45,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -657,7 +659,11 @@ int main(int argc, char* argv[]) {
 
         // 递归下降解析（对照标准 [gram] 文法的子集），
         // 产出 TranslationUnit = 顶层声明列表（函数/类/模板）。
-        Parser parser(tokens);
+        // ★ parser 名字识别（spec §2 步骤 1）：先建登记表并前向收集，
+        //   Parser（消歧）与 Sema（限定名裁决）共享同一张只读表。
+        auto nameReg = std::make_shared<NameRegistry>();
+        nameReg->collect(tokens);
+        Parser parser(std::move(tokens), nameReg);
         TranslationUnit unit = parser.parseTranslationUnit();
 
         std::cout << std::format("  {} top-level declarations parsed\n",
@@ -676,7 +682,10 @@ int main(int argc, char* argv[]) {
 
         // 类型检查 + auto 推导 + 类内存布局（字段偏移/对齐、vtable、RTTI）。
         // 布局结果供两处消费：下方打印（可观测性）与阶段 5 CodeGen（访存偏移）。
+        // ★ 与 Parser 共享名字登记表：限定模板名 N::B 的作用域裁决依据
+        //   （parser 名字识别 spec §2 步骤 4，docs/designs/parser-stage-name-recognition）。
         SemanticAnalyzer semaAnalyzer;
+        semaAnalyzer.setNameRegistry(nameReg);
         semaAnalyzer.analyze(unit);
 
         auto& classTypes = semaAnalyzer.getClassTypes();
