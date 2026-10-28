@@ -1,903 +1,195 @@
 # minicc —— Mini C++ Compiler
 
-一个用现代 C++20 编写的教学级 C++ 编译器，覆盖从源码到 x86-64 汇编的完整编译流水线。
+一个用现代 C++20 编写的**教学级 C++ 编译器**：从源码到 x86-64 可执行文件的完整流水线
+全部自研——预处理器、Lexer、Parser、语义分析、模板实例化、代码生成、**链接器**。
 
-**核心理念**：编译过程中的每一步都会输出详细的中文日志，让你"看见"编译器在做什么。
+**核心理念**（项目最高优先级）：这是学习编译器理论的仪器，不是生产工具。
+一切设计以「**可讲解、可观测**」优先于「高性能、功能全」：
 
----
+- 每个阶段输出**中文日志**，推导逐对打印（如 `P=T A=int ⇒ T := int ✓`）；
+- 每个新判据先拿 `clang++-18` 当语义 oracle 探针实测，报错文案逐字对齐；
+- **日志即契约**：155 份集成基线逐字节比对，重构不许改变任何可观测行为。
 
-## 目录
+> 难度选择：项目主战场是 C++ 里最难的**模板机制**（实参推导 ≈ 合一算法、
+> 实例化 ≈ 结构化替换、两阶段查找、重载决议、SFINAE、偏序裁决）——
+> 这是"在编译器里再实现一台类型层面的 Prolog"。
 
-- [快速开始](#快速开始)
-- [编译编译器本身](#编译编译器本身)
-- [使用 minicc 编译测试文件](#使用-minicc-编译测试文件)
-- [命令行参数](#命令行参数)
-- [编译日志详解](#编译日志详解)
-- [模板测试用例一览](#模板测试用例一览)
-- [编译器架构（6 大阶段）](#编译器架构6-大阶段)
-- [项目结构](#项目结构)
-- [核心概念详解](#核心概念详解)
-- [支持的语法特性](#支持的语法特性)
-- [学习路线建议](#学习路线建议)
-- [常见问题](#常见问题)
+## 快照（2026-10-23）
 
----
+| 指标 | 数值 |
+|---|---|
+| 核心代码（include + src） | 约 2.4 万行 C++20，全阶段中文日志 |
+| 单测 | **362** 例（googletest，断言不变量而非具体符号名） |
+| 集成测试 | **155** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
+| 学习文档 | docs/learn/ 01..47（每篇点名标准章节 + clang 源码对照表） |
+| 配套标准库 | ministl：vector / list / map / set（红黑树）/ 智能指针 / function / algorithm / ranges，与 std 随机对拍 |
+| 外部依赖 | 编译期零依赖；运行期借系统 `as` 产 .o，链接与运行时（_start + bump malloc）自研，**不依赖 libc/crt** |
 
 ## 快速开始
 
 ```bash
-# 1. 编译编译器
-cd mycompiler
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-cmake --build . -j$(sysctl -n hw.ncpu)
+# 编译编译器（两种等价方式，都会用 ccache）
+./build.sh                      # 自研脚本 → 项目根 ./minicc
+# 或
+cmake -S . -B build-linux -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache && cmake --build build-linux -j6
 
-# 2. 回到项目根目录，编译一个测试文件
-cd ..
-./build/minicc tests/test_tmpl_01_basic.cpp
+# 编译一个测试文件（默认直出可执行文件，内部自动 as + 自研链接器）
+./minicc tests/lang/test_basics_01.cpp -o /tmp/t && /tmp/t
 
-# 3. 终端会打印 6 个阶段的完整编译日志 ✨
+# 终端会打印阶段 0~6 的完整编译日志 ✨
 ```
 
----
+## 命令行
 
-## 编译编译器本身
+```text
+minicc <source.cpp> [-o output] [-I dir] [-S] [-E]
+       [--dump-tokens] [--dump-ast] [--dump-hierarchy] [--dump-layout]
 
-### 环境要求
+  -S                只输出汇编（跳过链接）
+  -E                只跑预处理器（#include 并合 + 宏展开 + 条件编译）
+  --dump-tokens    阶段 1 后打印 Token 流（行:列 类型 文本）
+  --dump-ast       阶段 2 后打印 AST 树（访问者遍历）
+  --dump-hierarchy 类继承层次图（含 typeinfo 链）
+  --dump-layout    三层内存布局详图（对象 → vtable → typeinfo）
+```
 
-| 依赖 | 最低版本 | 说明 |
-|------|---------|------|
-| CMake | 3.20+ | 构建系统 |
-| C++ 编译器 | 支持 C++20 | Apple Clang / GCC / LLVM Clang |
-
-### 编译步骤
+调试观测常用组合（日志量很大，建议 grep）：
 
 ```bash
-cd mycompiler
-
-# 创建构建目录（推荐用 build/）
-mkdir -p build && cd build
-
-# 配置
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-
-# 编译（使用所有 CPU 核心加速）
-cmake --build . -j$(sysctl -n hw.ncpu)
-# Linux 上用: cmake --build . -j$(nproc)
+./minicc tests/tmpl/test_tmpl_12.cpp -o /tmp/t 2>&1 | grep "\[deduce\]"   # 推导逐对
+./minicc tests/mi/test_mi_04.cpp     -o /tmp/t 2>&1 | grep "vtable"       # 虚表
+./minicc tests/lang/test_basics_10_array.cpp -o /tmp/t 2>&1 | grep "layout"  # 布局
 ```
 
-编译成功后产出 `build/minicc` 可执行文件。
+## 架构：七个阶段
 
-### 重新编译
+```text
+源码 ──► [0] 预处理器 ──► [1] Lexer ──► [2] Parser ──► [3] Sema
+                                                        │  （三趟：注册→决议→走查）
+        [6] 自研链接器 ◄── [5] CodeGen ◄── [4] 模板实例化 ◄┘
+        （节合并/符号决议/  （x86-64 AT&T，
+         重定位回填）        借系统 as 产 .o）
+```
 
-修改源码后只需在 `build/` 目录下重新执行：
+| 阶段 | 模块 | clang 对照 | 一句话 |
+|---|---|---|---|
+| 0 预处理 | preprocessor.cpp | Lexer.cpp + PPDirectives | #include 搜索路径 / 对象+函数宏 / 条件编译 / `#pragma once` / 内建 `__MINICC__` |
+| 1 词法 | lexer.cpp | Lexer.cpp | 切片即词法；整数字面量的形态解释推迟到 Parser（对照 NumericLiteralParser） |
+| 2 语法 | parser.cpp | Parse/ | 递归下降；歧义一律 TokenCheckpoint 试探回卷（对照 TentativeParsingAction） |
+| 3 语义 | semantic_analyzer.cpp | Sema/ | 类型检查 / 类布局 / vtable / 符号表 / ADL / 重载决议 |
+| 4 实例化 | template_instantiation.cpp + template_deduction.cpp | SemaTemplate | 合一推导 + 结构化替换；SFINAE 软失败独立成 sfinae.cpp |
+| 5 代码生成 | codegen.cpp | CodeGenFunction | 栈机式求值，按宽度分派访存；零 RTTI（Visitor + 标签分派双轨） |
+| 6 链接 | linker.cpp | LLVM ELF Linker | 合并节 / 符号决议 / 重定位；内置 _start + 64KB bump malloc/free |
+
+**解析期语义识别**（本项目特色机制）：Parser 不持 Sema 句柄（红线），改为
+构造期前向收集**名字登记表**（type/namespace/template 三位 + 作用域键，
+对齐 `Sema::ClassifyName` 骨架）——`a < b > c;` 比较链、裸 `S;` 声明判定、
+限定模板名作用域裁决全靠查这张只读投影（docs/learn/46、47）。
+
+## 支持的特性
+
+### 模板机制（主战场）
+
+| 特性 | 标准章节 | 测试 |
+|---|---|---|
+| 类模板（显式实参） | [temp.class] | tmpl 01..10（回归红线，永远全绿） |
+| 函数模板实参推导 | [temp.deduct] 合一算法 | tmpl 11..19 |
+| NTTP（整型家族/字符/`auto`/值位参与偏特化） | [temp.arg.nontype] | tmpl 21..26、61..68 |
+| 类模板特化 / 偏特化 / 全特化 / 三路择优 | [temp.spec] | tmpl 27..32 |
+| decltype / SFINAE / void_t 探测 / 偏序裁决 | [dcl.type.decltype] CWG 1558 [temp.class.order] | tmpl 33..45 |
+| 别名模板（三处解糖 + 推导期 desugar） | [temp.alias] | tmpl 50 |
+| CTAD + 推导指引 | [dcl.type.class.deduct] [temp.deduct.guide] | tmpl 51 |
+| 模板模板参数（P0522R0 逐位签名） | [temp.arg.template] | tmpl 53、57..60 |
+| 成员模板（含类模板体内，两层形参绑定时机） | [temp.mem] | tmpl 52、54、56、69 |
+| 依赖类型名 `typename T::type` | [temp.res]/5 | tmpl 49 |
+
+### 语言基础
+
+- 类型系统：auto / 指针 / 左右值引用 / const（cv 位置精确：[learn/23](docs/learn/23-cv-position-and-type-identity.md)）/ `decltype` / 原生数组 `T[N]`（含下标 SIB 寻址）
+- 类：构造/析构/初始化列表、虚函数 + vtable + RTTI、public 继承与多继承布局、static 数据成员、类内类型别名
+- 函数：重载（类型链择优）、默认实参之外的常用形态、ADL 与限定名查找
+- 语句：if / while / do-while / for / switch-case-default / break / continue / 三元 `?:` / 逗号表达式
+- 常量：`constexpr` 变量 / 常量折叠 / 常量传播 / 常量表达式作 NTTP 实参
+- 声明：全局变量 / 枚举 / 命名空间 / 类型别名 / 命名空间别名 / using
+- 宏与条件编译、GCC 风格 mangling（与 clang 逐字符对拍）
+
+### 配套 ministl
+
+`ministl/` 双栖头文件（`#ifdef __MINICC__` 分支）：vector、list、map/set
+（红黑树全移植 libc++ `__tree` 算法 + 5000 步随机对拍 std）、unordered_map、
+智能指针、function、algorithm、ranges、type_traits。ASan+UBSan 全绿。
+
+## 已知边界（宽方向，显式记录）
+
+设计取向：**宁可响亮拒收，不可静默算错**。以下近似均有文档记录：
+
+- 名字遮蔽不精确裁决（登记即视为可见；遮蔽场景响亮拒收）
+- `using Base::f;` 名字拉入、限定名调用成员函数 `d.Base::f(2)` 未做
+- const 写检查未做（`const a.v = 5` 宽松放行）
+- 诊断为 panic 模式单错误即停（无错误恢复续编）
+- 代码生成无寄存器分配与优化 Pass（栈机求值）
+
+完整清单见 [TODO.md](TODO.md) 与各 docs/learn/NN §边界节。
+
+## 测试与验证体系
 
 ```bash
-cd build
-cmake --build . -j$(sysctl -n hw.ncpu)
+./build.sh                          # ① 0 警告
+ctest --test-dir build-linux -j6    # ② 362/362
+./logdiff.sh diff                   # ③ 155 份基线逐字节零漂移
 ```
 
-CMake 会自动检测变更，只重编译修改过的文件。
-
----
-
-## 使用 minicc 编译测试文件
-
-### 基本用法
-
-```bash
-# 在项目根目录下执行
-./build/minicc <源文件.cpp> [选项]
-```
-
-**所有编译日志自动打印到终端**，不需要额外开关。
-
-### 常用命令
-
-```bash
-# ── 基本编译：默认直出可执行文件（内部自动 as + 自研链接器）──
-./build/minicc tests/test_tmpl_01_basic.cpp -o /tmp/demo && /tmp/demo
-
-# ── 只输出汇编（-S 跳过链接，等价旧行为）──
-./build/minicc tests/test_tmpl_01_basic.cpp -S -o output.s
-
-# ── 额外打印 Token 流（词法分析细节）──
-./build/minicc tests/test_tmpl_01_basic.cpp --dump-tokens
-
-# ── 额外打印 AST 树（语法分析细节）──
-./build/minicc tests/test_tmpl_01_basic.cpp --dump-ast
-
-# ── 全开（Token + AST + 全部日志）──
-./build/minicc tests/test_tmpl_01_basic.cpp --dump-tokens --dump-ast -o output.s
-```
-
-### 批量运行所有测试
-
-```bash
-for f in tests/*/*.cpp; do
-    echo "========== $(basename $f) =========="
-    ./minicc "$f" -o /dev/null
-    echo ""
-done
-
-# 单测（GoogleTest，159 个用例）
-ctest --test-dir build-linux --output-on-failure
-```
-
-### CLion 调试入口（单个测试逐行步进）
-
-- **调测试程序本身（入口就在测试文件里）**：94 个正例文件头部有一个
-  `#ifdef MINICC_GTEST_TEST` 块（6 行，minicc 编译时被条件编译整体抹掉、
-  语义零变化）——定义 `MINICC_GTEST_TEST` 时 `int main()` 改名为普通函数、
-  同文件挂出 `TEST(Integration, <文件名>)`。CMake 为每个测试建独立小目标
-  `itest_<文件名>`（EXCLUDE_FROM_ALL，点哪个才编哪个）。CLion 里打开任意
-  tests/ 源文件，`TEST()` 左侧绿色三角 → Run/**Debug** → 断点直接落在该文件。
-  ★ 块必须排在文件的自有 `#define`/`#include` 之前：对象式宏（如 pp 测试的
-  `#define C 0`）会把后到的 gtest 头文件毒化（template 参数名 C 被替换成 0）。
-- **错误用例与方言用例（31 个）**：文件本身是非法程序或含 minicc 方言糖
-  （v[i] 下标等），主机编译器编不过、没法在文件里挂 TEST —— 它们编进
-  `integration_gtest` 的 `MiniccSubprocess.*` 套件：TEST 体以**子进程**调
-  minicc 编译该文件并核对退出码（期望值由 CMake 从 `.logbaseline` 解析，
-  与 logdiff 同一 oracle；重刷基线后需 Reload CMake）。点 Debug 步进到的只是
-  包装层 —— 这批用例没有"程序语义"可步进。
-- **调编译器本身**：直接建 `minicc` 的运行配置，
-  Program arguments 填 `tests/xxx/yyy.cpp -o /tmp/yyy`，断点打在 `src/*.cpp`。
-
-### 重构安全网：日志基线对比
-
-本项目的「全阶段中文日志」是交付物之一 —— 单测靠子串匹配日志原文，
-`docs/learn/` 里的文档直接粘贴日志片段。所以**改内部实现时，
-日志必须逐字节不变**。`logdiff.sh` 就是守这条线的：
-
-```bash
-./logdiff.sh save     # 改动【前】存基线（84 个集成测试的
-                      #   编译日志 + 退出码 + 程序输出 + 生成的汇编全文）
-#   ... 改代码 ...
-./logdiff.sh diff     # 改动【后】逐字节对比，零差异才放行
-```
-
-基线存在 `.logbaseline/`（已 gitignore）。详见 `docs/REFACTOR-ast-visitor.md`。
-
-### 只看某个阶段的日志（用 grep 过滤）
-
-```bash
-# 只看模板替换过程（Phase 4）
-./build/minicc tests/test_tmpl_07_reference_collapse.cpp 2>&1 | grep -A500 "Phase 4"
-
-# 只看内存布局
-./build/minicc tests/test_tmpl_09_mixed.cpp 2>&1 | grep -A20 "Memory Layout"
-
-# 只看 auto 推导
-./build/minicc tests/test_tmpl_01_basic.cpp 2>&1 | grep "\[auto\]"
-
-# 只看符号表
-./build/minicc tests/test_tmpl_09_mixed.cpp 2>&1 | grep -A30 "SYMBOL TABLE"
-
-# 只看引用折叠
-./build/minicc tests/test_tmpl_07_reference_collapse.cpp 2>&1 | grep "Reference collapsing"
-
-# 只看 Name Mangling
-./build/minicc tests/test_tmpl_06_multi_param.cpp 2>&1 | grep "Mangled:"
-```
-
-### 查看生成的汇编代码
-
-```bash
-# 编译并输出汇编
-./build/minicc tests/test_tmpl_01_basic.cpp -o output.s 2>/dev/null
-#                                   注意 2>/dev/null 抑制日志，只看汇编
-
-# 查看汇编
-cat output.s
-```
-
----
-
-## 命令行参数
-
-| 参数 | 说明 |
-|------|------|
-| `<source.cpp>` | **必填**，输入的 C++ 源文件 |
-| `-o <output.s>` | 指定输出的汇编文件路径（默认：同名 `.s` 文件） |
-| `--dump-tokens` | 额外打印词法分析的 Token 流 |
-| `--dump-ast` | 额外打印语法分析的 AST 树结构 |
-
----
-
-## 编译日志详解
-
-minicc 的一大特色是**每个编译阶段都输出详细的中文日志**，让你看到编译器内部发生了什么。
-
-### 6 个阶段的日志内容
-
-#### Phase 1: 词法分析 (Lexical Analysis)
-
-```
-════════════════════════════════════════════════════════════
-  Phase 1: Lexical Analysis (词法分析)
-════════════════════════════════════════════════════════════
-  72 tokens generated
-```
-
-加 `--dump-tokens` 可以看到每个 Token：
-```
-  Token dump:
-    17:1   template        'template'
-    17:9   <               '<'
-    17:10  typename        'typename'
-    17:19  Identifier      'T'
-    ...
-```
-
-#### Phase 2: 语法分析 (Syntax Analysis)
-
-展示模板蓝图的解析过程：
-
-```
-  [parse:template] ▶ template declaration at 17:1
-  [parse:template]   parsing parameter list <typename T
-  [parse:template]   ★ type parameter registered: 'T'
-  [parse:template] ◀ template 'Box' with 1 parameter(s) stored as blueprint
-  [parse:template]   blueprint summary:
-    template <typename T> class Box { ... }
-```
-
-加 `--dump-ast` 可以看到 AST 树：
-```
-  AST dump:
-  TemplateDecl: <T>
-    ClassDecl: Box
-      Field: value : T
-      Method: get (normal) T
-      Method: set (normal) void
-  FunctionDecl: add → int
-  FunctionDecl: main → int
-```
-
-#### Phase 3: 语义分析 (Semantic Analysis) ★★★ 最核心
-
-这是信息量最大的阶段，包含三遍扫描：
-
-**Pass 1 — 注册类与模板：**
-```
-  [register] template <typename T> Box (blueprint stored, not analyzed)
-  [register] class 'Animal'
-    field: age : int
-    method: getAge() → int
-    ══ Memory Layout of 'Animal' ══
-    Total size: 8 bytes
-    +0: age : int (4 bytes)
-```
-
-**Pass 2 — 注册函数（支持递归调用）：**
-```
-  [register] add(int a, int b) → int    [mangled: add]
-  [register] main() → int    [mangled: main]
-  [register] Animal::getAge() → int    [mangled: Animal_getAge]
-```
-
-**符号表快照：**
-```
-  ╔══════════════════════════════════════════════╗
-  ║         SYMBOL TABLE (符号表快照)            ║
-  ╚══════════════════════════════════════════════╝
-    ┌─ Scope[0] 'global' (depth=0) ─────────────────
-    │  main         Function   int
-    │  add          Function   int
-    │  Animal       Type       Animal
-    └──────────────────────────────────────
-```
-
-**Pass 3 — 函数体分析（auto 推导 + 类型检查）：**
-```
-  ╔══ Function Body: main ══╗
-  [var decl] result : auto =
-    [resolve] 'add' → int    (kind=Function, global)
-    [call] add(2 args) → int    [symbol resolved]
-      [infer] IntLiteral(1) → int
-      [infer] IntLiteral(2) → int
-    ⟹ inferred: int
-  [auto] ★ result : auto ⟹ int   ← auto 被永久替换!
-  [symbol] ✚ result : int    stack@-8   ← 加入符号表
-```
-
-#### Phase 4: 模板实例化 (Template Instantiation) ★★ 最精彩
-
-每个模板蓝图会自动用多种类型实例化：
-
-**替换映射：**
-```
-  ╔══ Template Instantiation ═════════════════════════╗
-  ║ Blueprint: Box <T>
-  ║ Instance:  Box_int
-  ║ Substitution map: { 'T' → 'int', }
-```
-
-**字段替换过程：**
-```
-  ║ ── Field Substitution ──
-  ║   field 'value' : T → int
-  ║     [subst] ★ Class 'T' matches template param → 'int'
-```
-
-**嵌套指针的递归替换：**
-```
-  ║   field 'doublePtr' : T** → int**
-  ║     [subst] Pointer(T**) → recursing into pointee...
-  ║     [subst] Pointer(T*) → recursing into pointee...
-  ║     [subst] ★ Class 'T' matches template param → 'int'
-  ║     [subst] ★ Pointer substituted: T* → int*
-  ║     [subst] ★ Pointer substituted: T** → int**
-```
-
-**引用折叠（万能引用的核心机制）：**
-```
-  ║   field 'data' : T&& → int&
-  ║     [subst] RValueRef(T&&) → recursing into referenced type...
-  ║     [subst] ★ Class 'T' matches template param → 'int&'
-  ║     [subst] ★ Reference collapsing: int&&& → int& (lvalue ref wins!)
-```
-
-**Name Mangling：**
-```
-  ║ Mangled: Box_int → _Z3BoxIiE
-  ╚═══════════════════════════════════════════════════╝
-```
-
-#### Phase 5: 代码生成 (Code Generation)
-
-```
-  Generating x86-64 assembly...
-  Assembly written to: output.s
-```
-
-输出的 `.s` 文件就是 x86-64 汇编代码。
-
-#### Phase 6: 链接 (Linking)
-
-```
-  To assemble and link:
-    gcc -o output output.s -lstdc++
-```
-
----
-
-## 模板测试用例一览
-
-每个文件专注一种模板模式，位于 `tests/` 目录：
-
-| 文件 | 测试场景 | 核心看点 |
-|------|---------|---------|
-| `test_tmpl_01_basic.cpp` | 基础单参数 `template<typename T>` | T → int/double/int\*/int&/int&&/const int& 六种替换 |
-| `test_tmpl_02_pointer.cpp` | 指针类型 `T*`, `T**` | 嵌套指针递归替换过程 |
-| `test_tmpl_03_reference.cpp` | 左值引用 `T&` + 右值引用 `T&&` | 引用替换 + 引用折叠 |
-| `test_tmpl_04_const_ref.cpp` | 常量引用 `const T&` | 三层递归：Const → LValueRef → TemplateParam |
-| `test_tmpl_05_class_keyword.cpp` | `template<class T>` 写法 | class vs typename 关键字差异 |
-| `test_tmpl_06_multi_param.cpp` | 双参数 `template<typename T, typename U>` | 两个参数同时替换 |
-| `test_tmpl_07_reference_collapse.cpp` | **引用折叠**（万能引用） | T&& 当 T=int& 折叠为 int&，T=int&& 保持 int&& |
-| `test_tmpl_08_triple_param.cpp` | 三参数 + class/typename 混合 | `template<class T, typename U, class V>` |
-| `test_tmpl_09_mixed.cpp` | 模板 + 普通类 + 普通函数共存 | 模板蓝图不影响普通代码分析 |
-| `test_tmpl_10_multi_blueprint.cpp` | 多个模板蓝图共存 | 同一文件两个模板分别实例化 |
-| `test_tmpl_21_nttp_basic.cpp` | **非类型模板参数** `template<int N>` + `Buf<4>` | 值替换：`VarExpr{N}` → `IntLiteral{4}`；符号 `_Z3BufILi4EE` |
-| `test_tmpl_22_nttp_mixed.cpp` | 类型 + 非类型混排 `template<class T, int N>` | 逐位按形参 kind 分派，非按实参长相 |
-| `test_tmpl_23_nttp_value_distinct.cpp` | 不同值 → 不同实例 `Buf<4>` vs `Buf<8>` | 缓存键必须区分类型实参与值实参 |
-| `test_tmpl_24_nttp_negative.cpp` | 负数实参 `Buf<-3>` | Itanium 负数编码 `Lin3E`（实例名清洗为 `Buf__3`） |
-| `test_tmpl_25_error_nttp_got_type.cpp` | 错误：NTTP 位收到类型 | `Buf<int>` → must be a non-type argument |
-| `test_tmpl_26_error_type_got_value.cpp` | 错误：类型位收到值 | `Box<4>` → must be a type argument |
-| `test_tmpl_27_struct_template.cpp` | **`struct` 写模板体** | 与 `class` 模板机制相同，仅默认访问级别不同 |
-| `test_tmpl_28_default_arg.cpp` | **默认模板实参** `template<class T, class U = void>` + `Box<int>` | 使用点少写实参 → 补全为 `Box<int, void>` |
-| `test_tmpl_29_partial_spec.cpp` | **偏特化** `template<class T> class Box<T*, T>` | 用实参对模式跑合一：`Box<double*,double>` ⇒ `T := double` |
-| `test_tmpl_30_explicit_spec.cpp` | **全特化** `template<> class Box<int*, int>` | 空形参表 + 逐位类型相等直接比对，无推导 |
-| `test_tmpl_31_spec_selection.cpp` | **三路择优对照** | 四个使用点走完 ①全特化 ②偏特化 ③主模板 三条路径 |
-| `test_tmpl_32_error_default_gap.cpp` | 错误：默认实参空洞 | 前位有默认值时后位必须有（[temp.param]/12） |
-| `test_tmpl_33_decltype_basic.cpp` | **decltype 基础** `decltype(a)` / `decltype(f(1))` / `decltype(&a)` | 表达式→类型的查询算子；依赖上下文延迟求值 |
-| `test_tmpl_34_decltype_paren.cpp` | **decltype 括号规则**（[dcl.type.decltype]） | 多一对括号就变：`decltype(a)`=int vs `decltype((a))`=int&，经 `Probe<T&>` 偏特化观测 |
-| `test_tmpl_35_void_t_detect.cpp` | **void_t 探测命中** | `void_t<decltype(declval<T>().begin()), ...>` 全合法 ⇒ 归约为 void ⇒ 命中偏特化 |
-| `test_tmpl_36_void_t_fallback.cpp` | **SFINAE 软失败** | 替换失败被候选集消化，静默回退主模板，**不报错** |
-| `test_tmpl_37_void_t_partial.cpp` | **全有或全无** | 半吊子类型（只有 begin 没有 end）⇒ 第 1 个探测通过也整条作废 |
-| `test_tmpl_38_error_no_fallback.cpp` | 错误：兜底不存在 | 同一替换失败，主模板接不住 ⇒ **升级为硬错误**（与 36 成对） |
-| `test_tmpl_39_is_range_demo.cpp` | **用户原用例的 is_range + Box 半边** | `decltype(numbers)` / `decltype(1)` 探测 + `Box<decltype(&a)>` 择优，返回码对齐 clang |
-| `test_tmpl_40_order_pointer_depth.cpp` | **偏序裁决** T\* vs T\*\* | [temp.class.order] 互相推导，更特化者胜 |
-| `test_tmpl_41_order_decl_independent.cpp` | **偏序与声明顺序无关** | 与 40 构成判别性实验：证伪"取第一个/最后一个匹配者" |
-| `test_tmpl_42_order_ambiguous.cpp` | 错误：偏序歧义 | 互不更特化 ⇒ 必须报 ambiguous partial specializations |
-| `test_tmpl_43_order_three_way.cpp` | **三路偏序** T\* ⊂ T\*\* ⊂ T\*\*\* | dominance 循环 + 传递性，从 3 个同时匹配的候选里选出唯一赢家 |
-| `test_tmpl_44_error_extraneous_template.cpp` | 错误：`template<>` 却没有 `<...>` | 写了空形参表却不点明实参 ⇒ 全特化无从谈起，必须报错（此前**静默当主模板**） |
-| `test_tmpl_45_error_undeclared_in_explicit_spec.cpp` | 错误：全特化模式里出现未声明名 | `template <>` 形参表为空 ⇒ 模式里每个名字都得是真实类型；此前**静默永不匹配** |
-| `test_tmpl_46_ptr_vs_ref_instance.cpp` | **指针版与引用版是两条独立实例** | `Box<int*>`/`Box<int&>`/`Box<int**>`/`Box<int*&>` 各走各的偏特化；实例命名必须单射，否则撞汇编符号 |
-| `test_tmpl_47_cv_position.cpp` | **cv 限定符的位置即语义** | `const int*`=Pointer(Const(Int)) 与 `int* const`=Const(Pointer(Int)) 是两棵不同的树；建错树 ⇒ 偏特化**静默选错**。顺带钉住 `toString` 必须单射（否则实例缓存键串味） |
-| `test_tmpl_48_class_type_aliases.cpp` | **类内类型别名** `using X = T;` / `typedef T X;` | 别名不是新类型，只是一次名字替换（[temp.alias]）；三个使用点走三条查找路径：类外限定名（非模板）/ 类外限定名（模板实例）/ 类体内非限定名。顺带钉住实例化时别名目标必须跟着替换、以及一个被它踩出来的栈帧 bug |
-| `test_tmpl_49_dependent_type_name.cpp` | **依赖类型名** `typename T::type` | [temp.res]/5 的悬案：定义期不知道 `T::x` 是类型还是值，`typename` 消歧、替换期才兑现（[temp.inst]）。★ 探测惯用法 `void_t<typename T::type>` 靠的正是 [temp.deduct]/8 的**直接上下文**：查不到必须**当场软失败** |
-| `test_tmpl_50_alias_templates.cpp` | **别名模板** `template<class T> using Vec = MyPtr<T>;` | [temp.alias]/1：别名**不是新类型**，`Vec<int>` 与 `MyPtr<int>` 就是同一个类型 ⇒ 没有"实例化"只有"解糖"，不产生新符号。三级落点：① 使用点 `Vec<int> v;` 由 resolveType 解糖；② 模板体内 `Vec<T>` 保持依赖，在替换的**直接上下文**里解（substituteType Case 5.8）；③ ★ 推导侧也要解 —— `T f(Vec<T>)` 的 P 侧不解糖就与 A 侧 `MyPtr_int` 合不上，候选被**静默剔除**。顺带补齐类模板 id 的结构合一（[temp.deduct.type]/8 的 `T<T1...>` 情形）与实例"出身"记录 |
-| `test_tmpl_51_ctad_and_guides.cpp` | **CTAD + 推导指引** `MyPtr m(7);` / `Two(int) -> Two<int,int>;` | [dcl.type.class.deduct]：没写 `<...>` 时拿**构造实参**反推类模板形参 —— 与函数模板推导是**同一套合一算法的反向使用**（模式来自构造函数形参表，实现上直接复用 `deducePair`）。只在直接初始化触发，故顺带补上 `Type name(args);` 文法。[temp.deduct.guide]：显式指引**优先于**构造函数（指引存在的意义就是改写默认规则），非模板指引用来补构造函数根本推不出的形参。★ 顺带暴露一个真问题：**替换 ≠ 实例化** —— 实例化函数后签名里残留的 `MyPtr<int>` 半成品必须再过一次 resolveType 才成 `MyPtr_int` |
-| `test_tmpl_52_reference_collapsing.cpp` | **引用折叠** [dcl.ref]/6 | `T& &`/`T& &&` → `T&`、`T&& &&` → `T&&`；不是"造新类型"而是**消除矛盾**（C++ 里不存在引用的引用）。两个曾经答错的落地点 |
-| `test_tmpl_52_nttp_spec_pattern.cpp` | **特化模式里的非类型位** | `enable_if<true,T>` 的第 1 位是值不是类型：`specPattern` 由 `vector<TypePtr>` 改型为 `vector<TemplateArg>`，拆掉"实参含值位就跳过特化"的旧守卫 —— `std::enable_if_t` 由此端到端可用 |
-| `test_tmpl_53_template_template_param.cpp` | **模板模板参数** [temp.param]/4 | `Wrap<Box,int>`：二级替换（`C<int>` → `Box<int>` → 落地解析）；mangling `_Z4WrapI3BoxiE` 与 clang 逐字符相同。实参位上的 `Box` 与 `int` 在 Parser 眼里同形 —— 形态只能由形参表裁定 |
-| `test_tmpl_54_error_ttp_not_template.cpp` | 错误：拿类型填模板位 | `Wrap<int,int>` 必须报 `must be a class template`；放行会造出模板名叫 `int` 的假实例，编译通过、汇编期才炸 |
-| `test_tmpl_55_auto_cv_forms.cpp` | **auto 的六种带壳形态** | `const auto` / `auto const` / `auto*` / `auto&` / `const auto&` / `auto&&`：等价于把 auto 当模板形参跑一次推导，外壳照抄、A 同步剥层 |
-| `test_tmpl_56_member_templates.cpp` | **成员模板** [temp.mem] | 类是普通类、成员自己带模板形参按调用点推导；标准明说规则与 [temp.deduct] **完全一致** ⇒ 直接复用同一套合一算法，只多 `ownerClassName` 与 `类名_方法名_实参后缀` 符号 |
-| `test_tmpl_57_ttp_signature_match.cpp` | **模板模板实参的逐位签名匹配** [temp.arg.template]/2 | 内层形参表由"只数个数"改为存完整 `TemplateParam` ⇒ 位数相同 + 逐位同 kind + 值位类型相同；别名模板作实参取别名自己的形参表 |
-| `test_tmpl_58_error_ttp_arity_mismatch.cpp` | 错误：签名**位数**不符 | `template<template<class,class> class C>` 收只有 1 位的 `Box` ⇒ `too few`；缺这道校验会一路放行到下游报"假类型实参过多"，诊断不指向根因 |
-| `test_tmpl_59_error_ttp_kind_mismatch.cpp` | 错误：签名**逐位 kind** 不符 | 形参位要值位（`template<int> class C`）、实参模板对应位是类型位 ⇒ `different kind` |
-| `test_tmpl_60_error_ttp_arg_is_template_id.cpp` | 错误：拿**特化类型**填模板位 | `Wrap<Box<int>,int>` 的 `Box<int>` 是**类型**不是模板名。★ 最阴的一条：`Box` 与 `Box<int>` 的名字段都是 `"Box"`，只查名字会被骗过去、`<int>` 静默蒸发，而产物与 `Wrap<Box,int>` 逐字节相同 —— **连算错都看不出来** |
-| `test_tmpl_61_nttp_integer_family.cpp` | **NTTP 形参的整型家族** `unsigned long` / `long unsigned` / `short` / `char` / `long long int` | [dcl.type.simple] 的 type-specifier-seq：多关键字顺序任意、可重复 ⇒ Parser 先收集再归一（`parseBuiltinTypeSpecifierSeq`）。mangling 表 `m`/`s`/`c`/`x` 与 clang 逐字符同 |
-| `test_tmpl_62_nttp_literal_forms.cpp` | **字面量的进制与后缀** `4L` / `4u` / `0x10` / `0b101` / `010` / `1'000` | [lex.icon]/2 的类型表。★ 词法只切片、Parser 才解释成 `(value, type)`（对应 clang 的 `Lexer` vs `NumericLiteralParser` 分工）。`L<4L>`/`L<4l>` 归一成同一实例 |
-| `test_tmpl_63_nttp_char_literal.cpp` | **字符字面量作 NTTP 实参** `'a'` / `'\n'` / `'\\'` / `'ab'` | [lex.ccon]：转义在**词法期**已翻译（token 正文是真 0x0A）⇒ 回吐日志必须**重新转义**，否则一行被裸换行截断。多字符字面量按 GCC/Clang 口径折叠（`'ab'` = 24930） |
-| `test_tmpl_64_nttp_integral_conversion.cpp` | **【正例】值位整型转换**（★ 回归 [B17](docs/BUGS.md)） | `Flag<1>`（int→bool）/ `A<4L>`（long→int）/ `A<true>`（bool→int 提升）三条**此前全被拒**。判据是 [dcl.init]/7 + [expr.const]/10 的**可表示性**，不是"形态精确相等" |
-| `test_tmpl_65_error_nttp_bool_narrowing.cpp` | 错误：值实参窄化到 `bool` | `F<2>`：2 ∉ {0,1}。★ 与 64 的 `F<1>` 只差一个值 —— 这条边界正是"判据是可表示性"的最锐利证据 |
-| `test_tmpl_66_error_nttp_unsigned_negative.cpp` | 错误：负值给无符号形参 | `G<-1>`：常量表达式**不豁免**负值→无符号的窄化（运行期 [conv.integral] 取模是另一回事） |
-| `test_tmpl_67_error_nttp_char_narrowing.cpp` | 错误：值实参窄化到 `char` | `D<300>`：300 ∉ [-128,127]。诊断必须点名**形参声明的那一个**类型（`char` ≠ `signed char` ≠ `unsigned char`） |
-| `test_tmpl_68_nttp_auto_param.cpp` | **`template<auto V>`** 类型由实参反推 | [temp.param]/6 的 deduced non-type parameter：`K<4>`(int) 与 `K<4L>`(long) 是**两个实例**。★ 顺带修掉一个**静默撞键**：实例名/缓存键曾用 `TemplateArg::toString()`（对两者都产 `"4"`）⇒ 第二个静默复用第一个。现走 `losslessArgumentsKey`，形态只在 `auto` 位写入 |
-| `test_tmpl_69_member_template_in_class_template.cpp` | **类模板里的成员模板**（★ 回归 [B18](docs/BUGS.md)） | 两层模板形参、**绑定时机不同**：外层 `T` 由类实例化绑定（`Box<int>` ⇒ `int`），内层 `U` 由调用点推导绑定（`b.pick('a')` ⇒ `char`）。故"类实例化"必须把成员模板**复制一份、只替换外层形参、保留内层形参**挂到实例类名下。三种错法各有症状：忘了搬 ⇒ `No member 'pick' in class 'Box_int'`；就地改蓝图 ⇒ 第二个实例串到第一个的绑定（静默算错）；把内层也替换掉 ⇒ 调用点无可推导 |
-| `test_tmpl_70_member_template_static.cpp` | 成员模板的 `static` 写在**形参表之后**（★ 回归 [B19](docs/BUGS.md)） | [temp.pre]：`template-head` 必须在声明最前 ⇒ 说明符只能写在后面（`template<class U> static U f(U)`）。此前识别写在成员模板分支**之前**，只认得到"`static` 在 `template` 前"的**非法**顺序 ⇒ 标准写法反被拒（`Expected type name`），判据与语言正好相反。同批：类模板 × 静态成员模板的交叉点 |
-| `test_tmpl_71_error_virtual_member_template.cpp` | 错误：成员函数模板不能是 `virtual` | [temp.mem]/2 末句：member function templates shall not be virtual —— 虚表要求每个动态类型一条固定条目，而模板实例是**按需产生**的，声明处根本不知道要有几条。文案与 clang 逐字相同 |
-| `tests/lang/test_basics_03_virtual_with_params.cpp` | **带参虚函数**的 vtable 槽符号（★ 回归 [B20](docs/BUGS.md) 缺陷 a） | 槽里的 `.quad <sym>` 与函数定义的 `.globl <sym>` 必须**逐字相同**（链接器只认裸字符串）。定义点按"带形参 ⇒ 追加 `_<形参个数>`"命名，槽位一度硬拼 `类名_方法名` ⇒ `undefined reference to 'A_f'`。无参虚函数两侧恰好一致，所以此前测试全绿 |
-| `tests/mi/test_mi_12_secondary_inherited_slot.cpp` | **次基类未覆写的槽该指谁**（★ 回归 [B20](docs/BUGS.md) 缺陷 b） | 槽里该放谁的名字取决于**谁提供了实现**，不是**这是谁的表**：`Diamond : P, Q` 的 Q 次表槽必须透传 `X_f`（旧实现重造成 `Q_f` ⇒ 凭空捏造符号）。另一半：本类覆写次基类虚函数时仍走 thunk（this 调整 =-16） |
-| `tests/lang/test_basics_04_member_overload_same_arity.cpp` | **同名同个数的成员重载**（★ 回归 [B22](docs/BUGS.md)） | 身份 = 名字 + **形参类型**，不是名字 + 个数：`f(int)`/`f(S)` 前者靠"个数"分不开 ⇒ 汇编期撞符号 `C_f_1`。同一条判据有**四个落点**（符号定名 / vtable 槽位身份 / 成员调用选定 / 构造函数选定），必须共用 `pickBestByArgs` + `paramTypeChain` |
-| `tests/mi/test_mi_13_virtual_overload_slots.cpp` | **虚函数槽的身份不是裸名**（★ 回归 [B20](docs/BUGS.md) 缺陷 c） | `virtual int f(); int f(int);` 里非虚的后者会认领前者的槽并被误标 virtual ⇒ `c.f(2)` 走虚调用跳进 `f()`（clang rc=0、minicc 编译 rc=0 但**运行返回 255**）。判据 =（裸名 + 形参类型链），即 [class.virtual]/2 的覆写判据 |
-| `tests/decl/test_decl_02_adl_and_qualified_lookup.cpp` | **ADL + 限定名查找** | 三条路：限定名（只在 N 里找）/ 命名空间内非限定名 / [basic.lookup.argdep] ADL。★ ADL 不是兜底而是**补进同一候选集**：`measure(s)` 里 `N::measure(S)` 与全局 `measure(int)` 同场竞争，实现成“先到先得”会静默调错函数 |
-| `tests/lang/test_basics_05_reference_binding.cpp` | **引用绑定与值类别**（★ 回归 [B26](docs/BUGS.md)） | [dcl.init.ref]：`const T&` 收右值 / `int&&` 收右值 / `int&` 收 `*p`。★ 判据此前只写在**模板那条路**上（非模板路径把引用剥掉再比类型，什么都不挡）⇒ `const T&` 拒右值、`int&&` 收左值两个方向同时错 |
-| `tests/lang/test_basics_06_rvalue_ref_binds_lvalue_error.cpp` | 错误：右值引用绑左值 | [dcl.init.ref]/5.3 —— `T&&` 只收右值（`T&&` 是**模板形参**时的转发引用是唯一例外，见 `test_tmpl_13`） |
-| `tests/lang/test_basics_07_member_call_arity_error.cpp` | 错误：个数不符 + **名字隐藏**（★ 回归 [B24](docs/BUGS.md)/[B25](docs/BUGS.md)） | [expr.call]/1 的 `too many arguments`（与 clang 逐字相同）。★ 隐藏与可行性是**两个正交的筛选**：先按名字砍掉基类整族，再按类型择优 —— 顺序反了就会"查到基类去" |
-| `tests/lang/test_basics_08_member_overload_no_viable_error.cpp` | 错误：候选集非空、可行集空（★ 回归 [B27](docs/BUGS.md)） | [overload.match]/1。★ 个数**对得上**（`f(int)`/`f(S)` 都是 1 位）⇒ 淘汰它的是类型 —— 旧实现在这里"退回声明序首个"，`c.f(p)` 静默调进 `f(int)`（编译全绿、运行算错） |
-| `tests/lang/test_basics_09_qualified_member.cpp` | **限定名访问成员数据** `Base::v` / `obj.Base::v`（★ 回归 [B21](docs/BUGS.md)） | [expr.prim.id.qual] + [class.member.lookup]/3：写限定名的唯一用途是**绕过名字隐藏**。★ 解析出的**偏移必须回填**给 CodeGen —— 按裸名查会命中派生类隐藏字段那条（"自身字段优先"），程序照跑但结果错 |
-| `tests/tmpl/test_tmpl_72_concrete_ref_param.cpp` | **具体引用形参** `f(int& x, T y)` 配 `int&` 实参（★ 回归 [B26 追补](docs/BUGS.md)） | [expr.type]/1：表达式没有引用类型 ⇒ 到达 deducePair 的 A 已是裸类型，入口按 `!structuralMatch` 剥壳。修复前模板参数位 T := int&（clang 是 int），靠"值传递调整"侥幸活命 |
-| `tests/tmpl/test_tmpl_73_partial_spec_ref_args.cpp` | **偏特化匹配里的引用类型位**（★ 回归 [B28](docs/BUGS.md)） | [temp.class.spec.match]/2：模板实参本来就是类型、可以带引用壳 ⇒ 调用推导的两条剥壳规则在这里都错。具体引用位 `Duo<T,int&>` 配 `int&` 旧版误拒（非依赖恒等比成 int vs int&）；`Same<T,T>` 配 `<int&,int>` 旧版逐位剥壳后"一致"**误命中偏特化**（clang 判推导冲突回落主模板）。structuralMatch 是两套语境的分界线 |
-
-### 推荐的学习顺序
-
-```
-1. test_tmpl_01_basic.cpp          ← 从这里开始，理解最基本的替换
-2. test_tmpl_05_class_keyword.cpp  ← class vs typename 只是语法差异
-3. test_tmpl_02_pointer.cpp        ← 看嵌套指针如何递归替换
-4. test_tmpl_03_reference.cpp      ← 引用的替换
-5. test_tmpl_04_const_ref.cpp      ← const 的层层递归
-6. test_tmpl_07_reference_collapse.cpp  ← ★ 最精彩：引用折叠
-7. test_tmpl_06_multi_param.cpp    ← 多参数同时替换
-8. test_tmpl_08_triple_param.cpp   ← 三参数 + 混合关键字
-9. test_tmpl_09_mixed.cpp          ← 模板和普通代码共存
-10. test_tmpl_10_multi_blueprint.cpp ← 多蓝图分别实例化
-11. test_tmpl_21_nttp_basic.cpp    ← 非类型模板参数：值也能当实参
-12. test_tmpl_27_struct_template.cpp ← struct 写模板
-13. test_tmpl_28_default_arg.cpp    ← 默认模板实参：少写实参怎么补
-14. test_tmpl_29_partial_spec.cpp   ← 偏特化：模式匹配 = 合一算法复用
-15. test_tmpl_30_explicit_spec.cpp  ← 全特化：空形参表 + 类型相等
-16. test_tmpl_31_spec_selection.cpp ← ★ 三路择优：谁被选中
-17. test_tmpl_33_decltype_basic.cpp ← decltype：表达式→类型
-18. test_tmpl_34_decltype_paren.cpp ← ★ 多一对括号就变：int vs int&
-19. test_tmpl_35_void_t_detect.cpp  ← void_t 探测：能力查询
-20. test_tmpl_36_void_t_fallback.cpp ← ★ SFINAE 软失败：失败不是错误
-21. test_tmpl_38_error_no_fallback.cpp ← 对照 20：接不住才是错误
-22. test_tmpl_39_is_range_demo.cpp  ← 用户原用例的 is_range 半边
-23. test_tmpl_40_order_pointer_depth.cpp ← 偏序：更特化者胜
-24. test_tmpl_41_order_decl_independent.cpp ← ★ 与 23 成对：证伪顺序依赖
-25. test_tmpl_43_order_three_way.cpp ← 三路偏序 + 传递性
-26. test_tmpl_44_error_extraneous_template.cpp ← ★ 反例：写错的 `template<>` 长什么样
-27. test_tmpl_45_error_undeclared_in_explicit_spec.cpp ← ★ 最阴的一种：静默选错
-28. test_tmpl_47_cv_position.cpp ← const 写在哪一侧：`const int*` vs `int* const`
-29. test_tmpl_48_class_type_aliases.cpp ← 类内别名 + 三个使用点（含一个 codegen 栈帧 bug）
-30. test_tmpl_49_dependent_type_name.cpp ← `typename T::type`：查不到要当场软失败
-31. tests/decl/test_decl_02_adl_and_qualified_lookup.cpp ← ADL：名字查找的第三个入口
-32. test_tmpl_50_alias_templates.cpp ← ★ 别名模板：只是名字，不是类型（推导侧也要解糖）
-33. test_tmpl_51_ctad_and_guides.cpp ← ★ CTAD：把构造函数当指引，反向用一次合一算法
-34. test_tmpl_53_template_template_param.cpp ← ★ 模板模板参数：形参表里的第三种形态
-35. test_tmpl_56_member_templates.cpp ← ★ 成员模板：规则与函数模板逐字相同
-36. test_tmpl_57_ttp_signature_match.cpp ← ★ 模板位的签名匹配：位数 + 逐位 kind（口径来自 clang 探针）
-37. test_tmpl_69_member_template_in_class_template.cpp ← ★ 两层形参：外层随类实例化、内层随调用推导
-38. test_tmpl_70_member_template_static.cpp ← ★ 说明符写在形参表【之后】：位置即语义（B19）
-39. tests/lang/test_basics_03_virtual_with_params.cpp ← ★ 虚函数带参数后，符号名的后缀规则必须两处同源（B20a）
-40. tests/mi/test_mi_12_secondary_inherited_slot.cpp ← ★ 次表槽放"谁实现的"，不是"谁的表"（B20b）
-41. tests/lang/test_basics_04_member_overload_same_arity.cpp ← ★ 身份 = 名字 + 形参类型，四个落点共用一条判据（B22）
-42. tests/mi/test_mi_13_virtual_overload_slots.cpp ← ★ 槽位身份不是裸名（B20c）；单测 MemberIdentity.* 6 例
-```
-
----
-
-## 编译器架构（6 大阶段）
-
-```
-源码 (.cpp)
-  │
-  ├─ [阶段 1] 词法分析 (Lexer)             src/lexer.cpp
-  │   源码字符串 → Token 流
-  │   识别 auto/virtual/template/class 等关键字
-  │
-  ├─ [阶段 2] 语法分析 (Parser)             src/parser.cpp
-  │   Token 流 → 抽象语法树 (AST)
-  │   递归下降解析，模板作为"蓝图"暂存
-  │
-  ├─ [阶段 3] 语义分析 (SemanticAnalyzer)   src/semantic_analyzer.cpp  ★ 核心
-  │   三遍扫描：
-  │     Pass 1: 注册类和模板蓝图
-  │     Pass 2: 注册所有函数（支持递归调用）
-  │     Pass 3: 分析函数体（类型推导 + auto 消除 + 符号决议）
-  │   产出：符号表、内存布局、vtable 结构
-  │
-  ├─ [阶段 4] 模板实例化 (TemplateInstantiator)  src/template_instantiation.cpp
-  │   AST 蓝图深拷贝 + 模板参数递归替换
-  │   引用折叠：T&& 当 T=int& 时 → int&
-  │   Name Mangling：MyPtr<int> → _Z5MyPtrIiE
-  │
-  ├─ [阶段 5] 代码生成 (CodeGen)             src/codegen.cpp
-  │   AST → x86-64 汇编 (.s)
-  │   字段访问 → [base + offset]（字段名消失，只剩数字）
-  │   虚函数调用 → 三部曲 (读vptr → 加偏移 → 间接跳转)
-  │
-  └─ [阶段 6] 链接 (Linker)
-      简化：留给系统链接器 (gcc/ld)
-```
-
-### 源码文件对应关系
-
-| 阶段 | 头文件 | 实现 | 核心职责 |
-|------|--------|------|---------|
-| 1 | `include/token.h` `include/lexer.h` | `src/lexer.cpp` | 源码 → Token 流 |
-| 2 | `include/ast.h` `include/parser.h` | `src/parser.cpp` | Token → AST |
-| — | `include/type.h` | `src/type.cpp` | 类型系统（贯穿全程） |
-| 3 | `include/semantic_analyzer.h` | `src/semantic_analyzer.cpp` | 类型推导 + 内存布局 |
-| 4 | `include/template_instantiation.h` | `src/template_instantiation.cpp` | 模板克隆 + 替换 |
-| 5 | `include/codegen.h` | `src/codegen.cpp` | AST → x86-64 汇编 |
-| — | — | `src/main.cpp` | 编译器驱动（串联6阶段） |
-
----
+三件套缺一不算完成。纪律（血泪换的，见 [PITFALLS.md](docs/PITFALLS.md)）：
+
+1. **语义 oracle 先行**：写任何用例/判据前先 `clang++-18` 探针；
+2. **突变验证**：新判据必须配「摘掉 ⇒ 测试变红」的负向证据；
+3. **判据单点**：同一语义判定禁止写两处；
+4. **陈旧产物是失败面具**：跑测试前确认被测二进制是刚编的（教训见 learn/47 §6）。
 
 ## 项目结构
 
-```
-mycompiler/
-├── CMakeLists.txt                  # 构建配置 (C++20, CMake 3.20+)
-├── README.md                       # 本文档
-├── include/                        # 头文件
-│   ├── token.h                     #   Token 类型定义
-│   ├── lexer.h                     #   词法分析器接口
-│   ├── ast.h                       #   AST 节点定义（各节点 accept 挂钩）
-│   ├── ast_visitor.h               #   ★ AST 访问者基类（Visitor 模式）
-│   ├── parser.h                    #   语法分析器接口
-│   ├── type.h                      #   类型系统定义
-│   ├── semantic_analyzer.h         #   语义分析器接口
-│   ├── sfinae.h                    #   ★ SFINAE 协议（信号 + 吸收器 + 直接上下文）
-│   ├── template_instantiation.h    #   模板实例化接口
-│   └── codegen.h                   #   代码生成器接口
-├── src/                            # 实现文件
-│   ├── lexer.cpp                   #   阶段 1：词法分析
-│   ├── parser.cpp                  #   阶段 2：语法分析
-│   ├── type.cpp                    #   类型系统实现
-│   ├── semantic_analyzer.cpp       #   阶段 3：语义分析 ★
-│   ├── template_instantiation.cpp  #   阶段 4：模板实例化 ★
-│   ├── template_deduction.cpp      #   实参推导（合一算法）★
-│   ├── preprocessor.cpp            #   阶段 0：预处理器
-│   ├── sfinae.cpp                  #   SFINAE 协议：信号 / 吸收器 / 统一日志
-│   ├── codegen.cpp                 #   阶段 5：代码生成
-│   ├── linker.cpp                  #   阶段 6：自研链接器
-│   └── main.cpp                    #   编译器主程序
-├── tests/                          # 测试用例
-│   ├── test_tmpl_01..10_*.cpp      # 基础替换 / 指针 / 引用 / 折叠 / 多参 / 多蓝图
-│   ├── test_tmpl_11..19_*.cpp      # 函数模板实参推导 S1~S6
-│   ├── test_tmpl_21..26_*.cpp      # 非类型模板参数 NTTP
-│   ├── test_tmpl_27..32_*.cpp      # struct 模板 / 默认实参 / 偏特化 / 全特化 / 三路择优
-│   ├── test_tmpl_33..39_*.cpp      # decltype / 括号规则 / void_t 探测 / SFINAE 软失败与硬错误
-│   ├── test_tmpl_40..43_*.cpp      # 偏序裁决：T*vs T** / 顺序无关 / 歧义 / 三路
-│   ├── test_tmpl_44..45_*.cpp      # 负向：错误 template<> / 全特化模式里的未声明名
-│   ├── test_tmpl_46_*.cpp          # 指针版与引用版是两条独立实例（实例名单射性）
-│   ├── test_tmpl_47_*.cpp          # cv 限定符的位置：const int* vs int* const
-│   ├── test_tmpl_48_*.cpp          # 类内类型别名 using/typedef 与三个使用点
-│   ├── test_tmpl_49_*.cpp          # 依赖类型名 typename T::type 与探测惯用法
-│   ├── test_tmpl_50_*.cpp          # 别名模板 template<T> using（解糖而非实例化）
-│   ├── test_tmpl_51_*.cpp          # CTAD 类模板实参推导 + 推导指引
-│   ├── test_tmpl_52..56_*.cpp      # 引用折叠 / NTTP 特化模式 / 模板模板参数 /
-│   │                               #   auto 带壳形态 / 成员模板
-│   ├── test_tmpl_57..60_*.cpp      # 模板模板实参的逐位签名匹配（+ 三条负向）
-│   ├── test_tmpl_61..63_*.cpp      # NTTP 类型域：整型家族 / 字面量进制后缀 / 字符字面量
-│   ├── test_tmpl_64..67_*.cpp      # 值位整型转换正例（回归 B17）+ 三条窄化负例
-│   ├── test_tmpl_68_*.cpp          # template<auto V>：形态即类型，各自成实例
-│   ├── test_tmpl_69..71_*.cpp      # 类模板里的成员模板 / static 说明符位置 / 负向 virtual
-│   ├── test_tmpl_72..73_*.cpp      # 具体引用形参 / 偏特化匹配里的引用类型位（回归 B28）
-│   ├── test_tmpl_74..75_*.cpp      # NTTP 常量表达式实参 Buf<2+2>（正 + 负向）
-│   ├── test_tmpl_76..77_*.cpp      # 常量变量作 NTTP 实参 Buf<k>（正 + constexpr 负向）
-│   ├── flow/                       # for/break/continue/三元（主线 C 首批）+ switch/do-while/逗号（二批）+ switch/do-while/逗号（二批）
-│   ├── fold/                       # 常量折叠（主线 D 首批）+ constexpr/常量传播（二批）
-│   └── unit/                       # 单元测试（ctest 驱动）
-│       ├── test_template_deduction.cpp  # 推导 / 替换 / 偏特化匹配 / NTTP
-│       ├── test_decltype_sfinae.cpp     # Decltype.* / Sfinae.* / PartialOrder.* / SfinaeProtocol.*
-│       ├── test_codegen_frame.cpp       # CodegenFrame.*：帧大小 ≥ 最深局部偏移（不变量）
-│       ├── test_ast_visitor.cpp         # AstVisitorDispatch.*：分派路由 + kind≡类型不变量
-│       └── test_nttp_type_domain.cpp    # NttpTypeDomain.*：可表示性边界 + auto 位键的单射性
-├── docs/learn/                     # 分主题学习文档（01..29，与测试一一对应）
-├── docs/REFACTOR-ast-visitor.md    # AST 分派重构（五批次）：动机 / 边界 / 验证方法
-├── docs/NOTES-阅读笔记.md          # 通读源码时的理解要点（按模块整理）
-├── logdiff.sh                      # 重构安全网：日志 + 汇编基线对比
-└── build-linux/                    # 构建输出
-    └── minicc                      #   ← 编译器可执行文件
+```text
+include/  src/      编译器本体（阶段 0~6 + 名字登记表 + SFINAE 模块）
+ministl/            配套标准库（双栖头文件 + 独立 gtest + ASan 构建）
+tests/
+  lang/ tmpl/ mi/ flow/ fold/ decl/ ctor/ pp/ stl/ rtti/   集成用例（logdiff 收集）
+  unit/               googletest 单测
+  pp/ search-path/    预处理器 fixtures
+docs/
+  learn/01..47        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
+  specs/ designs/     业务流水线产物（spec 签字 → 设计 → 代码）
+  constraints/        项目约束唯一权威
+  BUGS.md  PITFALLS.md  ROADMAP.md  TODO.md
+logdiff.sh  build.sh  CMakeLists.txt
 ```
 
----
+## 文档索引
 
-## 核心概念详解
+| 想学什么 | 读哪 |
+|---|---|
+| 模板推导（合一算法） | learn/01..06（S1~S6 全链条） |
+| 预处理器 | learn/07 |
+| 构造/析构与顶层声明 | learn/08、15 |
+| 多继承布局与虚表 | learn/13、17 |
+| NTTP / 特化 / SFINAE | learn/18..21、35 |
+| ADL / 别名模板 / CTAD | learn/26、27、28 |
+| AST 分派双范式（零 RTTI） | learn/29、REFACTOR-ast-visitor.md |
+| 解析期语义识别（名字登记表） | learn/46、47 |
+| 所有踩坑复盘 | BUGS.md（B01..B36）、PITFALLS.md |
 
-### 1. auto 类型推导
+## 未来计划
 
-```
-源码:    auto x = 10;
-           ↓ 语义分析阶段 (Phase 3)
-编译后:  int x = 10;    (auto 被永久替换为 int，从 AST 中彻底消失)
-```
+见 **[TODO.md](TODO.md)**——按「后端优化 / 语言广度 / 语义精度 / 健壮性 / 工具链」
+五类列出，含优先级与理论参照。历史主线规划见 [docs/ROADMAP.md](docs/ROADMAP.md)
+（大部分已完成，留存作复盘档案）。
 
-**日志中这样看：**
-```
-  [var decl] result : auto = ...
-    ⟹ inferred: int
-  [auto] ★ result : auto ⟹ int   ← auto 被永久替换!
-```
-
-auto 只是语法糖。编译器推导右边表达式的类型，将 AST 中的 auto 占位符**当场替换**为真实类型。
-
-### 2. 模板实例化
-
-```
-蓝图:    template<typename T> class Box { T value; };
-           ↓ 模板实例化阶段 (Phase 4)
-实例:    class Box_int { int value; };   (T 被替换为 int)
-符号:    _Z3BoxIiE                       (Name Mangling)
-```
-
-**日志中这样看：**
-```
-  ╔══ Template Instantiation ═════════════════════════╗
-  ║ Blueprint: Box <T>
-  ║ Instance:  Box_int
-  ║ Substitution map: { 'T' → 'int', }
-  ║   field 'value' : T → int
-  ║ Mangled: Box_int → _Z3BoxIiE
-  ╚═══════════════════════════════════════════════════╝
-```
-
-模板实例化是**编译期的"复制粘贴"**——但不是简单的文本替换，而是 AST 层面的结构化克隆与类型递归替换。
-
-### 3. 引用折叠（Reference Collapsing）
-
-C++ 标准规定，当引用嵌套时按以下规则折叠：
-
-```
-T&  &   → T&     左值引用 + 左值引用 → 左值引用
-T&  &&  → T&     左值引用 + 右值引用 → 左值引用
-T&& &   → T&     右值引用 + 左值引用 → 左值引用
-T&& &&  → T&&    右值引用 + 右值引用 → 右值引用
-```
-
-**简言之：只要有一个是左值引用，结果就是左值引用。**
-
-这就是万能引用 (Forwarding Reference) 的原理：
-
-```cpp
-template<typename T>
-void foo(T&& x);
-
-foo(42);     // T = int,    T&& = int&&       (右值引用)
-foo(var);    // T = int&,   T&& = int& && → int&  (折叠为左值引用)
-```
-
-**日志中这样看：**
-```
-  [subst] RValueRef(T&&) → recursing into referenced type...
-  [subst] ★ Class 'T' matches template param → 'int&'
-  [subst] ★ Reference collapsing: int&&& → int& (lvalue ref wins!)
-```
-
-### 4. 虚函数调用三部曲
-
-```
-源码:    ptr->foo();           (多态调用，编译期不知道具体类型)
-
-汇编:    movq (%rdi), %rax     # (a) 从对象偏移量 0 读出 _vptr
-         movq 16(%rax), %rax   # (b) 从 vtable[index] 读出函数地址
-         callq *%rax           # (c) 间接跳转到该地址执行
-```
-
-**编译期看符号**：`ptr->foo()` 查符号表得到 vtable index
-**运行期看偏移量**：通过指针运算找到真正的函数地址
-
-### 5. vtable 内存布局
-
-```
-vtable (GCC ABI 简化版):
-  [-2] = 0                    # offset to top
-  [-1] = &type_info           # RTTI 指针
-  [0]  = &virtual_func_0      # 第一个虚函数
-  [1]  = &virtual_func_1      # 第二个虚函数
-
-对象内存:
-  +0:  _vptr → 指向 vtable[0]
-  +8:  field_1
-  +12: field_2
-```
-
-### 6. 字段访问的消除
-
-```
-源码:    rect.width = 10;       (使用字段名)
-编译期:  width 偏移量 = 16     (查 ClassLayout)
-汇编:    movl $10, 16(%rax)     (直接用偏移量，字段名消失)
-```
-
-### 7. Name Mangling
-
-C++ 支持函数重载和模板，但汇编器只认唯一的名字。Name Mangling 将完整签名编码为唯一字符串：
-
-```
-MyPtr<int>          → _Z5MyPtrIiE       (i = int)
-MyPtr<double>       → _Z5MyPtrIdE       (d = double)
-MyPtr<int*>         → _Z5MyPtrIPiE      (P = pointer)
-MyPtr<int&>         → _Z5MyPtrIRiE      (R = lvalue reference)
-MyPtr<int&&>        → _Z5MyPtrIOiE      (O = rvalue reference)
-MyPtr<const int&>   → _Z5MyPtrIRKiE     (K = const)
-Pair<int, double>   → _Z4PairIidE       (多参数)
-MyClass::foo(int)   → _ZN7MyClass3fooEi (类方法)
-```
-
----
-
-## 支持的语法特性
-
-- [x] 基础类型：int, double, bool, void
-- [x] auto 类型推导（编译期消除）
-- [x] 函数声明与调用
-- [x] 类定义（字段 + 方法）
-- [x] 继承（public 继承）
-- [x] 虚函数与 override
-- [x] 多态调用（虚函数调用三部曲）
-- [x] new 表达式（内存分配 + vptr 初始化）
-- [x] 模板类：`template<typename T>` 和 `template<class T>`
-- [x] 模板多参数：`template<typename T, typename U>`
-- [x] **非类型模板参数（NTTP）**：`template<int N>` + `Buf<4>`，含类型/值混排
-      `template<class T, int N>`、负数实参 `Buf<-3>`、形态校验与 ITanium
-      `L...E` 编码（文档 docs/learn/18）；**常量表达式实参** `Buf<2+2>`
-      （Parser 存树 → Sema 折叠求值归一，文档 docs/learn/39）
-- [x] 模板类型：T\*, T\*\*, T&, T&&, const T&
-- [x] 引用折叠（Reference Collapsing）
-- [x] 控制流：if/else, while, **for, break, continue, 三元 ?:**（主线 C 首批，文档 docs/learn/38）；
-      **switch / case / default / do-while / 逗号表达式**（主线 C 二批，文档 docs/learn/41）
-- [x] **常量折叠**：全字面量表达式树 Sema 层折成单字面量（`[fold]` 日志），
-      恒定条件三元 = 死分支消除；除零/含变量不折（主线 D 首批，文档 docs/learn/39）
-- [x] **constexpr 与常量传播**：const/constexpr 整型变量登记编译期常量表，
-      表达式里命中即替换成字面量（`int x = c * 2;` ⇒ 8）；constexpr 初始化式
-      不可常量求值时报错（与 clang 逐字同）；`Buf<k>` 常量变量作 NTTP 实参
-      （主线 D 二批，文档 docs/learn/40）
-- [x] 算术/逻辑/比较运算符
-- [x] 成员访问（. 和 ->）
-- [x] Name Mangling（GCC ABI 风格）
-- [x] 函数模板声明解析：`template<typename T> T f(T x)`（S1：解析 + 蓝图注册 + 候选集，文档 docs/learn/01）
-- [x] 函数模板实参推导：逐对 P/A 合一，T / T& / T&&（万能引用折叠）/ const T& / T* 形态，多次绑定一致性检查（S2，文档 docs/learn/02）
-- [x] 显式模板实参：`mix<int>(1, 2)` 前缀规则 + template-id 歧义消解（S3，文档 docs/learn/03）
-- [x] 不可推导上下文诊断：T 只在返回类型等位置时报错并建议显式指定（S4，文档 docs/learn/04）
-- [x] 函数模板隐式实例化：调用点驱动、mangled 符号（_Z5twiceIiE）、实例缓存、实例体二次语义分析（S5，文档 docs/learn/05）
-- [x] 重载决议：非模板优先 + deduction-based 偏序选最特化（S6，文档 docs/learn/06）
-- [x] 隐式转换：左值到右值（引用剥除，[conv.lval]）、int→double 提升（[conv.promo]）
-- [x] 预处理器：`#include "..."`/`<...>` 搜索路径、`#define` 对象宏/函数宏（递归展开+涂蓝）、`#ifdef/#if/#elif/#else/#endif`、`#pragma once`、`__LINE__/__FILE__`、内建静态宏 `__MINICC__`（[cpp.predefined] 扩展，闭合 ministl 双栖桩分支）、`-E` 选项（P0，文档 docs/learn/07、37）
-- [x] 类模板特化：`struct` 写模板体、默认模板实参、偏特化、全特化、三路择优（文档 docs/learn/19）
-- [x] **decltype**：`decltype(e)` 两套规则（声明类型 / 表达式类型+左值引用）、
-      依赖上下文的延迟求值、`decltype(&a)` 取地址（文档 docs/learn/20）
-- [x] **SFINAE**：替换失败软处理（候选移出而非报错）、`std::void_t` 探测惯例
-      （CWG 1558）、`std::declval`、`std::false_type`/`std::true_type` 内建垫片；
-      **独立模块 `include/sfinae.h`**（信号 / 吸收器 / 直接上下文 / 统一日志出口，
-      收口点全项目仅三处）（文档 docs/learn/20）
-- [x] **类模板偏序裁决**：`[temp.class.order]` 互相推导 + 唯一合成类型、
-      dominance 循环选唯一最特化者、互不更特化时报歧义（文档 docs/learn/21）
-- [x] 类型别名（`using`/`typedef`）、枚举、命名空间、全局变量（文档 docs/learn/08）
-- [x] **名字在哪一层当真**：语句层声明/表达式前瞻（`S& r`、模板 id + 引用、`const` 开头）、
-      未声明类型名兜底校验、实例命名单射性（`Box<int*>` 与 `Box<int&>` 不再撞符号）
-      （文档 docs/learn/22）
-- [x] **类内类型别名**：`using X = T;` / `typedef T X;`，三个使用点（类外限定名 /
-      模板实例限定名 `/ 类体内非限定名）（文档 docs/learn/24）
-- [x] **依赖类型名**：`typename T::type` 与 `void_t<typename T::type>` 探测惯例
-      （文档 docs/learn/25）
-- [x] **ADL + 限定名查找**：普通查找与 ADL 候选并入**同一候选集**再决议
-      （文档 docs/learn/26）
-- [x] **别名模板**：`template<class T> using Vec = MyPtr<T>;` —— 解糖（不是实例化），
-      使用点 / 替换期 / 推导期三级落点；NTTP 别名 `template<int N> using BufA = Buf<N>;`
-      （文档 docs/learn/27）
-- [x] **CTAD + 推导指引**：`MyPtr m(7);` 由构造实参反推类模板形参、
-      直接初始化 `Type name(args);` 文法、`X(T) -> X<T>;` 模板/非模板指引
-      （文档 docs/learn/28）
-- [x] **继承的默认访问级别**：`struct X : Base` 默认 **public**（[class.derived]/2）
-- [x] **一元 `*p` 解引用**（[expr.unary.op]/1，按 pointee 宽度分派读/写）、
-      **后置 const 成员函数**（[dcl.fct]/7）、**类内 static 成员函数**（[class.static]/2）
-- [x] **NTTP 值位参与偏特化模式**：`enable_if<true, T>` 的地基，`std::enable_if_t` 端到端可用
-- [x] **模板模板参数**：`template<template<class> class C>` + `Wrap<Box,int>`，
-      二级替换；**模板模板实参的逐位签名匹配**（[temp.arg.template]/2，P0522R0 口径：
-      位数相同 + 逐位同 kind + 值位类型相同，别名模板作实参取别名自身的形参表）+
-      形态关（拿类型填 `Wrap<int,int>`、拿特化类型填 `Wrap<Box<int>,int>` 都报错）
-      （文档 docs/learn/33）
-- [x] **成员模板**：`A::add(T)` 按调用点推导，规则与函数模板逐字相同（[temp.mem]）
-      （文档 docs/learn/34）
-- [x] **NTTP 的类型域**：形参从"只认 `int`"扩到整型家族（`unsigned long` / `short` /
-      `char` / 多关键字写法）+ 字符字面量实参（`D<'a'>`）+ `template<auto V>`；
-      实参侧补齐进制与后缀（`4L` / `0u` / `0x10` / `0b101` / `010` / `1'000`）；
-      **值位判据由"形态精确相等"改为可表示性**（[temp.arg.nontype]/1 → [expr.const]/10
-      → [dcl.init]/7，修掉 [BUGS.md B17](docs/BUGS.md) 的拒收合法程序 +
-      一个 `auto` 位的**静默撞键**）（文档 docs/learn/35）
-- [x] **实参绑定与名字可见性**（一轮"该报不报 / 不该拒却拒"的收口）：
-      **引用绑定判据单点**（[dcl.init.ref]：`const T&` 收右值、`int&&` 拒左值、
-      `T&&` 转发引用照旧；值类别模型补上解引用 `*p` 与下标 `v[i]` 也是左值）；
-      **名字隐藏**（[class.member.lookup]/3：派生类声明了名字 ⇒ 基类整族不可见）；
-      **成员调用的个数诊断**（`too few`/`too many arguments` 与 clang 逐字相同）；
-      **无可行候选必报错**（不再静默退回候选集首个）；
-      **限定名访问成员数据** `Base::v` / `obj.Base::v`（偏移由 Sema 回填，
-      隐藏场景下也取对槽位）（文档 docs/learn/36）
-- [ ] **NTTP 的任意常量表达式** `Buf<2+2>` / `Buf<k>` —— 仍是 Parse Error，
-      属 ROADMAP 主线 D（下游接口已全部就绪）
-
----
-
-## 学习路线建议
-
-### 第一步：读源码理解架构
-
-```
-1. include/token.h + src/lexer.cpp           ← 词法分析（最简单）
-2. include/ast.h + src/parser.cpp            ← 语法分析（递归下降）
-3. src/semantic_analyzer.cpp                 ← ★ 核心：类型推导 + 内存布局
-4. src/template_instantiation.cpp            ← 模板克隆 + 替换
-5. src/codegen.cpp                           ← 汇编代码生成
-```
-
-### 第二步：运行测试看日志
+## 常用命令速查
 
 ```bash
-# 从最简单的开始
-./build/minicc tests/test_tmpl_01_basic.cpp
-
-# 看引用折叠——模板最精彩的部分
-./build/minicc tests/test_tmpl_07_reference_collapse.cpp
-
-# 看多参数替换
-./build/minicc tests/test_tmpl_06_multi_param.cpp
-
-# 看普通类和模板共存
-./build/minicc tests/test_tmpl_09_mixed.cpp
+./build.sh                                # 编译编译器
+cmake --build build-linux -j6             # 单测/集成 gtest 目标
+ctest --test-dir build-linux -j6          # 全量测试
+./logdiff.sh save && ./logdiff.sh diff    # 基线快照 / 比对
+clang++-18 -std=c++20 -fsyntax-only x.cpp # 语义 oracle 探针
 ```
-
-### 第三步：修改源码加特性
-
-试着在模板测试文件中添加新的模板类，观察编译器的处理过程。
-
----
-
-## 常见问题
-
-### Q: `cmake-build-debug/` 目录编译失败？
-
-`cmake-build-debug/` 是 CLion IDE 自动生成的构建目录。如果链接失败，是因为 Homebrew LLVM 版本和系统 C++ 标准库不兼容。
-
-**解决办法**：使用 `build/` 目录手动编译（见上方"编译步骤"）。
-
-### Q: 日志太多了看不清？
-
-用 grep 过滤只看你关心的阶段：
-
-```bash
-# 只看 Phase 4 模板替换
-./build/minicc tests/test_tmpl_01_basic.cpp 2>&1 | grep -A500 "Phase 4"
-
-# 只看某个关键字
-./build/minicc tests/test_tmpl_01_basic.cpp 2>&1 | grep "Mangled:"
-```
-
-### Q: 模板类在 main() 中没有使用，为什么也会被实例化？
-
-minicc 的 `main.cpp` 中对每个模板蓝图**自动用 6 种类型实例化**（int, double, int\*, int&, int&&, const int&），用于演示替换过程。实际编译器（如 GCC/Clang）只在代码中真正使用时才实例化。
-
-### Q: 输出的汇编能直接运行吗？
-
-需要系统汇编器和链接器：
-
-```bash
-./build/minicc tests/test_tmpl_01_basic.cpp -o output.s
-gcc -o output output.s -lstdc++
-./output
-```
-
-### Q: 如何添加新的测试文件？
-
-在 `tests/` 目录下创建 `.cpp` 文件，遵循以下规则：
-- 模板类用 `template<typename T>` 或 `template<class T>` 声明
-- 必须有 `int main()` 函数作为入口
-- 普通类和普通函数可以和模板共存
