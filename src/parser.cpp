@@ -445,7 +445,8 @@ TypePtr Parser::parseType() {
         //   （对照 clang: err_not_type "N is not a type"）。
         // 对照 clang：Parser::ParseTypenameType → Sema::ActOnTypenameType
         //   → 建 DependentNameType（限定者是依赖的）/ TypenameType。
-        const TemplateParam* qualParam = lookupTemplateParam(name);
+        const TemplateParam* qualParam = lookupTemplateParam(name); //mrd 这里的参数是模板形参，比如 template <class T> struct ,
+        // t有可能是 box<int> ,那么T = box<int>
         if (qualParam && qualParam->kind == TemplateParamKind::Type
             && check(TokenType::ColonColon)) {
             TypePtr qual = Type::makeTemplateParam(name);
