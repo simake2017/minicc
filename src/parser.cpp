@@ -505,7 +505,7 @@ TypePtr Parser::parseType() {
                 // 对照 clang：ParseTemplateName + ParseTemplateArgumentList，
                 // 产出 TemplateSpecializationType；此处直接把实参挂在 Class 节点
                 // 的 templateArgs 上，语义阶段再按需实例化（[temp.inst]）。
-                if (check(TokenType::Less)) {
+                if (check(TokenType::Less)) { // mrd 这里的class 是一个具体的模板
                     base->templateArgs = parseTemplateArgumentList();
                     logParse(
                         "  [parse:type] ★ template-id: {}\n", base->toString());
