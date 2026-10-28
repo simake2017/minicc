@@ -290,7 +290,7 @@ bool TemplateDeducer::bind(const std::string& paramName, const TypePtr& type,
                            const std::string& patternStr, const std::string& argStr) {
     auto it = subst.find(paramName);
     if (it == subst.end()) {
-        subst[paramName] = type;
+        subst[paramName] = type; // mrd 这里会对 参数进行类型绑定
         std::string msg = std::format("{} := {}", paramName, type->toString());
         out.trace.push_back({patternStr, argStr, msg, true});
         std::cout << std::format("  [deduction]   P={:<12} A={:<12} ⇒ {}\n",
@@ -414,7 +414,7 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
     // [temp.deduct.type] 结构化等价：复合类型逐层拆解后递归合一。
     // demo: P=T* A=int* ⇒ 递归到 (T, int) ⇒ T := int ✓
     if (P->isPointer()) {
-        if (!A->isPointer()) {
+        if (!A->isPointer()) { // mrd 对于指针类型 ,要判断是否都是指针类型
             out.failureReason = std::format(
                 "parameter pattern '{}' expects pointer argument, got '{}'", pStr, aStr);
             out.trace.push_back({pStr, aStr, out.failureReason, false});

@@ -769,7 +769,7 @@ TypePtr TemplateInstantiator::substituteType(
         //   内层是右值引用时原样返回会得到 `int&&`，而 [dcl.ref]/6 要求 `int&`
         //   （"& 赢"只写在 Type::makeLValueReference 里，调用点不得自行判断）。
         if (newInner->isReference()) {
-            TypePtr folded = Type::makeLValueReference(newInner);
+            TypePtr folded = Type::makeLValueReference(newInner); // mrd 这里就是检测如果是引用会 直接返回左值引用
             std::cout << std::format("    [subst] ★ Reference collapsing: {}& → {} (& wins)\n",
                 newInner->toString(), folded->toString());
             return folded;

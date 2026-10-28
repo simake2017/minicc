@@ -811,7 +811,7 @@ std::vector<TemplateArg> Parser::parseTemplateArgumentList() {
             else if (check(TokenType::IntLiteral)) {
                 // ★ 主线 D：字面量后紧跟运算符（Buf<2+2>）⇒ 完整常量表达式，
                 //   跳到下方统一处理。裸字面量维持本分支（日志逐字节不变）。
-                if (m_pos + 1 < m_tokens.size()
+                if (m_pos + 1 < m_tokens.size() // mrd 这里并没有实际advance
                     && isExprContinuation(m_tokens[m_pos + 1].type)) {
                     goto parseConstExprArg;
                 }
@@ -2239,7 +2239,7 @@ StmtPtr Parser::parseStatement() {
     }
 
     // 变量声明：以类型关键字开头
-    if (current().isTypeKeyword()) {
+    if (current().isTypeKeyword()) { // mrd const 也是关键字
         TypePtr type = parseType();
         // ★ B16：无声明符的声明 `int;` / `const int;`（[dcl.dcl]/1）。
         //   类型之后直接是 ';' ⇒ init-declarator-list 为空 ⇒ 合法，什么都不声明。
@@ -2280,6 +2280,9 @@ StmtPtr Parser::parseStatement() {
                 if (check(TokenType::Identifier)) {
                     isDecl = true;
                 } else if (check(TokenType::Semicolon)) {
+
+                    // mrd 这里是因为有可能是 比如 x;==> x 是变量，所以会按照变量去解析
+
                     // B16 无声明符声明：仅当类型带模板 id 语法（本层或嵌套
                     // 限定者链上任一层的 '<...>' 实参表）——等价旧 sawTypeIdSyntax。
                     // 裸 `S;` 刻意不算：它也可能是同名对象的表达式语句，
@@ -2294,7 +2297,7 @@ StmtPtr Parser::parseStatement() {
                 if (isDecl) {
                     for (TypePtr t = type; t; t = t->nestedQualifier) {
                         if (!t->templateArgs.empty()
-                            && !isKnownTemplateName(t->name)) {
+                            && !isKnownTemplateName(t->name)) { // mrd 如果是模板但是名字又不是模板
                             isDecl = false;
                             break;
                         }
@@ -3139,7 +3142,7 @@ ExprPtr Parser::parsePrimaryExpr() {
                     const Token& memTok = expect(TokenType::Identifier,
                         "Expected member name after '::'");
                     auto me = std::make_shared<MemberExpr>(expr, memTok.text, /*arrow=*/false);
-                    me->isTypeAccess = true; // 标明这是一个类型访问，不是一个对象取值
+                    me->isTypeAccess = true; //mrd 标明这是一个类型访问，不是一个对象取值
                     me->location = loc;
                     logParse(
                         "  [parse] 类型限定访问: <template-id>::{} (static member)\n",
