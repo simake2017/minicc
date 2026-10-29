@@ -1,7 +1,7 @@
 // =============================================================================
 // NameRegistry 实现：前向收集（B31 骨架搬迁 + type/namespace 位扩展）
 // =============================================================================
-// 契约与判据出处见 include/name_registry.h 头注释与
+// 契约与判据出处见 include/name_registry.h 头注释（spec/design 坐标亦在其中）。
 // docs/designs/parser-stage-name-recognition.design.md §3.1。
 // 全文件零日志（B31 纪律：收集/查询打点会漂移全部基线）。
 

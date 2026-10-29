@@ -19,19 +19,19 @@ BUILDDIR=.build
 TARGET=minicc
 
 SRCS=(
-    preprocessor.cpp
-    sfinae.cpp
-    constant_folder.cpp
-    lexer.cpp
-    name_registry.cpp
-    parser.cpp
-    type.cpp
-    semantic_analyzer.cpp
-    template_instantiation.cpp
-    template_deduction.cpp
-    linker.cpp
-    codegen.cpp
-    main.cpp
+    lex/preprocessor.cpp
+    sema/sfinae.cpp
+    ast/constant_folder.cpp
+    lex/lexer.cpp
+    sema/name_registry.cpp
+    parse/parser.cpp
+    ast/type.cpp
+    sema/semantic_analyzer.cpp
+    sema/template_instantiation.cpp
+    sema/template_deduction.cpp
+    link/linker.cpp
+    codegen/codegen.cpp
+    driver/main.cpp
 )
 
 CXXFLAGS="-std=c++20 -stdlib=libc++ -Wall -Wextra -pedantic -g -MMD -MP"
@@ -51,6 +51,7 @@ do_build() {
     for src in "${SRCS[@]}"; do
         obj="${BUILDDIR}/${src%.cpp}.o"
         OBJS+=("${obj}")
+        mkdir -p "$(dirname "${obj}")"   # 分域目录（src/lex/…）的对象文件子目录
 
         if [ -f "${obj}" ] && [ "${SRCDIR}/${src}" -ot "${obj}" ]; then
             # 检查头文件依赖

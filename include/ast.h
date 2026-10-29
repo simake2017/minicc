@@ -4,6 +4,7 @@
 // =============================================================================
 // AST 是 Parser 的输出、后续所有阶段的唯一输入：
 //   Parser 建树 → Sema 填 resolvedType / 注册符号 / 算类布局 → 模板实例化克隆+替换
+// 对照 clang：clang/AST/Decl.h + Stmt.h（Decl/Stmt 双族；本版合一棵 ASTNode 树、【简化】无 Decl 语境对象）
 //   → CodeGen 消费出汇编。
 //
 // 节点层次（NodeKind 是运行时类型标签，等价 clang 的 Stmt::StmtClass / Decl::Kind）：

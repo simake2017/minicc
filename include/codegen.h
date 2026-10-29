@@ -4,6 +4,7 @@
 // =============================================================================
 // 职责：把树状 AST "拍平"成线性的 x86-64 指令（AT&T 语法 .s）。类型与字段名在此
 //   彻底消失，只剩地址和数字。
+// 对照 clang：clang/lib/CodeGen/ 的 CGExpr/CGStmt（本版直接吐 .s，中间无 LLVM IR 层——【简化】）
 // 目标：x86-64 System V AMD64 ABI │ 输出：GNU as 可汇编的 .s（.text/.data/.rodata）
 // 管线：Preprocessor → Lexer → Parser → Sema → 模板推导/实例化 → ★CodeGen★
 //   → .s → 自研链接器产出可执行文件。输入：类型全解析、auto 已替换、ClassLayout 已算好。

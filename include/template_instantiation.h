@@ -4,6 +4,7 @@
 // =============================================================================
 // 实例化 = AST 结构化克隆 + 类型替换 [temp.subst]，不是文本替换；产物带全局唯一符号名。
 // 蓝图写法 ⇒ 实例写法（MyPtr<int>，即 {T→int}）：
+// 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp（本版一次性全量克隆，无惰性实例化——【简化】）
 //   class MyPtr<T>   ⇒ 类改名 ⇒ MyPtr_int，符号 _Z5MyPtrIiE（Itanium mangling，见 docs/learn/13）
 //   T* data          ⇒ int* data
 //   T& get()         ⇒ int& get()

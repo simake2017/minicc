@@ -4,6 +4,7 @@
 // =============================================================================
 // 对应 spec：docs/specs/parser-stage-name-recognition.spec.md（2026-10-23 签字）
 // 对应设计：docs/designs/parser-stage-name-recognition.design.md
+// 对照 clang：Sema::ClassifyName（clang/lib/Sema/SemaDecl.cpp:912）——parser 侧只保留只读投影
 // 学习文档：docs/learn/47
 //
 // 管线位置：预处理器 → Lexer → 【collect：构造期前向收集】→ Parser（只读查询）

@@ -157,6 +157,7 @@ tests/
   unit/               googletest 单测
   pp/ search-path/    预处理器 fixtures
 docs/
+  business/00..08     ★ 业务流水线文档（每个业务一份：定位/判据/代码地图/测试/学习索引）
   learn/01..47        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
   specs/ designs/     业务流水线产物（spec 签字 → 设计 → 代码）
   constraints/        项目约束唯一权威
@@ -168,6 +169,7 @@ logdiff.sh  build.sh  CMakeLists.txt
 
 | 想学什么 | 读哪 |
 |---|---|
+| 想按业务直接看（预处理/解析/语义/模板/代码生成/链接/ministl） | **business/00..08**（重点业务 03 解析 / 04 语义 / 05 模板已细分为子文档） |
 | 模板推导（合一算法） | learn/01..06（S1~S6 全链条） |
 | 预处理器 | learn/07 |
 | 构造/析构与顶层声明 | learn/08、15 |

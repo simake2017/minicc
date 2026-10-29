@@ -35,19 +35,19 @@ endif()
 
 # ─── 源文件 ────────────────────────────────────────────
 set(SOURCES
-    src/preprocessor.cpp
-    src/sfinae.cpp
-    src/constant_folder.cpp
-    src/lexer.cpp
-    src/name_registry.cpp
-    src/parser.cpp
-    src/type.cpp
-    src/semantic_analyzer.cpp
-    src/template_instantiation.cpp
-    src/template_deduction.cpp
-    src/codegen.cpp
-    src/linker.cpp
-    src/main.cpp
+    src/lex/preprocessor.cpp
+    src/sema/sfinae.cpp
+    src/ast/constant_folder.cpp
+    src/lex/lexer.cpp
+    src/sema/name_registry.cpp
+    src/parse/parser.cpp
+    src/ast/type.cpp
+    src/sema/semantic_analyzer.cpp
+    src/sema/template_instantiation.cpp
+    src/sema/template_deduction.cpp
+    src/codegen/codegen.cpp
+    src/link/linker.cpp
+    src/driver/main.cpp
 )
 
 add_executable(minicc ${SOURCES})
@@ -90,18 +90,18 @@ add_executable(unit_tests
     tests/unit/test_member_template_in_class_template.cpp
     tests/unit/test_arg_binding.cpp
     tests/unit/test_name_registry.cpp
-    src/preprocessor.cpp
-    src/sfinae.cpp
-    src/constant_folder.cpp
-    src/lexer.cpp
-    src/name_registry.cpp
-    src/parser.cpp
-    src/semantic_analyzer.cpp
-    src/codegen.cpp
-    src/template_deduction.cpp
-    src/template_instantiation.cpp
-    src/type.cpp
-    src/linker.cpp
+    src/lex/preprocessor.cpp
+    src/sema/sfinae.cpp
+    src/ast/constant_folder.cpp
+    src/lex/lexer.cpp
+    src/sema/name_registry.cpp
+    src/parse/parser.cpp
+    src/sema/semantic_analyzer.cpp
+    src/codegen/codegen.cpp
+    src/sema/template_deduction.cpp
+    src/sema/template_instantiation.cpp
+    src/ast/type.cpp
+    src/link/linker.cpp
 )
 target_include_directories(unit_tests PRIVATE include)
 target_compile_options(unit_tests PRIVATE -Wall -Wextra)

@@ -4,6 +4,7 @@
 // include/sfinae.h —— SFINAE：替换失败的处理协议（理论见 docs/learn/20）
 // =============================================================================
 // [temp.deduct]/8「替换失败不是错误」背后是一套【三方协议】—— 位置 ⇒ 用例：
+// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp 的 SFINAETrap（同"异常式软失败"思路）
 //
 //   | 角色 | 位置（谁） | 动作 |
 //   |---|---|---|
