@@ -4,6 +4,7 @@
 // 【旧写法的问题】改一处动态类型 ⇒ 四条 cast 链都要补：
 //   Sema::inferType 14 级 / CodeGen::emitExpr 13 级 / emitStmt 8 级 / dumpExpr 14 级
 //   漏一条不报错，只是静默走 else（O(n)：CallExpr 要试穿前面 7 个 cast）。
+// 对照 clang：clang/AST/RecursiveASTVisitor.h（同只服务遍历，类型计算另走 cast/switch）
 // 【新写法】每个节点一行，分派交给虚表：
 //   BinaryExpr::accept(v) { v.visit(*this); }   // 虚表跳转 O(1)，重载编译期定
 //   重载决议在【编译期】完成 —— *this 的静态类型就是节点自己，故绑定精确重载、无需 cast。

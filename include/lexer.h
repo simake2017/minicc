@@ -3,6 +3,7 @@
 // include/lexer.h —— 阶段 1：词法分析器 (Lexer / Scanner)
 // =============================================================================
 // 职责：源码字符串逐字符扫描 ⇒ Token 流。手写 DFA：按【首字符】分派，每个分支产出一个 Token。
+// 对照 clang：clang/lib/Lex/Lexer.cpp（LexNextToken 同样是首字符大 switch——【对照】）
 //
 // 管线位置  源码(.cpp) → Preprocessor → ★Lexer★ → Parser → Sema → … → CodeGen
 //           输入 = 预处理后的整段源码；输出 = std::vector<Token>（以 Eof 收尾）

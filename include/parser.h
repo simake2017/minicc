@@ -4,6 +4,7 @@
 // =============================================================================
 // 职责：把线性的 Token 流转成树状 AST。手法：递归下降（Recursive Descent）——
 // 文法中每个非终结符对应一个解析函数，互相调用形成递归；每步只看 1 个前瞻 Token
+// 对照 clang：clang/lib/Parse/Parser.cpp（同递归下降 + 试探解析 TokenCheckpoint ≈ TentativeParsingAction）
 // （LL(1)），遇歧义用"存游标 + 试探 + 回滚"（speculative parsing）消解。
 //
 // 管线：预处理器 → Lexer → ★Parser★ → Sema → 模板推导/实例化 → CodeGen(.s)

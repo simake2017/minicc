@@ -4,6 +4,7 @@
 // =============================================================================
 // 管线位置：源码(.cpp) → Preprocessor → ★Lexer★ → Parser → Sema → … → CodeGen(.s)
 //   本文件定义 Lexer 交给 Parser 的"数据格式"：Parser 从此不再看见字符，只看见 Token。
+// 对照 clang：clang/include/clang/Basic/TokenKinds.def（同"一张 kind 表驱动一切"；本版手写 enum——【简化】）
 //   Token = 流水线上第一个"零件"：带类型标签与位置信息的最小语法单元。
 //
 // 标准章节  [lex.phases] 阶段 3/7（切词）│ [lex.token] 五类终结符 │ [lex.pptoken]

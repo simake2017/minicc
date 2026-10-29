@@ -4,6 +4,7 @@
 // =============================================================================
 // 推导 = 受限的合一算法（Hindley-Milner 类型推断的简化版）：逐对 (模式 P, 实参 A) 模式
 //   匹配，解出 P 里的模板参数；同一参数两次绑定必须一致。
+// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp DeduceTemplateArguments（本版无推断 auto/偏序——【简化】）
 // 逐对 trace（identity(42) 的 P=T / A=int）：
 //     P=T          A=int          ⇒ T := int ✓（变量绑定）
 //     P=const T&   A=const int&   ⇒ 剥 const 与引用后合一 ⇒ T := int ✓
