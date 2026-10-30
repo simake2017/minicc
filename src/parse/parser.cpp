@@ -3077,7 +3077,7 @@ ExprPtr Parser::parsePrimaryExpr() {
                     // 其中 parseType 对非类型实参抛异常（如 a<b 里的 b 不是类型），
                     // 异常即"这不是 template-id"的信号。
                     explicitArgs = parseTemplateArgumentList();
-                    isTemplateId = check(TokenType::LParen) || check(TokenType::ColonColon);
+                    isTemplateId = check(TokenType::LParen) || check(TokenType::ColonColon); // class a= Box::<int>; 这种非法
                 } catch (const ParseError&) {
                     isTemplateId = false;   // 语法错误 = 这不是 template-id（预期路径）
                 }
