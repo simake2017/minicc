@@ -35,7 +35,9 @@ SRCS=(
 )
 
 CXXFLAGS="-std=c++20 -stdlib=libc++ -Wall -Wextra -pedantic -g -MMD -MP"
-INCLUDES="-I${INCDIR}"
+# 头文件与实现同域（对照 clang lib/<域>/）；include/ 只剩跨域共享契约
+# （ast/ast_visitor/token，对照 clang/include/clang/AST）。
+INCLUDES="-I${INCDIR} -I${SRCDIR}/lex -I${SRCDIR}/parse -I${SRCDIR}/sema -I${SRCDIR}/ast -I${SRCDIR}/codegen -I${SRCDIR}/link"
 LDFLAGS="-stdlib=libc++"
 
 do_clean() {

@@ -1,6 +1,6 @@
 #pragma once
 // =============================================================================
-// include/preprocessor.h —— 阶段 0：预处理器 (Preprocessor)（理论见 docs/learn/07）
+// src/lex/preprocessor.h —— 阶段 0：预处理器 (Preprocessor)（理论见 docs/learn/07）
 // =============================================================================
 // 对应 [cpp.phase] 翻译阶段 2~4：行拼接 → 指令行识别 → 宏展开 + #include 文件并合。
 // 对照 clang：clang/lib/Lex/Preprocessor.cpp（同 Token 级驱动；本版宏表/条件栈极简——【简化】）

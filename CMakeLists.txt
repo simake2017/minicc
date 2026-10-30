@@ -51,7 +51,9 @@ set(SOURCES
 )
 
 add_executable(minicc ${SOURCES})
-target_include_directories(minicc PRIVATE include) ## 添加include文件件
+# 头文件与实现同域（对照 clang lib/<域>/）；include/ 只剩跨域共享契约
+set(MINICC_DOMAIN_INCLUDE_DIRS include src/lex src/parse src/sema src/ast src/codegen src/link)
+target_include_directories(minicc PRIVATE ${MINICC_DOMAIN_INCLUDE_DIRS})
 
 # 编译选项
 target_compile_options(minicc PRIVATE -Wall -Wextra -pedantic)
@@ -103,7 +105,7 @@ add_executable(unit_tests
     src/ast/type.cpp
     src/link/linker.cpp
 )
-target_include_directories(unit_tests PRIVATE include)
+target_include_directories(unit_tests PRIVATE ${MINICC_DOMAIN_INCLUDE_DIRS})
 target_compile_options(unit_tests PRIVATE -Wall -Wextra)
 target_link_libraries(unit_tests GTest::gtest GTest::gtest_main)
 # -rdynamic：把弱符号（vtable/typeinfo）导出进动态符号表，
@@ -221,7 +223,7 @@ endforeach()
 message(STATUS "集成测试 gtest 包装：subprocess ${ITEST_SUB_N} 个用例")
 
 add_executable(integration_gtest ${ITEST_WRAPPERS})
-target_include_directories(integration_gtest PRIVATE include tests)
+target_include_directories(integration_gtest PRIVATE ${MINICC_DOMAIN_INCLUDE_DIRS} tests)
 target_link_libraries(integration_gtest GTest::gtest GTest::gtest_main)
 # 子进程用例要以子进程方式启动本项目的 minicc：
 add_dependencies(integration_gtest minicc)

@@ -23,7 +23,7 @@
 
 ## 代码地图
 
-src/sema/sfinae.cpp（唯一 "[sfinae]" 日志出口）、include/sfinae.h（协议契约）、
+src/sema/sfinae.cpp（唯一 "[sfinae]" 日志出口）、src/sema/sfinae.h（协议契约）、
 substituteType Case 5.5/5.8（当场解糖的两个闸）
 
 ## 测试入口

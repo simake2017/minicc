@@ -150,7 +150,15 @@ ctest --test-dir build-linux -j6    # ② 362/362
 ## 项目结构
 
 ```text
-include/  src/      编译器本体（阶段 0~6 + 名字登记表 + SFINAE 模块）
+src/                  编译器本体（头文件与实现同域，对照 clang lib/<域>/）
+  lex/                阶段 0~1：预处理器 + 词法器
+  parse/              阶段 2：解析器（含 TokenCheckpoint、名字登记表）
+  sema/               阶段 3~4：语义分析 + 模板推导/实例化 + SFINAE
+  ast/                类型系统 + 常量折叠
+  codegen/            阶段 5：x86-64 代码生成
+  link/               阶段 6：自研链接器
+  driver/             main 驱动编排
+include/              跨域共享契约（ast/ast_visitor/token，对照 clang/include/clang/AST）
 ministl/            配套标准库（双栖头文件 + 独立 gtest + ASan 构建）
 tests/
   lang/ tmpl/ mi/ flow/ fold/ decl/ ctor/ pp/ stl/ rtti/   集成用例（logdiff 收集）

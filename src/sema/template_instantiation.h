@@ -40,7 +40,7 @@
 
 namespace minicc {
 
-// SubstitutionFailure 已迁出本文件 → include/sfinae.h（它是"替换失败信号"，被推导、
+// SubstitutionFailure 已迁出本文件 → src/sema/sfinae.h（它是"替换失败信号"，被推导、
 //   语义、实例化三方共用，挂靠在"实例化"名下会让人找不到 SFINAE 的入口）。
 // 本头文件仍 include sfinae.h —— 因为 DecltypeEvaluator 的契约里
 //   "求值失败抛 SubstitutionFailure" 是它的一部分。

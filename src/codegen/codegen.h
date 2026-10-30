@@ -188,7 +188,7 @@ private:
 
     // ── 语句生成 ──
     // 语句分发器：accept 走虚表分派到下方对应的 visit 重载（"lowering 降级"的入口）。
-    // 分派手法的判据见 include/ast_visitor.h 与 semantic_analyzer.h。
+    // 分派手法的判据见 include/ast_visitor.h 与 src/sema/semantic_analyzer.h。
     void emitStmt(const StmtPtr& stmt);
     // 复合语句：顺序发射子语句
     void visit(BlockStmt& block) override;
