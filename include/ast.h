@@ -4,10 +4,12 @@
 // =============================================================================
 // AST 是 Parser 的输出、后续所有阶段的唯一输入：
 //   Parser 建树 → Sema 填 resolvedType / 注册符号 / 算类布局 → 模板实例化克隆+替换
-// 对照 clang：clang/AST/Decl.h + Stmt.h（Decl/Stmt 双族；本版合一棵 ASTNode 树、【简化】无 Decl 语境对象）
+// 对照 clang：clang/include/clang/AST/Decl.h + clang/include/clang/AST/Stmt.h（Decl/Stmt 双族；本版合一棵 ASTNode 树、【简化】无 Decl 语境对象）
 //   → CodeGen 消费出汇编。
 //
-// 节点层次（NodeKind 是运行时类型标签，等价 clang 的 Stmt::StmtClass / Decl::Kind）：
+// 节点层次（NodeKind 是运行时类型标签，等价 clang 的 Stmt::StmtClass /
+//   clang/include/clang/AST/DeclBase.h:Decl::Kind —— ⚠ 前者所在的 StmtNodes.td
+//   在【本地 clang 语料】里已被裁剪（只剩 def Stmt : StmtNode<…> 一族），未能 grep 验证）：
 //   ASTNode
 //   ├── Expression  有类型有值   IntLiteral BoolLiteral StringLiteral NullptrLiteral
 //   │                            Var Binary Unary Call Member Index New DynamicCast
@@ -53,7 +55,8 @@ using DeclPtr        = std::shared_ptr<Declaration>;
 // ASTNode 基类
 // ─────────────────────────────────────────────────────────────────────────────
 // 所有节点的公共基类。NodeKind 是"运行时类型标签"，让消费者不必 dynamic_cast
-// 就能快速分派（教学上等价于 clang 的 Stmt::StmtClass / Decl::Kind 枚举）。
+// 就能快速分派（教学上等价于 clang 的 Stmt::StmtClass /
+//   clang/include/clang/AST/DeclBase.h:Decl::Kind 枚举）。
 // location 记录源码位置（token.h 的 SourceLocation），供报错定位。
 enum class NodeKind : uint8_t {
     // 表达式
@@ -296,7 +299,7 @@ struct MemberExpr : Expression {
     // demo: is_range<decltype(numbers)>::value ⇒ MemberExpr{object=VarExpr{is_range,
     //         explicitTemplateArgs=[decltype(...)]}, memberName="value", isTypeAccess=true}
     // clang 对照：DeclRefExpr(NestedNameSpecifier + ValueDecl)，
-    //   Sema::BuildDeclarationNameExpr 走 CXXScopeSpec 的那条路径。
+    //   clang/lib/Sema/SemaExpr.cpp:Sema::BuildDeclarationNameExpr 走 CXXScopeSpec 的那条路径。
     bool        isTypeAccess = false;
 
     // ── 成员【模板】调用选定的符号（[temp.mem]）────────────────────────────
@@ -439,7 +442,7 @@ struct Statement : ASTNode {
 };
 
 // ─── 空语句 ───────────────────────────────────────────────────────────────────
-// 对应 [stmt]/1 的 null statement（`;`），clang: NullStmt。
+// 对应 [stmt]/1 的 null statement（`;`），clang: clang/include/clang/Basic/StmtNodes.td:NullStmt。
 // 三个来源，语义同为"不做任何事"，故共用同一节点：
 //   ① 裸分号            `;`                     —— [stmt]/1
 //   ② 无声明符的声明    `A<int*, int**>;` / `int;` —— [dcl.dcl]/1 的 simple-declaration
@@ -453,11 +456,11 @@ struct Statement : ASTNode {
 // ★ typeName（③ 专用）：语句层把 `S;` 判为声明后，把名字带进 AST 交给 Sema 裁决
 //   【这个名字在此处可见吗】——可见性只由 Sema 的符号表回答（红线 3 判据单点），
 //   Parser 只负责"这语法上可能是个类型名"。空串 = 不是 ③。
-//   源码锚点：clang Parser::TryAnnotateTypeToken → Actions.ClassifyName
+//   源码锚点：clang/include/clang/Parse/Parser.h:Parser::TryAnnotateTypeOrScopeToken → Actions.ClassifyName
 //   （clang/lib/Parse/Parser.cpp:1696）问的是"当前作用域里它是不是类型"，
 //   本实现改为在语义期问同一件事（解析期没有活符号表，见 docs/learn/48）。
 // demo: `;` ⇒ EmptyStmt("")；`A<int*,int**>;` ⇒ EmptyStmt("")；`S;` ⇒ EmptyStmt("S")
-// 对照 clang：NullStmt —— 同样只有位置、没有子节点（名字是本项目的额外一槽）。
+// 对照 clang：clang/include/clang/Basic/StmtNodes.td:NullStmt —— 同样只有位置、没有子节点（名字是本项目的额外一槽）。
 struct EmptyStmt : Statement {
     explicit EmptyStmt() : Statement(NodeKind::Empty) {}
     explicit EmptyStmt(std::string n) : Statement(NodeKind::Empty),
@@ -936,7 +939,7 @@ struct ClassDecl : Declaration {
     //   一次名字替换 —— 它是 type_traits 全家桶的出口（每个元函数的"返回值"都是一条
     //   `using type = ...`）。目标可含模板形参，实例化时由 TemplateInstantiator 结构化
     //   替换（与字段/方法同一条路）。
-    //   clang 对照：TypedefNameDecl / Sema::InstantiateTypedefNameDecl。
+    //   clang 对照：TypedefNameDecl / clang/include/clang/Sema/Template.h:TemplateDeclInstantiator::InstantiateTypedefNameDecl。
     std::unordered_map<std::string, TypePtr> typeAliases;
     std::vector<std::string> typeAliasOrder;   // 保持声明顺序，便于日志可观测
 
@@ -993,7 +996,7 @@ struct TemplateParam {
     //   kind】——只记个数只能查元数。（旧版这里是个 size_t templateArity，
     //   全项目连一处读取都没有：既查不了 kind，也查不了元数。）
     // demo: template<template<class, int> class C> ⇒ innerParams = [Type, NonType]
-    // 对照 clang：TemplateTemplateParmDecl::getTemplateParameters() 自带
+    // 对照 clang：clang/include/clang/AST/DeclTemplate.h:TemplateTemplateParmDecl::getTemplateParameters 自带
     //   TemplateParameterList（TemplateDecl 子类，形参表是它的组成部分）。
     std::vector<TemplateParamPtr> innerParams;
 

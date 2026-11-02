@@ -4,10 +4,13 @@
 // demo（一段文本走完阶段 0）：`#define N 10` + `int a[N];` ⇒ 宏表登记一条 ⇒ 输出 `int a[10];`
 //
 // 函数级对照 clang：
-//   processText      ⇒ 对照 clang：PP::Lex（指令识别 + 条件栈）    lib/Lex/PPDirectives.cpp
-//   resolveInclude   ⇒ 对照 clang：HeaderSearch::LookupFile        lib/Basic/HeaderSearch.cpp
-//   expand           ⇒ 对照 clang：MacroExpander（重扫描 + 涂蓝）  lib/Lex/PPMacroExpansion.cpp
-//   evalConstantExpr ⇒ 对照 clang：EvaluateDirectiveExpression     lib/Lex/PPExpressions.cpp
+//   processText      ⇒ clang/lib/Lex/PPDirectives.cpp:Preprocessor::HandleDirective（指令识别 + 条件栈）
+//   resolveInclude   ⇒ clang/lib/Basic/HeaderSearch.cpp:HeaderSearch::LookupFile
+//   expand           ⇒ clang/lib/Lex/PPMacroExpansion.cpp:MacroExpander（重扫描 + 涂蓝）
+//   evalConstantExpr ⇒ clang/lib/Lex/PPExpressions.cpp:Preprocessor::EvaluateDirectiveExpression
+// ⚠ 上一行三处锚点在【本地 clang 语料】里未能逐个 grep 验证：HeaderSearch.cpp 与
+//   clang/include/clang/Lex/MacroExpander.h 已被裁剪，MacroExpander 在 PPMacroExpansion.cpp 里
+//   也 grep 不到（该文件只有其实现片段）；已按上游既有路径保留原写法。
 // 简化清单见 include/preprocessor.h 头注与 docs/learn/07。
 //
 // 管线位置 —— 整条管线唯一的"文本级"阶段，位于 Lexer 之前：
@@ -384,7 +387,7 @@ void Preprocessor::handleUndef(const std::string& rest, int line) {
     m_macros.erase(name);
 }
 
-// ── #include：搜索路径算法 ── 对照 clang：HeaderSearch::LookupFile
+// ── #include：搜索路径算法 ── 对照 clang：clang/lib/Basic/HeaderSearch.cpp:HeaderSearch::LookupFile
 // 扫到的写法 ⇒ 搜索顺序（[cpp.include] 允许实现自定义，这里取最常见约定）：
 //   #include "util.h"        ⇒ ① 当前文件所在目录 → ② -I 目录（按命令行先后）
 //   #include <minicc/util.h> ⇒ ① -I 目录（按命令行先后）→ ② /usr/include（系统头兜底）

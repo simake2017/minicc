@@ -180,7 +180,8 @@ std::string NameMangler::mangleTemplateInstance(
             // demo: Wrap<Box, int> ⇒ _Z4WrapI3BoxiE
             // ★ 不能落到下面的 NTTP 分支 —— 那会把它编成 Li0E（值 0 的 expr-primary），
             //   产出一个"看着像模像样"却与 clang 完全不同的符号。
-            // 对照 clang：ItaniumMangle 的 TemplateTemplateArg 走 mangleName 路径。
+            // 对照 clang：clang/include/clang/AST/Mangle.h:AbstractManglingParser::mangleName
+            //   —— TemplateTemplateArg 走它。
             result += encodeType(Type::makeClass(arg.templateName));
         }
         else {
@@ -698,7 +699,8 @@ TypePtr TemplateInstantiator::substituteType(
         if (it != subst.end()) {
             // ★ 类型位置只接受【类型】实参：命中值实参说明 NTTP 名被当类型用了，
             //   必须报硬错误而非把值硬塞成类型
-            //   （clang: err_nontype_template_parameter_used_as_type）。
+            //   （clang 在更早的实参校验期就拒：
+            //   clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateArgument）。
             if (it->second.isValue()) {
                 Sfinae::fail(std::format(
                     "[Subst Error] non-type template parameter '{}' is used as a "
@@ -721,7 +723,8 @@ TypePtr TemplateInstantiator::substituteType(
     //       T := vector<int> ⇒ ① declval<vector<int>>().begin() ② 求值 ⇒ int ✓
     //       T := int         ⇒ ② 求值失败 ⇒ 抛 SubstitutionFailure ⇒ 偏特化不匹配
     //                          ⇒ 回退主模板 false_type —— 这一抛一捕就是 SFINAE 全貌
-    // 对照 clang：TreeTransform::TransformDecltypeType → BuildDecltypeType 重新求值。
+    // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformDecltypeType →
+    //   clang/lib/Sema/SemaType.cpp:Sema::BuildDecltypeType 重新求值。
 
     //template <typename T>  这里 decltype 是一个 class type
     // struct is_range<T, std::void_t<decltype(std::declval<T>().begin()),
@@ -782,7 +785,7 @@ TypePtr TemplateInstantiator::substituteType(
         //   内层是右值引用时原样返回会得到 `int&&`，而 [dcl.ref]/6 要求 `int&`
         //   （"& 赢"只写在 Type::makeLValueReference 里，调用点不得自行判断）。
         if (newInner->isReference()) {
-            TypePtr folded = Type::makeLValueReference(newInner); // mrd 这里就是检测如果是引用会 直接返回左值引用
+            TypePtr folded = Type::makeLValueReference(newInner);
             std::cout << std::format("    [subst] ★ Reference collapsing: {}& → {} (& wins)\n",
                 newInner->toString(), folded->toString());
             return folded;
@@ -848,7 +851,7 @@ TypePtr TemplateInstantiator::substituteType(
     // ★ 失败必须【当场】抛：替换期正是 [temp.deduct]/8 的直接上下文，查不到即软失败
     //   被 Sfinae::attempt 吸收 —— void_t<typename T::type> 探测惯例全靠这一条。
     // 限定者替换后仍是形参（多层模板的内层）⇒ 原样返回留给外层替换（同 Case 1）。
-    // 对照 clang：TransformDependentNameType → Sema::SubstType 重做限定名查找。
+    // 对照 clang：clang/lib/Sema/TreeTransform.h:TransformDependentNameType → clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 重做限定名查找。
     if (type->isClass() && type->isNestedName() && type->nestedQualifier) {
         std::cout << std::format("    [subst] 依赖限定名 {}::{} → 先替换限定者...\n",
             type->nestedQualifier->toString(), type->name);
@@ -888,7 +891,7 @@ TypePtr TemplateInstantiator::substituteType(
     //       substituteType(MyPtr<T>, {})          ⇒ 原样返回（保持依赖）
     // ★ 必须先做这一步再做别名解糖：别名 Vec<T> 的实参先变成 int，展开出的
     //   MyPtr<int> 才是具体的；顺序反了就会拿 T 去实例化。
-    // 对照 clang：TreeTransform::TransformTemplateSpecializationType 逐项 Transform。
+    // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformTemplateSpecializationType 逐项 Transform。
     TypePtr idNode = type;
     if (type->isClass() && !type->templateArgs.empty()) {
         std::vector<TemplateArg> newArgs;
@@ -939,7 +942,7 @@ TypePtr TemplateInstantiator::substituteType(
     //   换完仍是"待实例化的半成品"，不是具体类型 —— 与模板体内的 `Box<T> inner;`
     //   走同一条兑现路径（所以不需要在这里调 resolveType，也不应该调：
     //   这一层不认识 Sema，硬调会引入双向依赖）。
-    // 对照 clang：TreeTransform::TransformTemplateSpecializationType 里
+    // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformTemplateSpecializationType 里
     //   TemplateTemplateParmDecl 的替换发生在 TransformTemplateName。
     if (idNode->isClass() && !idNode->templateArgs.empty()) {
         auto it = subst.find(idNode->name);
@@ -961,7 +964,7 @@ TypePtr TemplateInstantiator::substituteType(
     // ★ 必须在替换期展开并【当场】判成败：展开失败（如 enable_if 条件为假）要抛软
     //   失败让 Sfinae::attempt 吸收成"该候选被剔除"，拖到 Sema 解析期就成硬错误。
     // 与 Case 5.5 的区别：5.5 管 `typename T::type`（成员别名），本支管顶层 `X<T>`。
-    // 对照 clang：Sema::SubstType 判 isTypeAlias() → CheckAliasTemplateId 取 sugar。
+    // 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 判 isTypeAlias() → CheckAliasTemplateId 取 sugar。
     if (idNode->isClass() && !idNode->templateArgs.empty() && m_aliasResolver) {
         std::vector<TemplateArg> substArgs;
         substArgs.reserve(idNode->templateArgs.size());
@@ -1097,7 +1100,7 @@ FuncDeclPtr TemplateInstantiator::cloneMethod(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 克隆表达式 —— 深拷贝结构，对应 clang TreeTransform::TransformExpr
+// 克隆表达式 —— 深拷贝结构，对应 clang/lib/Sema/TreeTransform.h:TreeTransform::TransformExpr
 // ─────────────────────────────────────────────────────────────────────────────
 // 本项目表达式节点不存类型注解，实例的类型在语义分析中重新推出，故这里只递归克隆结构。
 // 【覆盖率】ast.h 的 14 种 Expression 派生类已全覆盖：Int/Bool/String/Nullptr 字面量、
@@ -1152,7 +1155,7 @@ ExprPtr TemplateInstantiator::cloneExpr(
         //   VarExpr{"x"} 绑的是类型或未命中 ⇒ 克隆名字本身
         // ★ explicitTemplateArgs 必须一并替换：declval<T>() 的 T 挂在 VarExpr{declval,[T]}
         //   上，只克隆名字会让 decltype 求值阶段看到裸 declval()，T 凭空丢失 ⇒ 探测链断裂。
-        // 对照 clang：TreeTransform::TransformDeclRefExpr 换成已求值的 TemplateArgument
+        // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformDeclRefExpr 换成已求值的 TemplateArgument
         //   （真 C++ 还要过 CheckTemplateArgument 做常量折叠，如 Buf<2+2> 折成 4，见 ROADMAP D）
         // ⚠ 已知边界：只按"名字命中 NTTP 形参名"判定，未做作用域检查 —— 模板体内同名
         //   局部变量遮蔽 NTTP 时会被误伤（clang 靠 DeclRefExpr 绑定的 ValueDecl* 区分）。
@@ -1304,7 +1307,7 @@ ExprPtr TemplateInstantiator::cloneExpr(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 克隆语句 —— 深拷贝，对应 clang TreeTransform::TransformStmt
+// 克隆语句 —— 深拷贝，对应 clang/lib/Sema/TreeTransform.h:TreeTransform::TransformStmt
 // ─────────────────────────────────────────────────────────────────────────────
 // ★ 必须深拷贝：蓝图 ClassDecl 全局只有一份，Box<int> 与 Box<double> 必须各持独立
 //   AST 子树；浅拷贝会让后实例的替换覆盖掉先实例的语句（同一 StmtPtr 被两边共享）。

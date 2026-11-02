@@ -6,7 +6,7 @@
 // 管线位置  源码 → Preprocessor → ★Lexer★ → Parser → Sema → 模板推导/实例化 → CodeGen
 // 标准章节  [lex.phases]（翻译阶段）│ [lex.token] │ [lex.pptoken]（最长匹配的注记在此）
 //           [lex.name] [lex.icon] [lex.string] [lex.operators]
-// 对照 clang：Lexer::LexTokenInternal —— 本文件 nextToken() 是它的教学简化版。
+// 对照 clang：clang/lib/Lex/Lexer.cpp:Lexer::LexTokenInternal —— 本文件 nextToken() 是它的教学简化版。
 //
 // demo: "int x = 42;" ⇒ [KwInt][Identifier "x"][Assign "="][IntLiteral "42"][Semicolon][Eof]
 // 本文件结构
@@ -253,7 +253,7 @@ void Lexer::skipWhitespaceAndComments() {
 //   理由：字面量的"值 + 形态"是【语义】信息（4L 的形态是 long），而 Token 只有
 //   一个 text 字段。让词法只负责"最长匹配切一刀"、解析器负责"读懂它"，
 //   职责边界与 clang 一致（Lexer 产出 tok::numeric_constant 的原始串，
-//   由 Sema::ActOnNumericConstant 配着 TargetInfo 决定类型）。
+//   由 clang/lib/Sema/SemaExpr.cpp:Sema::ActOnNumericConstant 配着 TargetInfo 决定类型）。
 // 省略：浮点字面量（[lex.fcon]）、数字分隔符 '（C++14）、后缀 f。
 Token Lexer::scanNumber() {
     // 先拍位置快照：token 位置指向第一个数字（若扫完再取就指向后面的字符了）
@@ -384,7 +384,7 @@ Token Lexer::scanString() {
 // 由 Parser 负责取它的值（`'a'` ⇒ 97）—— 与整数字面量"词法切串、Parser 解读"同构。
 // demo: 'a' ⇒ Token{CharLiteral, text=="a"}；'\n' ⇒ text=="\n"（已翻译）
 //       'ab'（多字符）⇒ text=="ab"，Parser 按"末字节在前"的常见实现取值
-// 对照 clang：Lexer::LexCharConstant → Sema::ActOnCharacterConstant（值在 Sema 定，
+// 对照 clang：clang/lib/Lex/Lexer.cpp:Lexer::LexCharConstant → clang/lib/Sema/SemaExpr.cpp:Sema::ActOnCharacterConstant（值在 Sema 定，
 //   因为涉及目标字符集与 wchar_t 宽度）。
 Token Lexer::scanChar() {
     auto loc = currentLocation();

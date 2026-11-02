@@ -774,6 +774,34 @@ docs/learn/49 + BUGS.md B38。
 留下的假象（learn/47 §6 第三种失败面具，这回连基线也骗）⇒ 重建后 371，
 本批 +5 ⇒ **376/376** 全绿。
 
+✅ **源码注释对齐「四段式」标准已完成（docs/learn/50 + specs/comment-standard-conformance.spec.md）** ——
+依据 `~/wiki/common/docs/design-standard/comment-standard.md`。
+**结论是"能改，但不该全量重写"**：现存 8,027 行注释里真正违规的只有 4 类约 30 处，
+而这些注释承载着四类**资产**——BUGS 编号索引 / 与 clang 逐字对齐的诊断文案 /
+判据表 / 踩坑后的"反直觉观测"——全量重写的信息丢失风险 > 收益。
+**四个批次**：A 私人笔记出源码（13 处 `// mrd`：12 删 + 1 提炼进③动机，独有内容存档进
+docs/NOTES-阅读笔记.md §七）／B 超预算块瘦身（10 块 → 0，机制细节搬进对应 learn，源码留指针）／
+C 锚点补全与自检（统一成 `clang/lib/Xxx/Xxx.cpp:Symbol::method`，**不写行号**——oracle 是 clang-18、
+语料是 2026-07 上游，行号必漂；76 条逐条 grep 三分类：✓74 / ⚠2 / ✗0，
+**已修 19 条真错**（`ASTContext::getBuiltinType` 压根不存在、`ParseTypenameType` 上游已改名、
+`err_ambiguous_partial_specialization` 诊断 ID 不同…）与 6 处路径拼写（漏 `lib/` 或 `include/` 一层））／
+D **标准变成机器断言**：新增 `check-comment-style.sh`（判据①块长≤25（复杂算法≤30，须含"放宽"说明）
+②私人笔记黑名单 ③锚点路径比例〔只统计〕④裸锚点〔clang 符号名无文件路径且块内无 ⚠ 豁免登记〕）
++ `verify-comment-mutations.sh`（**每条判据两次实测：引入违规必须红、放松判据必须绿**）。
+★ 两条设计决定：**扫描范围显式列出 `src/`+`include/`**（第一版用 denylist，当场把
+`.cache/googletest-src` 里的 gmock 注释一起判红）；**文件头豁免取前 60 行**
+（semantic_analyzer.cpp:31 的"第二块文件横幅"从 31 行才开始，30 豁免不到）。
+★ 突变验证抓到守卫脚本自己的一个真 bug：`if ALGO_MARK in text: limit = MAX_BLOCK_ALGO`
+是**直接赋值** ⇒ 把 MAX_BLOCK 调大来"放松"判据①时又被按回 30 ⇒ **放松无效**；
+改为 `limit = max(MAX_BLOCK_ALGO, MAX_BLOCK)`。—— 典型的"判据写错方向"：
+不是恒真，而是**恒被旁路**。
+★ 判据④ 用 `⚠` 当豁免标记 ⇒ "语料裁剪导致查不到"从**不可见的坑**变成**可见的账**。
+回归：守卫脚本 0 违规 + 突变验证 8/8 + ctest **376/376** + build 0 警告 +
+**logdiff 零漂移**（160 集成用例逐字节一致）⇒ 实证 [lex.comment]/1 的那条保证：
+"注释对语义零影响 ⇒ 可观测输出必须逐字节不变"。
+★ 未做（有意）：`tests/` 与 `demos/` 下的注释不改（那是"用例说明"不是"实现注释"，
+且 logdiff 基线内嵌测试文件源码行，改它会强制重刷基线）。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、

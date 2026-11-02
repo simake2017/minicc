@@ -118,8 +118,8 @@ TypePtr Type::makePointer(TypePtr pointee) {
 //   只在其中一条路径折叠，别处造出的嵌套引用就无人收拾：`id(rr)` 得到非法的 `int& &`，
 //   观测量是同一函数被实例化出两个符号（_Z2idIRiE / _Z2idIRRiE）。放进工厂函数后，
 //   四"处"变成零"处"（踩坑史 T3）。
-// 对照 clang：Sema::BuildReferenceType（SemaType.cpp:1887）是唯一折叠点，canonical type 在
-//   ASTContext::getLValueReferenceType（ASTContext.cpp:4163）构造时即算好 —— 同一个思想：
+// 对照 clang：clang/lib/Sema/SemaType.cpp:Sema::BuildReferenceType（SemaType.cpp:1887）是唯一折叠点，canonical type 在
+//   clang/lib/AST/ASTContext.cpp:ASTContext::getLValueReferenceType（ASTContext.cpp:4163）构造时即算好 —— 同一个思想：
 //   规范化在类型诞生的那一刻完成。
 // ★ 本实现无 canonical type 概念（日志/符号/比较吃同一份结构），故直接返回折叠后的规范
 //   形式，而非 clang 那样保留拼写形式的嵌套节点。
@@ -401,7 +401,8 @@ std::string Type::toString() const {
             //      C<int* const> 共用一条缓存，后者的实例被前者的实例顶掉；
             //   ② 实例名清洗（template_instantiation.cpp Step 2）同样吃 toString。
             //   即"类型树的形状"与"人读串"必须是单射（同族教训见 docs/learn/23）。
-            //   对照 clang：TypePrinter::printQualifiedType 按 TypeClass 分派，
+            //   对照 clang：TypePrinter::printQualifiedType 按 TypeClass 分派（⚠ 本地语料缺
+            //   clang/include/clang/AST/TypePrinter.h，未能 grep 验证），
             //   指针的 const 走 printPointer 输出 "int *const"。
             if (innerType->isPointer()) {
                 return (innerType->pointeeType ? innerType->pointeeType->toString() : "?")

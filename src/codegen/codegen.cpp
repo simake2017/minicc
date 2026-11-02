@@ -471,7 +471,8 @@ void CodeGen::emitStringLiterals() {
 //   m_localVars 查表 → -N(%rbp)，访问路径单一，不做寄存器存活分析。
 // ★ 成员函数：this 占 rdi（Itanium C++ ABI，隐式第 0 参数），显式形参从 rsi 起
 //   右移一位（regIdx = i + 1）。
-// 对照 clang：CodeGenFunction::GenerateCode + PrologEpilogInserter（序言/尾声）。
+// 对照 clang：clang/lib/CodeGen/CodeGenFunction.cpp:CodeGenFunction::GenerateCode
+//   （+ PrologEpilogInserter 产出序言/尾声；⚠ 该类在【本地 clang 语料】里 grep 不到，故未补路径）。
 // demo: int add(int a, int b) { return a + b; } ⇒
 //   .globl add │ add: pushq %rbp / movq %rsp,%rbp / subq $64,%rsp
 //                    movq %rdi,-8(%rbp)  # a │ movq %rsi,-16(%rbp)  # b
@@ -522,7 +523,9 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
     //   嵌套块里的声明          ⇒ 也数（槽位不回收，宁可帧大）
     // 保底 64B：覆盖表达式求值的临时 pushq 周转。
     // ★ P1 教训：不可固定 64 字节 —— 栈上类对象稍多几个就写穿帧底（踩坏调用者栈）。
-    // 对照 clang：PrologEpilogInserter / X86FrameLowering::determineFrameLayout。
+    // 对照 clang：PrologEpilogInserter / X86FrameLowering::determineFrameLayout ——
+    //   ⚠ 两者在【本地 clang 语料】里都 grep 不到（前者未收录；后者所在
+    //   clang/lib/CodeGen/X86FrameLowering.cpp 已被裁剪），故保留原写法。
     uint32_t frameSize = estimateFrameSize(func);
     if (frameSize < 64) frameSize = 64;
     frameSize = (frameSize + 15) / 16 * 16;   // 16 字节对齐（System V）
@@ -668,7 +671,7 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
                         // ── 标量字段：【必须】按宽度选存储指令，与读路径对称 ──
                         //   1B ⇒ movb │ ≤4B ⇒ movl │ 8B ⇒ movq
                         // ★ 一律 movq 会踩坏相邻字段（踩坑史 C3）。
-                        // 对照 clang：CodeGenFunction::EmitStoreOfScalar（按 TI.Width 选指令）。
+                        // 对照 clang：clang/lib/CodeGen/CGExpr.cpp:CodeGenFunction::EmitStoreOfScalar（按 TI.Width 选指令）。
                         emitExpr(init.arguments[0]);
                         emit("movq -8(%rbp), %rcx       # 加载 this 指针");
                         if (field->size == 1) {
@@ -996,17 +999,14 @@ uint32_t CodeGen::estimateBlockSize(std::shared_ptr<BlockStmt> block) {
     return total;
 }
 
-// 帧大小 = 局部变量总尺寸 + 序言区（帧基 + 形参 spill 槽）。
-// demo: int f(int a, int b) { int x; } ⇒ 8B(帧基) + 16B(两形参槽) + 8B(x) = 32B
-// ★ 序言区【必须】计入：漏算会让最深的局部落到 rsp 之下，被表达式求值的
-//   `pushq %rax` 与 `callq` 压入的返回地址踩掉（症状极具迷惑性，见踩坑史 C1）。
-// 对照 clang：PrologEpilogInserter / X86FrameLowering::determineFrameLayout ——
-//   帧大小是序言与局部布局【同一份】分配器的产物，不存在两处各算一份却对不上。
 // 帧主体 = 局部声明字节数 + 序言区（帧基 + 形参 spill 槽）。
 // demo: int f(int a, int b) { int x; } ⇒ 8B(帧基) + 16B(两形参槽) + 8B(x) = 32B
 // ★ 序言区【必须】计入：漏算会让最深的局部落到 rsp 之下，被表达式求值的
 //   `pushq %rax` 与 `callq` 压入的返回地址踩掉（症状极具迷惑性，见踩坑史 C1）。
 // 对照 clang：PrologEpilogInserter / X86FrameLowering::determineFrameLayout ——
+//   帧大小是序言与局部布局【同一份】分配器的产物，不存在两处各算一份却对不上。
+//   ⚠ 两者在【本地 clang 语料】里都 grep 不到（前者未收录；后者所在
+//   clang/lib/CodeGen/X86FrameLowering.cpp 已被裁剪），故未补文件路径。
 uint32_t CodeGen::estimateFrameBodyBytes(FuncDeclPtr func) {
     uint32_t total = estimateBlockSize(func->body);
 
@@ -1223,7 +1223,8 @@ int CodeGen::allocTempSlot(uint32_t size) {
 // 返回 0 表示：① 同一类；② 主基类（偏移 0）；③ 无继承关系。
 // demo：class A; class B : A; class C : B;
 //   getBaseOffset("C", "A") = offset(B in C) + offset(A in B)
-// 对照 clang：CastExpr::getSubExpr()->getType()->getAsCXXRecordDecl() 的
+// 对照 clang：clang/include/clang/AST/Expr.h:CastExpr::getSubExpr →
+//   clang/include/clang/AST/Type.h:Type::getAsCXXRecordDecl 的
 //   getASTContext().getASTRecordLayout(BaseDecl).getBaseClassOffset()。
 uint32_t CodeGen::getBaseOffset(const std::string& derivedClassName,
                                 const std::string& targetBase) const {
@@ -1698,7 +1699,7 @@ void CodeGen::visit(AssignStmt& stmt) {
                     // ── 按字段宽度选存储指令，与读路径、初始化列表路径对称 ──
                     //   1B ⇒ movb │ ≤4B ⇒ movl │ 8B ⇒ movq
                     // ★ 硬编码 movl 会让 8B 字段（指针/long）丢掉高 32 位（BUGS.md B3）。
-                    // 对照 clang：CodeGenFunction::EmitStoreOfScalar（按 TI.Width 选指令）。
+                    // 对照 clang：clang/lib/CodeGen/CGExpr.cpp:CodeGenFunction::EmitStoreOfScalar（按 TI.Width 选指令）。
                     // 用例：struct MyPtr { int* ptr; void set(int* x) { ptr = x; } };
                     //       ptr 宽 8 ⇒ 此处分派到 movq（旧版写死 movl，指针高 32 位丢失）
                     if (field->size == 1) {
@@ -1933,7 +1934,7 @@ void CodeGen::visit(WhileStmt& stmt) {
     m_loopStack.pop_back();
 }
 
-// for 循环降级（[stmt.for] 的结构化翻译，对照 clang CodeGenFunction::EmitForStmt）：
+// for 循环降级（[stmt.for] 的结构化翻译，对照 clang/lib/CodeGen/CGStmt.cpp:CodeGenFunction::EmitForStmt）：
 //   init 恰好一次 → cond 测试（假则去 end）→ body → incr → 回边 jmp cond。
 // 五个标签各司其职，continue 落 incr（不是 cond ——  incr 还没跑），break 落 end。
 void CodeGen::visit(ForStmt& stmt) {
@@ -2327,7 +2328,7 @@ void CodeGen::visit(BinaryExpr& expr) {
 // 条件（三元）表达式 [expr.cond] 的降级 —— ★ 短路语义就藏在这两行跳转里：
 // 先算条件、testq；假则【跳过 then 支】（它的副作用不会发生），真则跳过 else 支。
 // 两支的值都落在 rax（Sema 已保证同型），用 end 标签汇合 ——
-// 这是 if-else 的表达式版（clang CodeGenFunction::EmitConditionalOperator）。
+// 这是 if-else 的表达式版（clang/lib/CodeGen/CGExpr.cpp:CodeGenFunction::EmitConditionalOperator）。
 // 逗号表达式 [expr.comma]：左操作数只求副作用（结果丢弃），值与类型取右操作数。
 void CodeGen::visit(CommaExpr& expr) {
     emitComment(", ：左操作数只求副作用");
@@ -2364,7 +2365,9 @@ void CodeGen::visit(UnaryExpr& expr) {
     // ── &x 要的是【地址】而不是值，故不能先 emitExpr(operand) ──
     // 操作数形态 ⇒ 指令：栈对象/局部变量 ⇒ leaq off(%rbp),%rax
     //   其它形态（字段地址、数组元素地址…）尚未实现 ⇒ 明确报错，不静默给错值。
-    // 对照 clang：CodeGenFunction::EmitUnaryOp 的 UO_AddrOf 走 EmitLValue + EmitLValueAsAddr。
+    // 对照 clang：CodeGenFunction::EmitUnaryOp 的 UO_AddrOf 走 EmitLValue + EmitLValueAsAddr ——
+    //   ⚠ 该符号在【本地 clang 语料】里 grep 不到（同族只有 EmitUnaryOpLValue，
+    //   见 clang/lib/CodeGen/CGExpr.cpp），故未补文件路径。
     if (expr.op == UnaryOp::Addr) {
         if (expr.operand->kind == NodeKind::Var) {
             auto var = std::static_pointer_cast<VarExpr>(expr.operand);
@@ -2734,7 +2737,7 @@ void CodeGen::emitVirtualCall(
 //       movq -8(%rbp), %rax      # load p（对象地址）
 //       movl 0(%rax), %eax       # .age（偏移 0，4B int）
 // 兜底：查不到偏移时按偏移 0 读取并留注释（语义阶段本应已拦截）。
-// 对照 clang：CodeGenFunction::EmitMemberExpr（链式访问折叠为常量总偏移，本实现逐层 leaq）。
+// 对照 clang：clang/lib/CodeGen/CGExpr.cpp:CodeGenFunction::EmitMemberExpr（链式访问折叠为常量总偏移，本实现逐层 leaq）。
 void CodeGen::visit(MemberExpr& expr) {
     emitComment(std::format("member access: .{}", expr.memberName));
 
@@ -3051,7 +3054,7 @@ void CodeGen::visit(DynamicCastExpr& expr) {
 // ★ 必须归顶：this 可能是次基类子对象指针，结果 = 最派生对象地址 + 累积偏移
 //   （真 ABI 还要处理菱形虚继承，本实现按计数式布局统一 DFS）。
 // demo: dynamic_cast<Dog*>(p)：命中 ⇒ %rax = 调整后指针；未命中 ⇒ %rax = 0
-// 对照 clang：CodeGenFunction::EmitDynamicCast + __dynamic_cast（libc++abi）。
+// 对照 clang：clang/lib/CodeGen/CGExprCXX.cpp:CodeGenFunction::EmitDynamicCast + __dynamic_cast（libc++abi）。
 void CodeGen::emitDynamicCastHelper() {
     // ── 运行时助手（多继承版）：DFS 遍历 typeinfo 树 ──
     // demo: class Dog : Animal，p 指向 Dog；dynamic_cast<Animal*>(p) ⇒

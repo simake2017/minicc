@@ -19,7 +19,7 @@
 //
 //   标准章节：[temp.deduct] 总则 │ [temp.deduct.call] 逐对 P/A 调整规则
 //             [temp.deduct.type] 类型等价/不可推导 │ [temp.arg.explicit] 显式实参
-//   对照 clang：Sema::DeduceTemplateArguments（lib/Sema/SemaTemplateDeduction.cpp）
+//   对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::DeduceTemplateArguments（lib/Sema/SemaTemplateDeduction.cpp）
 //     deduce() ≈ 入口 │ deducePair() ≈ 逐对合一回调
 // =============================================================================
 
@@ -68,7 +68,7 @@ bool TemplateDeducer::matchPattern(
         //   探测失败。位不比值，两个分支就会同时匹配 ⇒ 偏序裁决出歧义。
         //   值位若写成形参名（`Box<T, N>` 的 N）在本项目里 Parser 已按类型位建
         //   节点，故此处不会遇到"值位可绑定"的形态。
-        //   对照 clang：DeduceTemplateArguments 的 TDK_NonDeducedType 路径。
+        //   对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:DeduceTemplateArguments 的 TDK_NonDeducedType 路径。
         if (pattern[i].isValue()) {
             const TemplateArg& A = args[i];
             if (!A.isValue() || !pattern[i].equals(A)) {
@@ -112,7 +112,7 @@ bool TemplateDeducer::matchPattern(
         // [temp.class.spec.match]/2：偏特化匹配是【结构等价】，不是函数调用那套
         //   "左值可绑定"。deducePair 的 P=T& 分支只看 argIsLValue 会放行 A=int，
         //   于是 `Probe<T&>` 错误匹配上 `Probe<int>` —— 引用位只能由引用实参填充
-        //   （clang 同样在 DeduceTemplateArguments 的 TDK_Reference 分支把关）。
+        //   （clang 同样在 clang/lib/Sema/SemaTemplateDeduction.cpp:DeduceTemplateArguments 的 TDK_Reference 分支把关）。
         // demo: Probe<T&> 对 Probe<int>  ⇒ 不匹配 ✓ │ 对 Probe<int&> ⇒ 继续推导 ✓
         //       Probe<T&> 对 Probe<int&> → 两边都是左值引用 → 继续推导 ✓
         {
@@ -166,7 +166,7 @@ bool TemplateDeducer::matchPattern(
 //     pass(v);                                    // A 侧已在调用点解糖成 MyPtr<int>
 // 是"解糖"不是"实例化"：T 仍是形参，`MyPtr<T>` 保持依赖，正交给逐位合一去绑定。
 // 逐对：desugarAlias(Vec<T>, {}) ⇒ MyPtr<T>（保持依赖）│ 配 {T := int} ⇒ MyPtr<int>
-// 对照 clang：DeduceTemplateArguments 之前取 getCanonicalType，别名已被完全剥掉。
+// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:DeduceTemplateArguments 之前取 getCanonicalType，别名已被完全剥掉。
 TypePtr TemplateDeducer::desugarAlias(
     const TypePtr& P,
     const std::unordered_map<std::string, TypePtr>& subst) {
@@ -290,7 +290,7 @@ bool TemplateDeducer::bind(const std::string& paramName, const TypePtr& type,
                            const std::string& patternStr, const std::string& argStr) {
     auto it = subst.find(paramName);
     if (it == subst.end()) {
-        subst[paramName] = type; // mrd 这里会对 参数进行类型绑定
+        subst[paramName] = type;
         std::string msg = std::format("{} := {}", paramName, type->toString());
         out.trace.push_back({patternStr, argStr, msg, true});
         std::cout << std::format("  [deduction]   P={:<12} A={:<12} ⇒ {}\n",
@@ -414,7 +414,7 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
     // [temp.deduct.type] 结构化等价：复合类型逐层拆解后递归合一。
     // demo: P=T* A=int* ⇒ 递归到 (T, int) ⇒ T := int ✓
     if (P->isPointer()) {
-        if (!A->isPointer()) { // mrd 对于指针类型 ,要判断是否都是指针类型
+        if (!A->isPointer()) {
             out.failureReason = std::format(
                 "parameter pattern '{}' expects pointer argument, got '{}'", pStr, aStr);
             out.trace.push_back({pStr, aStr, out.failureReason, false});

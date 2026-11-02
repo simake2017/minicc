@@ -97,16 +97,19 @@ private:
     std::vector<Token> m_tokens;   // 完整 Token 序列（含末尾哨兵 Eof）
     size_t             m_pos = 0;  // 游标：下一个待消费的 Token 下标
 
-    // ── 模板形参作用域：帧链（对应 clang 的 Scope::TemplateParamScope 链）──
+    // ── 模板形参作用域：帧链（对应 clang 的
+    //   clang/include/clang/Sema/Scope.h:Scope::TemplateParamScope 链）──
     // 帧的粒度 ⇒ 查名字的结果（本项目无通用 Scope 类，用等价的【帧链】代替）：
     //   一个 template<...> 一份帧（栈上局部对象，构造即入栈 / 析构即出栈）
     //     ⇒ 解析 `template<class T> struct A { T v; };` 时 T 命中本帧 ⇒ TemplateParam("T")
     //   沿 parent 上溯 ⇒ 内层优先（parent 指针顶替 Scope::getParent()）
     // ★ 帧的生命周期 == 该 template 声明的解析范围，异常路径由栈展开保证出栈
-    //   （对照 clang：MultiParseScope 同样"构造 Enter、析构 Exit"，ParseTemplate.cpp:332）。
+    //   （对照 clang：clang/include/clang/Parse/Parser.h:528 的 MultiParseScope 同样
+    //   "构造 Enter、析构 Exit"，用法见 clang/lib/Parse/ParseTemplate.cpp:53）。
     // clang 的模板形参作用域不是独立容器，只是统一 Scope 链上的一个【种类位】
-    //   （clang/include/clang/Sema/Scope.h:81）：Sema::ActOnTypeParameter 末尾用
-    //   S->AddDecl(Param) 把形参挂进当前 Scope 的声明链（SemaTemplate.cpp:1074）
+    //   （clang/include/clang/Sema/Scope.h:81）：clang/lib/Sema/SemaTemplate.cpp:1047 的
+    //   Sema::ActOnTypeParameter 末尾用
+    //   S->AddDecl(Param) 把形参挂进当前 Scope 的声明链（SemaTemplate.cpp:1075）
     //   ⇒"内层优先"是 Scope 链的天然性质，无需手写 parent。
     struct TemplateParamFrame {
         const TemplateDecl* owner  = nullptr;  // 归属：这是哪个 template<>
@@ -175,7 +178,7 @@ private:
     //   类型实参（Box<int>）  → TemplateArg{kind=Type,     type}
     //   非类型实参（Buf<4>）  → TemplateArg{kind=Integral, value}   ★ NTTP
     // 调用约定：本函数自己消费 '<' 与 '>'（调用前不预消费，返回时整段已吃掉）。
-    // 对照 clang：Parser::ParseTemplateArgumentList（ParseTemplate.cpp）
+    // 对照 clang：clang/lib/Parse/ParseTemplate.cpp:Parser::ParseTemplateArgumentList（ParseTemplate.cpp）
     //   真实现里 constant-expression 要走完整表达式解析 + 常量求值
     //   （Sema::ActOnNonTypeTemplateArgument）。本项目教学简化：只认整数字面量，
     //   不做常量折叠（如 Buf<2+2> 不支持，见 ROADMAP 主线 D）。
@@ -286,7 +289,8 @@ private:
     //   Box(int)          -> Box<int>;            （非模板指引，写死映射）
     // ⚠ 为什么要前瞻：`MyPtr(T) -> MyPtr<T>;` 与函数声明 `MyPtr f(T);` 前两个
     //   Token 完全一样（标识符 + '('），只能靠"配对右括号之后是不是 '->'"区分。
-    // 对照 clang：TryParseDeductionGuide / isDeductionGuide。
+    // 对照 clang：clang/lib/Parse/ParseTemplate.cpp:Parser::ParseTemplateDeclarationOrSpecialization
+    //   （靠 AllowDeductionGuide 参数区分指引与普通声明）。
     bool               looksLikeDeductionGuide() const;
     DeductionGuideDeclPtr parseDeductionGuide();
     GlobalVarDeclPtr   parseGlobalVarDecl();

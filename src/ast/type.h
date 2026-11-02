@@ -83,7 +83,7 @@ enum class TypeKind : uint8_t {
 // ─────────────────────────────────────────────────────────────────────────────
 // TypeKind ↔ clang 类型类 ↔ Itanium mangling 编码
 // ─────────────────────────────────────────────────────────────────────────────
-//   TypeKind                       clang（include/clang/AST/Type.h）      encodeType
+//   TypeKind                       clang（clang/include/clang/AST/Type.h）      encodeType
 //   Void / Bool / Double           BuiltinType::Void/Bool/Double          v / b / d
 //   Char / SChar / UChar           BuiltinType::Char_S/SChar/UChar        c / a / h
 //   Short / UShort                 BuiltinType::Short/UShort              s / t
@@ -114,7 +114,7 @@ enum class AccessModifier : uint8_t {
 // ─────────────────────────────────────────────────────────────────────────────
 // FieldInfo：类的字段信息（运行期看偏移量）
 // ─────────────────────────────────────────────────────────────────────────────
-// 对应 clang::FieldDecl（include/clang/AST/Decl.h）+ ASTRecordLayout 中的字段偏移。
+// 对应 clang::FieldDecl（clang/include/clang/AST/Decl.h）+ ASTRecordLayout 中的字段偏移。
 // demo：class Point { int x; int y; };
 //   fields = [ FieldInfo{name=x, type=int, offset=0, size=4},
 //              FieldInfo{name=y, type=int, offset=4, size=4} ]
@@ -201,7 +201,7 @@ struct BaseSubobject {
 // ★ 约束：实参【不能】一律存成 TypePtr —— template<int N> 的实参 4 是值不是类型，
 //   TypePtr 结构上就表达不了。故用 tagged union 让"类型 or 值"共存于同一槽位。
 //
-// 【clang 对照】clang::TemplateArgument（clang/AST/TemplateBase.h）是真正多形态的 tagged
+// 【clang 对照】clang::TemplateArgument（clang/include/clang/AST/TemplateBase.h）是真正多形态的 tagged
 //   union（ArgKind{Type, Declaration, Integral, Template, Pack, ...}，Integral 形态带
 //   llvm::APSInt Integer）；本实现只取 Type / Integral / Template 三形态。形参侧对应
 //   TemplateTypeParmDecl / NonTypeTemplateParmDecl ⟷ 本项目的 TemplateParamKind。
@@ -328,7 +328,7 @@ struct ClassLayout {
     // （`struct A{int x;}; struct B{int x;}; struct D:A,B{}; d.x` 在真 C++ 里 ill-formed）。
     // 分出这个接口的理由：findField 只能回答"取哪一条"，回答不了"是不是只有一条"；
     // 而"静默取第一条"正是 BUGS.md B13 的观感（布局打印出两条同名、偏移还错）。
-    // 对照 clang：LookupResult::isAmbiguous() + 承载多个 NamedDecl。
+    // 对照 clang：clang/include/clang/Sema/Lookup.h:LookupResult::isAmbiguous + 承载多个 NamedDecl。
     std::vector<const FieldInfo*> findFields(const std::string& name) const {
         // ★ declaredName 才是权威键：name 是显示串，MI 下带前缀（"B.x"），拿它当键会让
         //   查找结果依赖"前缀是哪一代留下的"。旧实现用 sourceClass + "." + name 反拼
@@ -354,38 +354,25 @@ struct ClassLayout {
 // =============================================================================
 // 【指针 / 引用 / const 的组合规则】—— 详见 docs/learn/23
 // =============================================================================
-// Type 是"洋葱式"嵌套：每个修饰符一个独立节点，靠 pointeeType / referencedType /
-// innerType 三条链指向内层。组合顺序见 src/parser.cpp parseType() —— 记下 const 前缀
-// → 解析基础类型 → 叠加后缀 * / & / && → 最后把 const 包到它该在的位置。
-//
-// 【写法 ⇒ 建出哪种节点】（外 → 内；encodeType 见 src/template_instantiation.cpp）
-//   int               ⇒ Int                            i
-//   int*              ⇒ Pointer(Int)                   Pi
-//   int&              ⇒ LValueReference(Int)           Ri
-//   int&&             ⇒ RValueReference(Int)           Oi
-//   const int         ⇒ Const(Int)                     Ki
-//   int**             ⇒ Pointer(Pointer(Int))          PPi
-//   const int*        ⇒ Pointer(Const(Int))            PKi   ← const 在【内层】（说明符侧）
-//   const int&        ⇒ LValueReference(Const(Int))    KRi   ← const 在【内层】
-//   int* const        ⇒ Const(Pointer(Int))            KPi   ← const 在【外层】（声明符侧）
-//   int* const*       ⇒ Pointer(Const(Pointer(Int)))         ← 链式组合
-//   Box<int>::type    ⇒ 实例类的别名表 + nestedQualifier=Box<int>、name="type"
-//
-//   ★ 三者不可混淆：const 写在哪一侧就修饰谁（[dcl.type.cv]）—— 结构不同则打印不同、
-//     mangling 不同、偏特化匹配结果也不同（`C<const int*>` 与 `C<int* const>` 曾撞成同一
-//     条缓存）。回归 tests/tmpl/test_tmpl_47_cv_position.cpp（踩坑史 T1）。
-//
-// 【引用折叠 Reference Collapsing】[dcl.ref]/6（嵌套情形见 [temp.deduct.call]）——
-//   构造点四行合一，有一层左值引用即左值引用：
-//     T& & →T&    T& && →T&    T&& & →T&    T&& && →T&&
-//   万能引用的来源：foo(42) ⇒ T=int,  T&& = int&&；
-//                   foo(var)⇒ T=int&, T&& = int& && → int&。
-// ★ 折叠必须在【构造点】完成 —— makeLValueReference / makeRValueReference 是唯一实现处，
-//   "不存在嵌套引用节点"由此成为类型系统的不变量。只写在某一条路径上是不够的：推导
-//   `T := A&`（A 本身已是引用）时无人收拾 ⇒ 非法的 `int& &`，观测量是同一函数实例化出
-//   两个符号 _Z2idIRiE / _Z2idIRRiE（踩坑史 T3）。
-// 对照 clang：Sema::BuildReferenceType（SemaType.cpp:1887）是折叠唯一实现点，canonical
-//   type 在 ASTContext::getLValueReferenceType 构造时即算好。
+// ① 定位：Type 是"洋葱式"嵌套 —— 每个修饰符一个独立节点，靠 pointeeType /
+//    referencedType / innerType 三条链指向内层；组合顺序由 parseType 决定
+//    （记下 const 前缀 → 解析基础类型 → 叠加后缀 * / & / && → const 归位）。
+// ② 锚点：clang/lib/AST/ASTContext.cpp:ASTContext::getLValueReferenceType —— clang
+//    的 canonical type 在构造时即算好；minicc 的对应实现点是 Type::makeLValueReference
+//    （引用折叠的四种组合与"为什么必须在构造点"都写在那儿，此处不重复）。
+// ③ 动机：const 写在哪一侧就修饰谁（[dcl.type.cv]）—— 结构不同则打印不同、
+//    mangling 不同、偏特化匹配结果也不同（`C<const int*>` 与 `C<int* const>` 曾撞成
+//    同一条缓存）。建错树不报错、只静默算错。
+// ④ 【写法 ⇒ 建出哪种节点】（外 → 内；encodeType 见 src/template_instantiation.cpp）
+//      int ⇒ Int(i) │ int* ⇒ Pointer(Int)(Pi) │ int& ⇒ LValueReference(Int)(Ri)
+//      int&& ⇒ RValueReference(Int)(Oi) │ const int ⇒ Const(Int)(Ki)
+//      const int& ⇒ LValueReference(Const(Int))(KRi)  ← const 在【内层】
+//      int** ⇒ Pointer(Pointer(Int))(PPi)
+//      const int* ⇒ Pointer(Const(Int))(PKi)  ← const 在【内层】（说明符侧）
+//      int* const ⇒ Const(Pointer(Int))(KPi)  ← const 在【外层】（声明符侧）
+//      int* const* ⇒ Pointer(Const(Pointer(Int)))  ← 链式组合
+//      Box<int>::type ⇒ 实例类的别名表 + nestedQualifier=Box<int>、name="type"
+//   回归 tests/tmpl/test_tmpl_47_cv_position.cpp（踩坑史 T1）
 // =============================================================================
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -458,7 +445,7 @@ struct Type {
     // ★ 两段式：decltype 出现时不立刻求值，先原样留存表达式，等【替换】（substituteType）
     //   阶段再求。原因：is_range<T, void_t<decltype(declval<T>().begin())>> 里 decltype 位于
     //   【模板模式】中，此刻 T 未知 —— 立即求值无从下手。
-    //   对照 clang：DecltypeType 在依赖上下文中就是依赖类型，直到 Sema::SubstType 才求值。
+    //   对照 clang：DecltypeType 在依赖上下文中就是依赖类型，直到 clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 才求值。
     DecltypeExprPtr decltypeExpr;              // 操作数表达式（半成品，替换后求值）
     bool            decltypeParen = false;     // 是否多套了一层括号，见 [dcl.type.decltype]
 

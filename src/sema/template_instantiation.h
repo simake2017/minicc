@@ -54,7 +54,7 @@ namespace minicc {
 //   被迫拖进整个 Sema。故抽成接口：Sema 实现它，instantiator 只持一个可选指针。
 // 【可选语义】指针为 nullptr（单元测试路径）⇒ decltype 节点**不求值**、原样保留：
 //   substituteType(makeDecltype(e), {}) ⇒ 仍是 Decltype 节点（"延迟求值"本身可观察）
-// 对照 clang：Sema::SubstType 内直接调 BuildDecltypeType（clang 的 Instantiator = Sema 的一部分）
+// 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 内直接调 clang/lib/Sema/SemaType.cpp:BuildDecltypeType（clang 的 Instantiator = Sema 的一部分）
 class DecltypeEvaluator {
 public:
     virtual ~DecltypeEvaluator() = default;
@@ -80,7 +80,7 @@ public:
 // ★ 必须在这里（替换当场）失败：这正是 [temp.deduct]/8 的**直接上下文** ——
 //     template<class T> using has_type = void_t<typename T::type>;
 //   拖到 Sema 解析期就成硬错误，SFINAE 探测惯例整个失效。
-// 对照 clang：Sema::SubstType 对 DependentNameType 走 getTypeName + LookupQualifiedName
+// 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 对 DependentNameType 走 clang/include/clang/Sema/Sema.h:getTypeName + clang/lib/Sema/SemaLookup.cpp:LookupQualifiedName
 class MemberTypeResolver {
 public:
     virtual ~MemberTypeResolver() = default;
@@ -105,7 +105,7 @@ public:
 //   Vec<int>               ⇒ 解糖 ⇒ MyPtr<int>（同一个类，零新符号）
 // 定义期根本查不动它（T 未知，两阶段查找的第一阶段），必须等调用点推出 T 后在替换的
 //   当口展开 —— 拖到 Sema 解析期就晚了：那时已不在直接上下文里，失败变硬错误。
-// 对照 clang：Sema::SubstType 判 isTypeAlias() 后走 CheckAliasTemplateId + getCanonicalType
+// 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 判 isTypeAlias() 后走 CheckAliasTemplateId + getCanonicalType
 class AliasTemplateResolver {
 public:
     virtual ~AliasTemplateResolver() = default;

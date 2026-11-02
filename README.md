@@ -182,6 +182,8 @@ docs/
   constraints/        项目约束唯一权威
   BUGS.md  PITFALLS.md  ROADMAP.md  TODO.md
 logdiff.sh  build.sh  CMakeLists.txt
+check-comment-style.sh       # 注释四段式守卫（判据①②③④）
+verify-comment-mutations.sh  # 守卫脚本的突变验证（判据是否承重）
 ```
 
 ## 文档索引
@@ -199,6 +201,7 @@ logdiff.sh  build.sh  CMakeLists.txt
 | 解析期语义识别（名字登记表） | learn/46、47 |
 | 名字可见性（作用域链裁决） | learn/48、BUGS.md B37 |
 | 作用域即身份（模板/命名空间的名字带作用域） | learn/49、BUGS.md B38 |
+| 注释四段式标准（审计 + 守卫脚本） | learn/50、specs/comment-standard-conformance.spec.md |
 | 所有踩坑复盘 | BUGS.md（B01..B38）、PITFALLS.md |
 
 ## 未来计划
@@ -214,5 +217,7 @@ logdiff.sh  build.sh  CMakeLists.txt
 cmake --build build-linux -j6             # 单测/集成 gtest 目标
 ctest --test-dir build-linux -j6          # 全量测试
 ./logdiff.sh save && ./logdiff.sh diff    # 基线快照 / 比对
+./check-comment-style.sh                 # 注释四段式守卫（违规即退出码 1）
+./verify-comment-mutations.sh            # 守卫脚本的突变验证
 clang++-18 -std=c++20 -fsyntax-only x.cpp # 语义 oracle 探针
 ```

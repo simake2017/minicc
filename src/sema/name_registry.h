@@ -11,7 +11,7 @@
 //           → Sema（只读查询）→ …
 //
 // 对照 clang（~/cppproject/llvm-project/）：
-//   NameClassification 骨架 ⇐ Sema::ClassifyName 的返回形状
+//   NameClassification 骨架 ⇐ clang/lib/Sema/SemaDecl.cpp:Sema::ClassifyName 的返回形状
 //                             （clang/lib/Sema/SemaDecl.cpp:912）
 //   isTemplateName()        ⇐ Sema::isTemplateName
 //                             （clang/lib/Sema/SemaTemplate.cpp:179）

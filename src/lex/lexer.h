@@ -8,7 +8,7 @@
 // 管线位置  源码(.cpp) → Preprocessor → ★Lexer★ → Parser → Sema → … → CodeGen
 //           输入 = 预处理后的整段源码；输出 = std::vector<Token>（以 Eof 收尾）
 // 标准章节  [lex.phases] 阶段 3/7（合并两级，直接产语法 token）│ [lex.token] / [lex.operators]
-// 对照 clang：Lexer::LexTokenInternal —— 即本 DFA 所实现的划分规则
+// 对照 clang：clang/lib/Lex/Lexer.cpp:Lexer::LexTokenInternal —— 即本 DFA 所实现的划分规则
 //
 // 首字符分派表（扫到什么 ⇒ 走哪条分支 ⇒ 产出什么）：
 //   `0-9`        ⇒ scanNumber()              ⇒ "42"   → Token{IntLiteral,"42"}

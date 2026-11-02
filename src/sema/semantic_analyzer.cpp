@@ -295,24 +295,6 @@ std::string SemanticAnalyzer::typeListToString(const std::vector<TemplateArg>& t
     return patternToString(types);
 }
 
-// ─── decltype 求值（DecltypeEvaluator 接口的实现，理论见 docs/learn/20）───────
-// 【[dcl.type.decltype] 两套规则】只看"操作数是否被括号包住"：
-//   decltype(e)    e 是【未加括号】的 id-expression 或类成员访问 ⇒ 【声明类型】
-//   decltype((e))  其它一切情况（含多加一层括号）⇒ 【表达式类型】，按值类别调整：
-//                  左值 / xvalue → T&，prvalue → T
-// 用例  int a = 1;      decltype(a) ⇒ int ｜ decltype((a)) ⇒ int&（(a) 是左值）
-//       int x=1; int& r=x;  decltype(r) ⇒ int&（id-expression 取声明类型，不剥引用）
-// 【为什么抛 SubstitutionFailure 而不是返回错误类型】求值失败属于 [temp.deduct]/8 的
-//   immediate context 失败：在 void_t 探测里必须表现为"该偏特化不匹配"，异常即其载体。
-// ┌─ DEMO（真实日志）──────────────────────────────────────────────────────────
-// │ 源码  int x = 42;      decltype(x) w = x;
-// │ 日志  [decltype] resolveType 遇到 decltype 节点，尝试立即求值
-// │       [decltype] 求值 decltype(e) —— 未加括号 ⇒ 若为 id-expression 则取【声明类型】
-// │       [resolve] 'x' → int    (kind=Variable, stack@-8)
-// │       [decltype]   ⇒ 声明类型 = int
-// │ 输出  int（未加括号的 id-expression）/ int&（加括号，左值）/ int（右值表达式）
-// │ 依赖上下文  模板模式里 T 还没绑定时立即求值会失败 → 保持 Decltype 节点延迟，
-// │       等 substituteType 阶段再算（见 resolveType 的 decltype 分支与 Case 1.5）。
 // ─── findMemberType：typename T::type 的落点（理论见 docs/learn/25）───────────
 // [temp.res]/5：模板里的限定名 `Q::m`，Q 依赖（含模板形参）时 m 是类型还是值定义期判
 //   不出 ⇒ 要写 typename 消歧。本实现的 `typename` 只是语法前缀：去 Q 的成员别名表查，
@@ -321,7 +303,7 @@ std::string SemanticAnalyzer::typeListToString(const std::vector<TemplateArg>& t
 //     resolveType 路径（解析实体声明的类型）不在直接上下文 ⇒ 硬错误
 //     resolveMemberType 路径（替换模板实参）在直接上下文 ⇒ 软失败
 //   用例  Get<Plain> ⇒ 字段 v : int；Get<int> ⇒ Sfinae::fail（候选被移出，不是硬错误）
-// 对照 clang：Sema::getTypeName + LookupQualifiedName 负责"查"，失败后走
+// 对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::getTypeName + clang/lib/Sema/SemaLookup.cpp:LookupQualifiedName 负责"查"，失败后走
 //   err_unknown_typename（硬）还是 SFINAE（软）。
 // ┌─ DEMO（真实日志）──────────────────────────────────────────────────────────
 // │ 源码  template<typename T> struct Get { typename T::type v; };
@@ -362,7 +344,9 @@ TypePtr SemanticAnalyzer::resolveMemberType(const TypePtr& qualifier,
 // ★ [temp.alias]/1：别名模板的特化就是它所指代的类型，不引入新类型。
 // 用例  template<class T> using Vec = MyPtr<T>;   Vec<int> v; ⇒ 类型是 MyPtr_int，
 //       汇编符号 _Z5MyPtrIiE（与手写 MyPtr<int> v; 完全同一条路，别名痕迹为零）
-// 对照 clang：Sema::CheckAliasTemplateId（校验实参个数与 kind）+ Sema::SubstType 对
+// 对照 clang：Sema::CheckAliasTemplateId（校验实参个数与 kind）+ clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 对
+//   ⚠ 该符号在【本地 clang 语料】里 grep 不到（clang/include/clang/Sema/SemaTemplate.h 被裁剪），
+//   故保留原写法、未补文件路径 —— 属"语料缺文件"，非锚点本身有误。
 //   底层类型做 TreeTransform，最后 getCanonicalType 解糖。（理论见 docs/learn/27）
 bool SemanticAnalyzer::isAliasTemplate(const std::string& name) const {
     return m_aliasTemplates.count(name) != 0;
@@ -377,7 +361,7 @@ bool SemanticAnalyzer::isAliasTemplate(const std::string& name) const {
 //       ⇒ P=T, A=int ⇒ T := int ⇒ 等价于 MyPtr<int> m(7);
 // 【三条来源，按优先级】① 用户写的推导指引（显式优先，[temp.deduct.guide]/1）
 //   ② 主模板的构造函数（隐式指引："拿构造函数当指引"）③ 都不成 ⇒ 报错
-// 对照 clang：Sema::DeduceTemplateArguments 之前，DeclSpec 的 CTAD 分支先把候选指引
+// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::DeduceTemplateArguments 之前，DeclSpec 的 CTAD 分支先把候选指引
 //   （含隐式合成的）收集成重载集，再走一遍重载决议。（理论见 docs/learn/28）
 void SemanticAnalyzer::registerDeductionGuide(const DeductionGuideDeclPtr& g) {
     m_deductionGuides[g->guideName].push_back(g);
@@ -592,6 +576,26 @@ TypePtr SemanticAnalyzer::expandAliasTemplate(
     return expanded;
 }
 
+// ─── decltype 求值（DecltypeEvaluator 接口的实现，理论见 docs/learn/20）───────
+// 【[dcl.type.decltype] 两套规则】只看"操作数是否被括号包住"：
+//   decltype(e)    e 是【未加括号】的 id-expression 或类成员访问 ⇒ 【声明类型】
+//   decltype((e))  其它一切情况（含多加一层括号）⇒ 【表达式类型】，按值类别调整：
+//                  左值 / xvalue → T&，prvalue → T
+// 用例  int a = 1;      decltype(a) ⇒ int ｜ decltype((a)) ⇒ int&（(a) 是左值）
+//       int x=1; int& r=x;  decltype(r) ⇒ int&（id-expression 取声明类型，不剥引用）
+// 【为什么抛 SubstitutionFailure 而不是返回错误类型】求值失败属于 [temp.deduct]/8 的
+//   immediate context 失败：在 void_t 探测里必须表现为"该偏特化不匹配"，异常即其载体。
+// 对照 clang：clang/lib/Sema/SemaType.cpp:Sema::BuildDecltypeType 算类型，
+//   clang/lib/Sema/SemaExprCXX.cpp:Sema::ActOnDecltypeExpression 建表达式。
+// ┌─ DEMO（真实日志）──────────────────────────────────────────────────────────
+// │ 源码  int x = 42;      decltype(x) w = x;
+// │ 日志  [decltype] resolveType 遇到 decltype 节点，尝试立即求值
+// │       [decltype] 求值 decltype(e) —— 未加括号 ⇒ 若为 id-expression 则取【声明类型】
+// │       [resolve] 'x' → int    (kind=Variable, stack@-8)
+// │       [decltype]   ⇒ 声明类型 = int
+// │ 输出  int（未加括号的 id-expression）/ int&（加括号，左值）/ int（右值表达式）
+// │ 依赖上下文  模板模式里 T 还没绑定时立即求值会失败 → 保持 Decltype 节点延迟，
+// │       等 substituteType 阶段再算（见 resolveType 的 decltype 分支与 Case 1.5）。
 TypePtr SemanticAnalyzer::evaluateDecltype(const ExprPtr& expr, bool paren) {
     if (!expr) {
         Sfinae::fail("decltype: operand is empty");
@@ -657,7 +661,7 @@ TypePtr SemanticAnalyzer::evaluateDecltype(const ExprPtr& expr, bool paren) {
 }
 
 // 值类别判定的简化版：哪些表达式形态是左值。
-// 对照 clang：Expr::isLValue() / getValueKind()。
+// 对照 clang：clang/include/clang/AST/Expr.h:Expr::isLValue / Expr::getValueKind。
 bool SemanticAnalyzer::isLValueExpr(const ExprPtr& expr) const {
     if (!expr) return false;
     // 值类别由节点种类直接决定，一次 switch 把分派表看全（零 RTTI 标签分派）。
@@ -679,7 +683,7 @@ bool SemanticAnalyzer::isLValueExpr(const ExprPtr& expr) const {
 // ─── 静态常量成员：查找 + 折叠（理论见 docs/learn/20）─────────────────────────
 // 【理论】[class.member.lookup] 的名字查找沿【基类链】进行 —— 子类没有该名字就去基类
 //   找，这正是 std::is_range 继承 std::false_type 之后还能访问 ::value 的原因。
-// 对照 clang：LookupQualifiedName + LookupInBases。
+// 对照 clang：clang/lib/Sema/SemaLookup.cpp:LookupQualifiedName + LookupInBases。
 // ┌─ DEMO ─────────────────────────────────────────────────────────────────────
 // │ 源码  is_int<int>::value    // is_int<int> 实例化后继承 std::true_type
 // │ 查找轨迹  第 0 层 is_int_int：无 value ⇒ 第 1 层 std::true_type：命中 value = 1
@@ -959,8 +963,8 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
         //   ② 在该类声明的 typeAliases 里查成员名，命中即递归解析其目标。
         // 用例  struct S { using type = int; };   S::type x; ⇒ x : int
         //       Box<int>::type（Box 内 `using type = T;`）⇒ Box<int> 先实例化 ⇒ int
-        // 对照 clang：Sema::getTypeName → LookupQualifiedName + 别名解糖
-        // （clang/lib/Sema/SemaType.cpp:getTypeName / Type::getUnqualifiedDesugaredType），
+        // 对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::getTypeName → clang/lib/Sema/SemaLookup.cpp:LookupQualifiedName + 别名解糖
+        // （clang/include/clang/AST/TypeBase.h:Type::getUnqualifiedDesugaredType），
         // 本实现省掉了作用域链与 using 引入，只做「单级成员查表」。
         if (type->isNestedName()) {
             // ── 限定者还是模板形参 ⇒ 依赖上下文，不能在这里查 ──
@@ -1066,7 +1070,7 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
             // ── 实参里还有没绑定的模板形参 ⇒ 保持依赖，不实例化 ──
             // ★ 硬去实例化会拿 TemplateParam 当模板实参造出一个名叫 `Box_T` 的【假实例】
             //   （字段类型是 T、方法返回 T），后面全部对不上号，且不报错只是算错。
-            // 对照 clang：Sema::CheckTemplateIdType 里若含依赖实参，建成
+            // 对照 clang：clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateIdType 里若含依赖实参，建成
             //   TemplateSpecializationType（带 sugar 的依赖类型）而非实例化。
             if (containsTemplateParam(type)) {
                 std::cout << std::format(
@@ -1109,7 +1113,8 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
                             //      差别只在 templateArgs 空不空），只查名字就会被当成
                             //      `Box` 放行、`<int>` 静默蒸发 —— 而它产物与 `Wrap<Box,int>`
                             //      【逐字节相同】，连"算错"这个症状都没有。
-                            //   两者都在此响亮报错。对照 clang：err_template_template_parm_mismatch
+                            //   两者都在此响亮报错。对照 clang：
+                            //   clang/include/clang/Basic/DiagnosticSemaKinds.td:err_template_arg_template_params_mismatch
                             //   / "template template argument must be a class template or
                             //   type alias template"。
                             const std::string& tn = arg.type ? arg.type->name : std::string();
@@ -1140,6 +1145,7 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
                         // 查不到 ⇒ 维持原路径（resolveType 响亮报
                         // unknown type name，docs/learn/22 ⑦）。
                         // 对照 clang：Parser 靠 Sema::isTypeName 在解析期
+                        //   ⚠ 本地 clang 语料未收录该符号（无 SemaType.h），未能 grep 验证。
                         // 消歧；本实现推迟到语义期用「形参 kind + 常量表」
                         // 近似（[stmt.ambig] 的同款"解析期没符号表"边界）。
                         if (fp && fp->kind == TemplateParamKind::NonType
@@ -1165,7 +1171,8 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
                     }
                 }
                 // 模板 id 尚未实例化 ⇒ 当场实例化，拿到具体的类类型
-                return getOrInstantiateClass(tid, SourceLocation{}); //murongding** 只有模板类型的 在这里进行实例化
+                // （只有"带实参的类模板 id"走到这里；别名模板走另一条分支）
+                return getOrInstantiateClass(tid, SourceLocation{});
             }
         } else if (m_classTemplates.count(type->name) ||
                    m_aliasTemplates.count(type->name)) {
@@ -1273,6 +1280,7 @@ static bool typeCompatible(const TypePtr& expected, const TypePtr& got) {
 // 为什么不做 [overload.icp] 的转换等级排序：本项目不做用户定义转换，而内建转换之间
 //   "哪个更优"要比较转换等级（整型提升 vs 整型转换）—— 那是主线 D 的活。
 // 对照 clang：Sema::BuildOverloadCandidateSet 收候选 → 逐个算隐式转换序列 → 比等级。
+//   ⚠ 同上：本地 clang 语料缺 clang/include/clang/Sema/SemaOverload.h，该符号未能 grep 验证。
 static FuncDeclPtr pickBestByArgs(const std::vector<FuncDeclPtr>& candidates,
                                   const std::vector<TypePtr>& argTypes,
                                   const std::string& what) {
@@ -1813,7 +1821,8 @@ void SemanticAnalyzer::processTypeAliasDecl(TypeAliasDeclPtr decl) {
     //   （合法程序被拒，目标该是实例 Box_int）。这里过一遍 resolveType，
     //   模板 id 在此实例化、别名模板在此解糖，之后所有使用点拿到的都是成品类型。
     // 对照 clang：TypedefNameDecl 的底层类型在声明点就完成
-    //   Sema::getTypeName / BuildTypedefNameExpr 的决议。
+    //   clang/lib/Sema/SemaDecl.cpp:Sema::getTypeName / BuildTypedefNameExpr 的决议。
+    //   ⚠ BuildTypedefNameExpr 在本地 clang 语料里 grep 不到（未收录），未能验证。
     TypePtr resolved = resolveType(decl->underlyingType);
 
     // ── 命名空间成员【名字前缀化】（与类/函数同约定，processNamespaceDecl）──
@@ -1834,26 +1843,30 @@ void SemanticAnalyzer::processTypeAliasDecl(TypeAliasDeclPtr decl) {
 }
 
 // ─── 成员方法符号名的【单点】判据（BUGS.md B20）──────────────────────────────
-// 谁在用：① 定义点 SemanticAnalyzer::registerFunction（Pass 2 给 decl->mangledName 定名）
-//         ② vtable 条目点 processClassDecl（Pass 1 写 entry.mangledName，三个落点）
-// 为什么必须单点：这两处的产物最后会被**链接器按裸字符串比对**（vtable 槽 `.quad X`
-//   必须命中某个 `.globl X`），任何一边的规则漂一点就是 undefined reference。
-//   B10 已经栽过一次（调用点硬拼 vs 定义点加后缀），B20 是同一个坑的第二次现形
-//   —— 承项目铁律「同一判据不许写两份」。
-// 规则（与 registerFunction 逐字相同，勿改）：
-//   析构            → "<类名>_dtor"（不带参数个数后缀）
-//   普通/构造/方法  → "<类名>_<方法名>"，若 (同类中已有先注册的同名方法) 或 (带形参)
+// ① 定位：谁在用 —— ① 定义点 SemanticAnalyzer::registerFunction（Pass 2 给
+//    decl->mangledName 定名）② vtable 条目点 processClassDecl（Pass 1 写
+//    entry.mangledName，三个落点）。两边共用 memberMethodSymbolName 这一个函数。
+// ② 锚点：clang/include/clang/AST/Mangle.h:AbstractManglingParser::mangleName — clang 靠
+//    ManglingContext 统一记账，本项目用"名字 + 形参类型链"这条更土的规则。
+// ③ 动机：两处的产物最后会被**链接器按裸字符串比对**（vtable 槽 `.quad X` 必须命中
+//    某个 `.globl X`），任何一边漂一点就是 undefined reference。B10 已经栽过一次
+//    （调用点硬拼 vs 定义点加后缀），B20 是同一个坑的第二次现形 —— 承项目铁律
+//    「同一判据不许写两份」。
+// ④ 规则（与 registerFunction 逐字相同，勿改）：
+//    析构            → "<类名>_dtor"（不带参数个数后缀）
+//    普通/构造/方法  → "<类名>_<方法名>"，若 (同类中已有先注册的同名方法) 或 (带形参)
 //                     再追加 "_<形参个数>"
-// ⚠ earlierSameNameCount 是**声明顺序敏感**的（registerFunction 扫 m_functions 只能看见
-//   已注册的前者），故调用方必须传"排在当前方法之前的同名方法数"，不能传"同类同名总数"
-//   —— 否则 `struct X { virtual int f(); virtual int f(int); }` 里 f() 会被定成 X_f_0，
-//   而定义点是 X_f（调用点也按 X_f 拼），又是一个链接期才炸的错配。
+//    ⚠ earlierSameNameCount 是**声明顺序敏感**的（registerFunction 扫 m_functions 只能
+//    看见已注册的前者），故调用方必须传"排在当前方法之前的同名方法数"，不能传
+//    "同类同名总数" —— 否则 `struct X { virtual int f(); virtual int f(int); }` 里 f()
+//    会被定成 X_f_0，而定义点是 X_f，又是一个链接期才炸的错配。
 // ┌─ DEMO ─────────────────────────────────────────────────────────────────────
 // │ 输入  owner="Dog", name="speak", paramCount=0, earlier=0
 // │ 输出  "Dog_speak"          （vtable 槽 .quad Dog_speak ↔ 定义点 .globl Dog_speak ✓）
 // │ 输入  owner="A", name="f", paramCount=1, earlier=0
 // │ 输出  "A_f_1"              （旧实现两处各写"类名_方法名" ⇒ 槽里是 A_f、定义是 A_f_1 ⇒ ✗）
 // └────────────────────────────────────────────────────────────────────────────
+
 // 形参类型链：逐位类型的可读名拼起来（"int" / "S_int" / "int_S"），零参为 ""。
 // ★ 它是"凭什么把两个同名的东西区分开"的**共同材料**：符号名、vtable 槽位身份都用它，
 //   所以必须出自同一处（sanitizeSymbolChars 也是全项目唯一那个实例名清洗器）。
@@ -1902,33 +1915,29 @@ static std::string memberMethodSymbolName(const std::string& owner,
 }
 
 // ═══ 类声明处理（理论见 docs/learn/17、19）════════════════════════════════════
-// 做什么：建类类型 → 合并基类字段/vtable（继承）→ 收集自身字段/方法并建 vtable →
-//   计算内存布局 → 注入 _vptr/RTTI → 注册进全局符号表。
-// 理论依据：[class.derived] 单继承 public 布局 —— 基类子对象位于派生类成员之前；
-//   [class.virtual] 虚函数"同槽位覆盖" —— override 替换基类同名虚函数的 vtable 槽位
-//   而不是新增，这是动态分派的根基。
-// demo: Animal{virtual speak} ⇒ vtable[0: Animal_speak]；Dog : Animal 覆写 speak ⇒
-//   先拷贝基类表，再发现同名 override ⇒ 槽 0 改写为 Dog_speak（索引不变！）
-//     Dog 对象内存            Dog 的 vtable
-//       +0: _vptr ──────────→ [0] = &Dog_speak
-//       +8: 自身字段 ……       [-1]= &type_info(_ZTI3Dog)（vtable 前一槽）
-//   运行期 Animal* p = new Dog; p->speak() ⇒ callq *(%rdi) 按索引 0 间接跳转 ⇒ Dog_speak
-// ┌─ DEMO ─────────────────────────────────────────────────────────────────────
+// ① 定位：建类类型 → 合并基类字段/vtable → 计算布局 → 注入 _vptr/RTTI → 注册符号表。
+// ② 锚点：clang/lib/AST/RecordLayoutBuilder.cpp:RecordLayoutBuilder —— clang 的
+//    布局在 AST 层算；minicc 的对应物是本文件 computeClassLayout + processClassDecl。
+// ③ 动机：布局与 vtable 必须【同源同刻】算出来 —— 槽位索引、字段偏移、thunkAdjust
+//    三者互相咬合；错位 ⇒ 虚调用跳飞（BUGS.md B11 的真 miscompile）。
+// ④ 理论依据：[class.derived] 单继承 public 布局 —— 基类子对象位于派生类成员之前；
+//    [class.virtual] 虚函数"同槽位覆盖" —— override 替换基类同名虚函数的槽位而不是
+//    新增，这是动态分派的根基。[class.mi] Itanium：第一个【多态】基类当 primary
+//    （共享 _vptr、字段不加前缀），其余当 secondary（字段加 "Base." 前缀、独立次表、
+//    覆写时设 thunkAdjust）；非多态基类字段也加前缀避免同名冲突。
+//    子对象偏移不在这里算 —— 循环后由 [relocate] 阶段按 Itanium 规则统一摆放（"边扫边放"会让 A.x 与 _vptr 重叠）。
+// ┌─ DEMO（真实日志节选）──────────────────────────────────────────────────────
 // │ 源码  struct Base { int b; virtual int kind(); virtual ~Base(); };
 // │       struct Derived : public Base { int d; int kind(); };
 // │ 日志  [register] class 'Base'    field: b : int    method: kind() → int [virtual]
 // │         ══ Memory Layout of 'Base' ══    Total size: 16 bytes
 // │         +0: _vptr (8 bytes, hidden) → vtable     +8: b : int (4 bytes)
-// │         vtable: 2 entries, RTTI: _ZTI4Base
 // │       [register] class 'Derived' : public Base
 // │         ↳ [primary] 'Base': 1 fields, 2 vtable entries      ← 主基类整体合并
 // │         ══ Memory Layout of 'Derived' ══   Total size: 24 bytes  +0: _vptr +8: b +16: d
 // │ 输出  ClassType（classLayout：字段偏移 / vtableEntries / rttiMangledName）
-// │ 继承模型  [class.mi] Itanium：第一个【多态】基类当 primary（共享 _vptr、字段不加
-// │       前缀），其余多态基类当 secondary（字段加 "Base." 前缀、独立次表、覆写时设
-// │       thunkAdjust）。非多态基类字段也加前缀避免同名冲突。
-// │ 子对象偏移不在这里算 —— 循环后由 [relocate] 阶段按 Itanium 规则统一摆放
-// │       （因为"边扫边放"会让 A.x 与 _vptr 重叠）。
+// │ 覆盖例  Animal{virtual speak} ⇒ vtable[0]=Animal_speak；Dog 覆写 speak ⇒ 槽 0
+// │       改写为 Dog_speak（索引不变！）；运行期 callq *(%rdi) 按索引 0 跳 ⇒ Dog_speak
 // └────────────────────────────────────────────────────────────────────────────
 void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
     // ── 前置声明（`struct A;`）：只登记名字，不生成任何成员/布局/符号 ──
@@ -2151,7 +2160,9 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
                     if (m->isVirtual) { selfPoly = true; break; }
                 }
             }
-            bool noPrimary = (!anyPoly && selfPoly); // mrd 标识 没有主基类，但是存在 多态
+            // noPrimary：没有【动态】主基类可摆（anyPoly 假）而本类自身多态
+            //   ⇒ vptr 自己占 offset 0、基类子对象从 8 起（BUGS.md B11 的真 miscompile）
+            bool noPrimary = (!anyPoly && selfPoly);
 
             for (size_t i = 0; i < classType->classLayout.bases.size(); ++i)
                 classType->classLayout.bases[i].isPrimary = (!noPrimary && i == primaryIdx);
@@ -2161,7 +2172,7 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
             // ★ 不能用"全非多态 ⇒ place=0"的写法：那会让第二个基类被 alignTo(0,8)=0 放到
             //   offset 0，与首个基类字段重叠（x@0 与 y@0 互踩）。
             uint32_t place = noPrimary ? 8u : 0u;
-            if (!noPrimary) { // false 存在主基类或者存在 虚函数
+            if (!noPrimary) {
                 auto pIt = m_classTypes.find(
                     classType->classLayout.bases[primaryIdx].baseClassName);
                 if (pIt != m_classTypes.end())
@@ -2221,7 +2232,7 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
         // 全空，totalSize=0），不换成注册版本会导致
         //   ① sizeInBytes()=0 → 字段占 0 字节，后续字段重叠、malloc 分配不足；
         //   ② inferMember 拿空布局查 o->f.a → "No member 'a'"。
-        // 对照 clang（RecordLayoutBuilder.cpp:1850 LayoutField）：成员布局信息经
+        // 对照 clang（clang/lib/AST/RecordLayoutBuilder.cpp:RecordLayoutBuilder.cpp:1850 LayoutField）：成员布局信息经
         //   Context.getTypeInfoInChars(D->getType()) 一次取回 TI.Width/TI.Align，
         //   类型永远是 complete 的注册版（ASTContext::getASTRecordLayout 按需递归构建+缓存）。
         field.type = resolveType(field.type);
@@ -2695,9 +2706,9 @@ uint32_t SemanticAnalyzer::alignTo(uint32_t offset, uint32_t alignment) {
     return (offset + alignment - 1) / alignment * alignment;
 }
 
-// 类型的对齐要求（字节）。对照 clang：ASTContext::getTypeInfoInChars 对 record 返回其
+// 类型的对齐要求（字节）。对照 clang：clang/lib/AST/ASTContext.cpp:ASTContext::getTypeInfoInChars 对 record 返回其
 //   ASTRecordLayout 的 Alignment（= 成员 align 的递归最大值，见
-//   RecordLayoutBuilder.cpp UpdateAlignment），对标量返回 TargetInfo ABI 表值。
+//   clang/lib/AST/RecordLayoutBuilder.cpp:RecordLayoutBuilder.cpp UpdateAlignment），对标量返回 TargetInfo ABI 表值。
 // 教学简化：标量 = min(size,8)（int→4 double→8 bool→1 指针/引用→8，与 ABI 表一致）；
 //   类类型 = 各成员 alignOf 递归 max（封顶 8）；无成员的空类 → align 1。
 // ★ 绝不能拿 sizeInBytes 当 align：Five{bool×5} size=5 align=1，Five{int,int} size=8 align=4。
@@ -2806,18 +2817,17 @@ void SemanticAnalyzer::registerFunction(FuncDeclPtr decl) {
 }
 
 // ─── 内建外部函数原型注册（P4，理论见 docs/learn/08）──────────────────────────
-// 给 libc 的四个内存管理函数登记"语义外壳"：名字、形参表、返回类型，body 一律 nullptr。
-// 三处登记缺一不可：① m_functionMap（调用点按裸名命中，与自由函数同一条路径）
-//   ② m_functions（CodeGen 的 generate() 遍历它，但 `if (func->body)` 守卫自动跳过发射
-//   ⇒ .s 里不会出现这些函数的汇编体）③ 符号表（kind=Function，处处可见）。
-// 用例  int* p = malloc(8); ⇒ 语义查名 + 实参个数匹配 ⇒ callq malloc ⇒ 链接期 libc 兑现
-// （`.s` 里只有 callq，没有 malloc 的函数体）
-// 签名取舍（教学级简化）：minicc 无 void/size_t 语义（只有 int 与指针），故一律 int*
-//   表示"一块内存"、int 表示"字节数"：
-//     malloc(int) → int* ｜ free(int*) → void
-//     memcpy(int*,int*,int) → int* ｜ realloc(int*,int) → int*
-// 对照 clang：内建也走"先有声明再使用"（Builtins::Info 类型串 → ASTContext::getBuiltinType）；
-//   区别只在真 clang 多数内建会在 IR 层换成 llvm.memcpy 等 intrinsic，本项目直接调 libc 符号。
+// ① 定位：给 libc 四个内存管理函数登记"语义外壳"（名字/形参表/返回类型，body=nullptr）；
+//    std 垫片（false_type / true_type / void_t）同理。
+// ② 锚点：clang/include/clang/AST/ASTContext.h:ASTContext::getIntTypeForBitwidth
+//    —— clang 的内建也是"先有声明再使用"（Builtins::Info 的类型串 → 该 API 造类型）；
+//    区别只在真 clang 多数内建会在 IR 层换成 llvm.memcpy 等 intrinsic，本项目直调 libc。
+// ③ 动机：三处登记缺一不可 —— m_functionMap（调用点按裸名命中）/ m_functions
+//    （CodeGen 遍历它，但 `if (func->body)` 守卫跳过发射 ⇒ .s 里只有 callq，没有
+//    malloc 的函数体）/ 符号表（kind=Function，处处可见）。签名一律 int* 表示
+//    "一块内存"、int 表示"字节数"（教学级简化：无 void/size_t 语义）。
+//    不走头文件是因为真 libc 头（<stdlib.h>）需要完整 C 语法（void/size_t/函数指针/typedef），
+//    本项目类型系统只有 int 与指针 ⇒ 以"内建注入"直接登记，绕开预处理与解析两道坎。
 // ┌─ DEMO ─────────────────────────────────────────────────────────────────────
 // │ 日志  [builtin] ✔ registered libc prototypes: malloc(int)→int*, free(int*),
 // │         memcpy(int*,int*,int)→int*, realloc(int*,int)→int*    [P4: no body]
@@ -2826,9 +2836,6 @@ void SemanticAnalyzer::registerFunction(FuncDeclPtr decl) {
 // │ 源码  int* p = malloc(8);            ← 语义认识名字与参数个数，CodeGen 发 callq
 // │       bool v = is_int<int>::value;   ← 折叠时沿继承链查到 std::true_type::value
 // │ 输出  原型进 m_functionMap / m_functions / 符号表，但 body = nullptr
-// │ 为什么不写进头文件  真 libc 头（<stdlib.h>）需要完整的 C 语法（void/size_t/函数
-// │       指针/typedef），本项目类型系统只有 int 与指针 ⇒ 把等价原型以"内建注入"的
-// │       方式直接登记，绕开预处理与解析两道坎。std 垫片同理。
 // └────────────────────────────────────────────────────────────────────────────
 void SemanticAnalyzer::registerBuiltins() {
     // 登记一个原型：构造无 body 的 FunctionDecl 并写入三处
@@ -2878,7 +2885,7 @@ void SemanticAnalyzer::registerBuiltins() {
     // 用例  std::false_type{value=0} / std::true_type{value=1}（独立类，真 C++ 里是
     //       integral_constant<bool,v> 的别名）；std::void_t<...> 不走这里 —— 别名模板
     //       无法表达，改在 resolveType / TemplateDeducer::reducePattern 里按名识别 ⇒ void。
-    // 对照 clang：同样有内建（Sema::Initialize + ASTContext 里预置的 __builtin_* 声明）。
+    // 对照 clang：同样有内建（clang/lib/Sema/Sema.cpp:Sema::Initialize + ASTContext 里预置的 __builtin_* 声明）。
     // ─────────────────────────────────────────────────────────────────────────
     auto injectTraitClass = [this](const std::string& name, int64_t value,
                                    const std::string& base = "") {
@@ -3184,29 +3191,30 @@ void SemanticAnalyzer::visit(BlockStmt& block) {
 }
 
 // ═══ 变量声明 —— auto 推导的核心战场 ═════════════════════════════════════════
-// 遇到 `auto x = expr;`：declaredType 是 Auto 占位符 → 推导 initializer 的类型 → 把
-// declaredType **永久替换**为真实类型 → auto 从此在 AST 中彻底消失（只是语法糖）。
-// 非 auto 但有初值时做类型检查：`int x = y;`（y:int&）⇒ typeCompatible 剥引用放行
-// （[conv.lval]）；`int x = 3.14;` ⇒ 无兼容规则 ⇒ 报 Type mismatch。
-// ┌─ DEMO ─────────────────────────────────────────────────────────────────────
+// ① 定位：遇到 `auto x = expr;` ⇒ declaredType 是 Auto 占位符 → 推导 initializer
+//    的类型 → 把 declaredType **永久替换**为真实类型 ⇒ auto 从此在 AST 里彻底消失。
+// ② 锚点：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::SubstAutoType —— clang 同为
+//    "占位符 + 回填"；minicc 把五步压在一个 visit(VarDeclStmt) 里（无 ActOn* 中间层）。
+// ③ 动机：auto 是【语法糖】，进入 AST 就必须被替换干净 —— 留着占位符会让下游
+//    （布局 / mangling / 符号表）各写一份"猜 auto 是啥"的分支，必错。
+// ④ 五步：① resolveType(声明类型) ② foldStaticConst(初始化式) ③ inferType(初始化式)
+//    ④ auto 替换真实类型 / 类型检查 ⑤ 分配栈槽 + 写符号表。
+//    ★ 为什么②必须在③之前：折叠后得到的是普通字面量，后续类型检查与 CodeGen 都按
+//    常量走，不再涉及"字段偏移"那套运行期机制（静态成员不占对象内存）。
+//    类型检查：equals 全等 → 通过；typeCompatible（剥引用 + int→double）→ [conv]；
+//    双指针 → [poly]；其余 → Type mismatch。
+// ┌─ DEMO（真实日志节选）──────────────────────────────────────────────────────
 // │ 源码  int x = 42;    auto d = 5;    bool v = is_int<int>::value;
-// │       Vec& r = v;    Base* pb = &dr;    Undeclared q;
 // │ 日志  [var decl] x : int =   [infer] IntLiteral(42) → int
 // │         [symbol] ✚ x : int    stack@-8   ← 加入符号表
 // │       [var decl] d : auto =   [infer] IntLiteral(5) → int
 // │         [auto] ★ d : auto ⟹ int   ← auto 被永久替换!
 // │       [static] ★ 静态常量命中：std::true_type::value = 1 : bool（沿继承链第 1 层）
-// │       [static] 折叠为字面量：is_int_int::value(is_int) → 1
 // │       [var decl] r : Vec& =   [conv] r : Vec ⟶ Vec& (implicit: ref-strip / promotion)
 // │       [var decl] pb : Base* =   [infer] &Derived → Derived*
 // │         [poly] pb : Derived* → Base* (polymorphic)     ← 派生类指针隐式转基类
-// │ 五步  ① resolveType(声明类型)  ② foldStaticConst(初始化式)  ③ inferType(初始化式)
-// │       ④ auto 替换真实类型 / 类型检查  ⑤ 分配栈槽 + 写符号表
-// │ ★ 为什么②必须在③之前：折叠后得到的是普通字面量，后续类型检查与 CodeGen 都按常量走，
-// │       不再涉及"字段偏移"那套运行期机制（静态成员不占对象内存）。
-// │ 类型检查的三种放行  equals 全等 → 通过；typeCompatible（剥引用 + int→double）→ 打
-// │       [conv] 日志；双指针 → 打 [poly] 日志；其余 → Type mismatch 报错。
 // └────────────────────────────────────────────────────────────────────────────
+
 // ── auto 占位符：去壳判据 ─────────────────────────────────────────────────
 // 壳 ⇒ 下钻方向（每一层都只是"包着 auto"，不改变 auto 的身份）：
 //   Const(Auto)        ⇒ innerType
@@ -3402,7 +3410,7 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
         // 选定口径与成员方法调用**同源**（pickBestByArgs）：先推实参类型，再收候选、
         //   按类型择优。此前这里只数个数 ⇒ `D(int)` / `D(S)` 里 `D d2(s);` 会静默撞上
         //   声明序里的第一个构造函数（B22 第三处现场：编译全绿，运行结果错）。
-        // 对照 clang：Sema::BuildCXXConstructExpr 跑完整重载决议，CodeGen 只发它选中的符号。
+        // 对照 clang：clang/lib/Sema/SemaDeclCXX.cpp:Sema::BuildCXXConstructExpr 跑完整重载决议，CodeGen 只发它选中的符号。
         m_inferDepth++;
         std::vector<TypePtr> ctorArgTypes;
         ctorArgTypes.reserve(decl.ctorArgs.size());
@@ -3716,7 +3724,7 @@ void SemanticAnalyzer::visit(AssignStmt& stmt) {
 // 推导本身会触发符号决议与类型检查。
 // ─── 空语句 / 无声明符的声明 ────────────────────────────────────────────────
 // `;` 与 `A<int,int>;`：无事可做（不携带类型 ⇒ 不 resolveType ⇒ 不实例化模板，
-//   与 clang 的 NullStmt 同形）。★ B37：裸类型名声明 `S;` 在这里裁决可见性。
+//   与 clang 的 clang/include/clang/Basic/StmtNodes.td:NullStmt 同形）。★ B37：裸类型名声明 `S;` 在这里裁决可见性。
 void SemanticAnalyzer::visit(EmptyStmt& stmt) {
     if (stmt.typeName.empty()) return;
 
@@ -4174,7 +4182,8 @@ TypePtr SemanticAnalyzer::inferUnary(UnaryExpr& expr) {
     // 结果类型 = 指针的 pointee（被指类型），且结果是【左值】—— 故 `*p = v` 合法。
     // 操作数必须是指针：C++ 里没有指针不做隐式转换（C 也没有），非指针即错误。
     // demo: int a; int* p = &a;  *p → int（左值）
-    // 对照 clang：Sema::CheckIndirectionOperand（SemaExpr.cpp）
+    // 对照 clang：clang/lib/Sema/SemaExpr.cpp:CheckIndirectionOperand
+    //   （文件级 static 函数，不是 Sema 成员）
     if (expr.op == UnaryOp::Deref) {
         if (!operandType) {
             error("Cannot dereference a null-typed operand", expr.location);
@@ -4217,34 +4226,29 @@ TypePtr SemanticAnalyzer::inferUnary(UnaryExpr& expr) {
 }
 
 // ─── 函数调用推导（重载决议 [over.match] 三阶段，理论见 docs/learn/06）────────
-//   ① 候选：同名普通函数（m_functionMap）+ 同名函数模板候选集（m_functionTemplateCandidates）
-//   ② 可行：参数个数匹配；模板须推导成功（resolveTemplateCall）
-//   ③ 最优：非模板优先于模板（[over.match.best] 规则简化）；模板之间按偏序取最特化（S6）
-// demo: `twice(42)` 同时存在 twice(int) 与 template<T> T twice(T) ⇒ 命中 twice(int) 直接
-//   返回 int（非模板胜出，模板候选根本不参与）；若只有模板 ⇒ 推导 T:=int → 实例化
-//   _Z5twiceIiE → 返回 int。
-// 方法调用（callee 是 MemberExpr）先走【类作用域】查找（分支 ①），查不到才落回普通函数
-//   路径；并置 isMethodCall 标记供 CodeGen 处理隐式 this。
-// ┌─ DEMO ─────────────────────────────────────────────────────────────────────
-// │ 源码  int sum = add(x, y);   int v = bi.get();   int t = twice(x);   int e = probe(r);
+// ① 定位：调用点返回【被调函数的类型】—— 下游（auto 推导 / 赋值检查 / CodeGen 的 callq 目标）全吃它，选错候选不报错、只让整条表达式静默算错。
+// ② 锚点：clang/lib/Sema/SemaOverload.cpp:Sema::AddTemplateOverloadCandidate（模板候选进候选集）
+//    + clang/lib/Sema/SemaExpr.cpp:Sema::ActOnCallExpr；minicc 把三阶段压在一个 inferCall 里。
+// ③ 三阶段（[over.match]）：① 候选 = 同名普通函数（m_functionMap）+ 同名函数模板候选集
+//    ② 可行 = 参数个数匹配、模板须推导成功（resolveTemplateCall）
+//    ③ 最优 = 非模板优先于模板（[over.match.best] 规则简化）；模板之间按偏序取最特化（S6）
+// ④ 四级瀑布（先命中先返回，不是"查到就返回 / 查不到就报错"）：
+//    ⓪ std::declval<T>() 内建 → T&&，完全不查表
+//    ① 成员方法：按"对象类 → 方法表"查，BFS 含所有基类
+//    ② 普通函数 + ADL 候选合并：名字 + 参数个数命中 ∧ 精确匹配者优先
+//    ③ 函数模板：resolveTemplateCall 推导 + 偏序 + 实例化
+//    ④ 兜底：inferType(callee) → 名字根本不存在时在这里报 Undefined variable
+//    ★ 为什么①必须先于②：m_functionMap 以裸名作键，Box_int::get 与 Box_double::get 会互相覆盖，直接查名字表会随机命中别的类的方法。
+//    报错只有两处：③ 的 "no matching function" 与 ④ 的 Undefined variable（若在 Sfinae::attempt 内则吸收成"该候选不可行"）。
+// ┌─ DEMO（真实日志节选）──────────────────────────────────────────────────────
+// │ 源码  int sum = add(x, y);   int v = bi.get();   int t = twice(x);
 // │ 日志  → add   ：[call] add(2 args) → int    [symbol resolved, non-template preferred]
 // │       → bi.get：[member] Box_int.get() → int    (method)
-// │                [call] Box_int.get(0 args) → int    [class-scoped member call]
 // │       → twice ：[call] twice — 1 function template candidate(s), overload resolution begins
 // │                [deduction]   P=T    A=int    ⇒ T := int
 // │                [call] twice → _Z5twiceIiE (template resolved) → int
-// │       → probe ：[deduction]   P=T    A=Vec&   ⇒ 值传递调整 A'=Vec ⇒ T := Vec
 // │ 输出  被调函数的返回类型
-// │ 四级瀑布（先命中先返回 —— 不是"查到就返回 / 查不到就报错"）：
-// │   ⓪ std::declval<T>() 内建 → T&&，完全不查表
-// │   ① 成员方法：按"对象类 → 方法表"查，BFS 含所有基类
-// │   ② 普通函数 + ADL 候选合并：名字 + 参数个数命中 ∧ 精确匹配者优先
-// │   ③ 函数模板：resolveTemplateCall 推导 + 偏序 + 实例化
-// │   ④ 兜底：inferType(callee) → 名字根本不存在时在这里报 Undefined variable
-// │ ★ 为什么①必须先于②：m_functionMap 以裸名作键，Box_int::get 与 Box_double::get 会
-// │   互相覆盖，直接查名字表会随机命中别的类的方法。
-// │ 报错只有两处：③ 的 "no matching function"（所有候选都推导失败）与 ④ 的
-// │   Undefined variable；若调用点处在 Sfinae::attempt 内，异常被吸收成"该候选不可行"。
+// │ demo  `twice(42)` 同存 twice(int) 与 template<T> T twice(T) ⇒ 命中 twice(int)（非模板胜出，模板候选根本不参与）；若只有模板 ⇒ 推导 T:=int → 实例化 _Z5twiceIiE。
 // └────────────────────────────────────────────────────────────────────────────
 TypePtr SemanticAnalyzer::inferCall(CallExpr& expr) {
     // ── 确定 callee 名字与形态 ──
@@ -4264,7 +4268,7 @@ TypePtr SemanticAnalyzer::inferCall(CallExpr& expr) {
         // ⚠ 只对 MemberExpr 补推导 —— 普通函数/模板的 VarExpr callee 若在此推导，会因
         //   符号表查无此"变量"而误报 Undefined variable。
         m_inferDepth++;
-        inferType(mem); // mrd** 对于成员类型 要继续往下推导
+        inferType(mem);
         m_inferDepth--;
     }
 
@@ -4275,7 +4279,7 @@ TypePtr SemanticAnalyzer::inferCall(CallExpr& expr) {
     //   add_rvalue_reference_t，故与 std::void_t 同策：语义阶段按名识别，直接给出结果类型。
     // 用例  declval<Vec>().begin() ⇒ Vec&&（"假设有 Vec 对象可被引用"）⇒ 才能在 decltype 里
     //       查 Vec 的成员；换成 declval<int>() ⇒ int&& ⇒ 查 begin 失败 ⇒ SFINAE 落选
-    // 对照 clang：走正常的函数模板实例化（Sema::BuildDeclRefExpr + 推导），只是函数体永远
+    // 对照 clang：走正常的函数模板实例化（clang/lib/Sema/SemaExpr.cpp:Sema::BuildDeclRefExpr + 推导），只是函数体永远
     //   为空；本项目跳过实例化直接给类型 —— 要的只是类型，符号永不落地。
     // ⚠ 已知边界：不检查"只在未求值上下文出现"，`int x = declval<int>();` 也接受。
     if (calleeVar && (funcName == "std::declval" || funcName == "declval")) {
@@ -4415,7 +4419,7 @@ TypePtr SemanticAnalyzer::inferCall(CallExpr& expr) {
                     // 此前这里只是"继续 BFS / 落进普通名字查找"，于是错个数、错类型的调用
                     // 被静默放行（更早的写法里 b 形态甚至一路活到运行期）。
                     //
-                    // 诊断分两类（对照 clang：Sema::CheckFunctionCall 在调用点区分）：
+                    // 诊断分两类（对照 clang：clang/lib/Sema/SemaChecking.cpp:Sema::CheckFunctionCall 在调用点区分）：
                     //   个数对不上     ⇒ too few / too many arguments（[expr.call]/1）
                     //   个数对得上但类型不可行 ⇒ no matching member function（[overload.match]/1）
                     // 故先收齐"这个名字在本类声明了哪些参数个数"，得出区间 [lo, hi]，
@@ -4505,7 +4509,8 @@ TypePtr SemanticAnalyzer::inferCall(CallExpr& expr) {
     // 返回实例类型；CodeGen emitCall 据此走"物化临时对象"路径（表达式的值=对象地址）。
     // 此前没有这支：一路漏到兜底被 inferVar 以 "Undefined variable 'Box'" 拒掉
     // —— Box 明明存在（是类模板），报错完全指错方向。
-    // 对照 clang：ParseCXXFunctionalCastExpression → Sema::BuildCXXConstructExpr
+    // 对照 clang：ParseCXXFunctionalCastExpression → clang/lib/Sema/SemaDeclCXX.cpp:Sema::BuildCXXConstructExpr
+    //   ⚠ ParseCXXFunctionalCastExpression 在本地 clang 语料里 grep 不到（未收录），未能验证。
     //   （初始化式语境走 CopyInitialization，表达式语境走 explicit 构造）。
     if (calleeVar) {
         std::string tplName = funcName;
@@ -4847,46 +4852,30 @@ TypePtr SemanticAnalyzer::resolveTemplateCall(
     return instance->returnType;
 }
 
-// ─── 实例化函数模板（S5）：带缓存，避免同一 <实参> 重复实例化 ─────────────────
-// [temp.inst]：同一模板 + 同一实参列表，全局只实例化一次。缓存键 = mangled 名。
-// 用例  twice<int> ⇒ _Z5twiceIiE（_Z + 名字长度 5 + twice + I + i(int 的编码) + E）；
-//       再调同一 <int> ⇒ 日志 "[instantiate] cache hit: _Z5twiceIiE (skip re-instantiation)"
-// 新实例诞生后的三步：① m_functionMap[mangled] = 实例（后续调用直接命中）
-//   ② push 进 m_functions（CodeGen 按序输出汇编）③ analyzeFunctionBody(实例)：用具体
-//   类型检查函数体 = 两阶段查找 [temp.names] 的第二阶段（第一阶段 = processTemplateDecl
-//   只注册蓝图不查体）。
-// ─── P3：类模板按需实例化（[temp.inst] 隐式实例化点）──────────────────────────
-// 触发时机：类型位置（变量声明/形参/返回类型）出现 Box<int> 这类模板 id，resolveType
-//   发现"带实参的类名命中类模板蓝图"即调入本函数。三步走（对照 clang：Sema::ActOnTag
-//   → InstantiateClass → 成员延迟分析）：
-//   ① instantiate() 深拷贝蓝图 + 结构化替换 → 实例 ClassDecl（如 Box_int）
-//   ② processClassDecl 实例类按普通类走完整注册（构造/析构合成、布局、vtable/RTTI、符号表）
-//   ③ 实例方法注册 + 函数体分析 —— 即两阶段查找的第二阶段
-// ★ 缓存先行：先写缓存再析方法体，方法体若再引用同一实例（递归/互用）直接命中。
-// ─── 模板实参校验（[temp.arg]）：类型形参与非类型形参（NTTP）的形态把关 ────────
-// 逐位比对「结构化形参表 templateParams（带 kind）」与「实际实参表」，三道检查：
-//   ① 个数 [temp.arg.explicit]/1：多于形参数 ⇒ 报错；少于则差额必须都有默认实参
-//   ② 形态：类型形参（typename/class T）收【类型】实参，非类型形参（int N）收【值】实参
-//      —— NTTP 与普通模板参数的分水岭（本条主线的核心）③ 值类型：NTTP 形参声明的类型
-//      必须受支持（本项目只支持 int）
-// ★ 必须用 templateParams 而不是 typeParams：后者只有名字、kind 已丢，
-//   `template<class T, int N>` 会数出 2 个"类型"形参，对 Buf<int,4> 这种"1 类型 + 1 值"
-//   的实参表必然错位。
-// 对照 clang：Sema::CheckTemplateArgumentList（clang/Sema/SemaTemplate.cpp）—— 真实现还会
-//   做隐式转换（Buf<4> 的 4 → unsigned/枚举）、默认模板实参填充、参数包匹配；本项目只留
-//   ①②③三条主干，够讲清"类型 vs 值"的判定。逐位判定结果见下方 DEMO 的真实日志。
-//   ④ 模板模板位：实参模板的形参表要与内层表【逐位签名匹配】（[temp.arg.template]/2，见 ②-c）
-// ┌─ DEMO（真实日志）──────────────────────────────────────────────────────────
-// │ 源码  Box<int> bi;      Box<int*> bp;      Buf<4> b;
-// │ 日志  [sema:targ]   ✓ param 1: 'T' (type) ← int
-// │       [sema:targ] ✓ template arguments OK: Box<int>
-// │ 反例  Buf<int> → ②-b 命中：
-// │       [ERROR] template argument 1 for 'Buf' ('N') must be a non-type argument
-// │               of type 'int', but 'int' is a type
-// │ 反例  Wrap2<Box, int>（形参位要 2 位、Box 只有 1 位）→ ②-c 命中：
-// │       [ERROR] template template argument has different template parameters
-// │               than its corresponding template template parameter ...
-// └────────────────────────────────────────────────────────────────────────────
+// ─── 模板实例化三件事（S5 函数模板 / P3 类模板 / 实参校验）───────────────────
+// ② 锚点：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::InstantiateClass（P3）
+//        + clang/lib/Sema/SemaTemplateInstantiateDecl.cpp:Sema::InstantiateFunctionDeclaration（S5）
+//        + clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateArgumentList（实参校验）。
+// ③ 动机：三者都必须在【实例诞生之前】把"名字"定死 —— 实例名、缓存键、mangled
+//        符号三者同源于 NameMangler；晚一步改就会撞名或算错。
+// ④ 结论三条：
+//   S5 函数模板：同一模板 + 同一实参表全局只实例化一次，缓存键 = mangled 名
+//      （twice<int> ⇒ _Z5twiceIiE；再调同一 <int> ⇒ 日志 "cache hit: … skip
+//      re-instantiation"）。新实例走三步：① m_functionMap[mangled] = 实例
+//      ② push 进 m_functions（CodeGen 按序出汇编）③ analyzeFunctionBody ——
+//      即两阶段查找 [temp.names] 的第二阶段（第一阶段只注册蓝图不查体）。
+//   P3 类模板：类型位置出现 Box<int> ⇒ resolveType 命中类模板蓝图即调
+//      getOrInstantiateClass：① 深拷贝蓝图 + 结构化替换 ② processClassDecl
+//      按普通类走完整注册 ③ 实例方法注册 + 函数体分析。★ 缓存先行：先写缓存
+//      再析方法体，方法体里再引用同一实例（递归/互用）直接命中。
+//   实参校验 checkTemplateArguments：逐位比对【结构化形参表】与【实参表】四道：
+//      ① 个数（多报少须有默认实参）② 形态（类型形参收类型、NTTP 收值）
+//      ③ 值类型必须受支持 ④ 模板模板位内层表【逐位签名匹配】（[temp.arg.template]/2）。
+//      ★ 必须用 templateParams 而非 typeParams：后者只有名字、kind 已丢，
+//      `template<class T,int N>` 会数出 2 个"类型"形参，与"1 类型 + 1 值"错位。
+//   demo（真实日志）：Box<int> bi; ⇒ [sema:targ] ✓ param 1: 'T' (type) ← int
+//                     反例 Buf<int> ⇒ template argument 1 for 'Buf' ('N') must
+//                     be a non-type argument of type 'int', but 'int' is a type
 namespace {
 
 /// 模板形参 kind 的可读名（诊断文案用）
@@ -4916,7 +4905,7 @@ std::string ttpKindName(TemplateParamKind k) {
 ///   指向派生出的假类型而不是根因（实参列表）。
 ///
 /// 返回空串 = 匹配通过；否则返回诊断正文。
-/// 对照 clang：Sema::CheckTemplateTemplateArgument（clang/Sema/SemaTemplate.cpp）
+/// 对照 clang：clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateTemplateArgument
 ///   的 relaxed 分支（isTemplateTemplateParameterAtLeastAsSpecializedAs）。
 ///   真实现是两张形参表之间的【偏序】，本实现取"位数 + 逐位 kind/类型"主干。
 std::string ttpSignatureMismatch(const TemplateParam& p,
@@ -5160,7 +5149,7 @@ void SemanticAnalyzer::checkTemplateArguments(
 // 【多候选】先【全部收集】匹配的偏特化，再用 dominance 循环逐对比较
 //   （classSpecAtLeastAsSpecialized，合成 $ord_ 类型做偏序），无人支配者胜出；
 //   仍多于一个则按标准报 ambiguous。
-// 【对照 clang】Sema::CheckClassTemplatePartialSpecializationArgs /
+// 【对照 clang】clang/include/clang/Sema/Sema.h:Sema::CheckTemplatePartialSpecializationArgs /
 //   Sema::InstantiateClassTemplateSpecialization（真实现还会检测特化是否比主模板更特化、
 //   有无重复定义 —— 本项目不做）。
 // 【返回】选中的声明 + 特化路径的替换表（主模板路径为空表）
@@ -5200,7 +5189,7 @@ SemanticAnalyzer::selectClassTemplate(
 
     {
         // ── ① 全特化：逐位实参相等 ──
-        // 对照 clang：Sema::CheckTemplateArgumentList 对已知特化的精确匹配路径
+        // 对照 clang：clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateArgumentList 对已知特化的精确匹配路径
         if (auto it = m_explicitSpecs.find(name); it != m_explicitSpecs.end()) {
             for (const auto& spec : it->second) {
                 if (spec->specPattern.size() != args.size()) continue;
@@ -5219,8 +5208,8 @@ SemanticAnalyzer::selectClassTemplate(
         }
 
         // ── ② 偏特化：用实参推导模式 ──
-        // 对照 clang：Sema::CheckClassTemplatePartialSpecializationArgs
-        //              + DeduceTemplateArguments（与函数模板同一套合一算法）
+        // 对照 clang：clang/include/clang/Sema/Sema.h:Sema::CheckTemplatePartialSpecializationArgs
+        //              + clang/lib/Sema/SemaTemplateDeduction.cpp:DeduceTemplateArguments（与函数模板同一套合一算法）
         if (auto it = m_partialSpecs.find(name); it != m_partialSpecs.end()) {
             // ── 第一轮：收集【全部】匹配的候选（不再一匹配就返回）——
             // 收集是偏序裁决的前提：只有一个候选时无从比较，两个以上才谈得上"谁更特化"。
@@ -5292,7 +5281,7 @@ SemanticAnalyzer::selectClassTemplate(
                         winner = best[0];
                     } else {
                         // 多个候选互不支配 → 歧义，标准要求报错
-                        // 对照 clang：err_ambiguous_partial_specialization
+                        // 对照 clang：clang/include/clang/Basic/DiagnosticSemaKinds.td:err_partial_spec_ordering_ambiguous
                         std::string cands;
                         for (int b : best) {
                             if (!cands.empty()) cands += " / ";
@@ -5356,10 +5345,10 @@ TypePtr SemanticAnalyzer::getOrInstantiateClass(
     // Parser 只解析不评价（[expr.const] 的裁决权在语义期，那里有折叠器）；
     // 成功 ⇒ 归一成普通值实参（value/valueType 落槽、valueExpr 清空），
     // checkTemplateArguments 的 ②③ 各判据与下游 mangling 全部无感；
-    // 失败 ⇒ 当场报错（clang：Sema::CheckTemplateArgument 的
+    // 失败 ⇒ 当场报错（clang：clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateArgument 的
     // "non-type template argument ... is not a constant expression"）。
     // 对照 clang：Parser 把表达式存进 TemplateArgument（Expression 形态），
-    //   Sema::CheckTemplateArgument 里 EvaluateAsInt 求值后转 Value 形态。
+    //   clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateArgument 里 EvaluateAsInt 求值后转 Value 形态。
     for (auto& a : templateIdType->templateArgs) {
         if (a.kind != TemplateArgKind::Integral || !a.valueExpr) continue;
         auto folded = m_constantFolder.evaluateIntegral(a.valueExpr);
@@ -5663,7 +5652,7 @@ bool SemanticAnalyzer::isAtLeastAsSpecialized(TemplateDeclPtr a, TemplateDeclPtr
 //   有没有叫这个名字的方法"必须是【同一个判据】—— 写成两份就会各自演化（BUGS.md B10
 //   的根因正是同一规则两处实现不一致；B12 则是其中一处漏了基类链）。此处收口：
 //   谓词只有 findMethodInClass 一处，层次遍历只有 findMethodInHierarchy 一处。
-// 对照 clang：两条通路最终都落到 LookupResult（DeclContext::lookup 沿 base 链）+ 重载决议。
+// 对照 clang：两条通路最终都落到 LookupResult（clang/lib/AST/DeclBase.cpp:DeclContext::lookup 沿 base 链）+ 重载决议。
 FuncDeclPtr SemanticAnalyzer::findMethodInClass(const std::string& className,
                                                 const std::string& methodName,
                                                 int arity,

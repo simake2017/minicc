@@ -26,7 +26,7 @@
 //
 // 对照 clang（函数级对照见 preprocessor.cpp 头注）：
 //   指令识别与条件编译栈 ⇒ 对照 clang：PPDirectives.cpp
-//   #include 文件并合     ⇒ 对照 clang：HandleIncludeDirective
+//   #include 文件并合     ⇒ 对照 clang：clang/lib/Lex/PPDirectives.cpp:HandleIncludeDirective
 //   头文件搜索路径        ⇒ 对照 clang：HeaderSearch::LookupFile
 //   宏展开/重扫描/涂蓝    ⇒ 对照 clang：PPMacroExpansion.cpp
 //   #if 常量表达式求值    ⇒ 对照 clang：PPExpressions.cpp

@@ -22,7 +22,7 @@
 //
 // 标准章节：[temp.deduct] 总则 │ [temp.deduct.call] 调用推导（逐对 P/A、引用/const/值传递调整）
 //   │ [temp.deduct.type] 结构等价/不可推导/顶层 cv 忽略 │ [temp.arg.explicit] S3 前缀规则
-// 对照 clang：Sema::DeduceTemplateArguments（lib/Sema/SemaTemplateDeduction.cpp）
+// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::DeduceTemplateArguments（lib/Sema/SemaTemplateDeduction.cpp）
 //   管线：Parser(S1) → Sema(识别候选) → ★TemplateDeducer(S2~S4)★ → Instantiator(S5)
 //         → Sema(S6 重载决议) → CodeGen
 // =============================================================================
@@ -147,7 +147,7 @@ private:
     //   subst={T→vector<int>} ⇒ declval<vector<int>>().begin() → int ⇒ 归约为 void ✓
     //   subst={T→int}         ⇒ declval<int>().begin() 不合法 ⇒ 抛 ⇒ 不匹配 ✓
     // 求值失败抛 SubstitutionFailure，由 matchPattern 捕获为"不匹配"。
-    // 对照 clang：Sema::DeduceTemplateArguments（失败 ⇒ TDK_SubstitutionFailure）
+    // 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::DeduceTemplateArguments（失败 ⇒ TDK_SubstitutionFailure）
     TypePtr reducePattern(const TypePtr& P,
                           const std::unordered_map<std::string, TypePtr>& subst);
 

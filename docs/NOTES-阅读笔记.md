@@ -14,6 +14,7 @@
 - [四、Sema —— 类布局与 vtable 拼装](#四sema--类布局与-vtable-拼装)
 - [五、模板实例化 —— 我最初卡住的地方](#五模板实例化--我最初卡住的地方)
 - [六、补遗 —— 后发现的 4 处](#六补遗--后发现的-4-处)
+- [七、再补遗 —— `// mrd` 的 13 处](#七再补遗--mrd-的-13-处)
 
 ---
 
@@ -191,6 +192,32 @@ resolveType(Box<int>)                        ← 只认名字
 | `semantic_analyzer.cpp:4218` | "这里属于将模板参数缺失的参数也带进来" | [temp.param]/12 的默认实参补全 —— 缺的位数用默认值补齐，**且必须在选择特化之前**做（偏特化/全特化都对完整实参表匹配） |
 
 至此源码里**再没有 `// wangyang`**；那条"当时是怎么想通的"的线索全部收在本文件里。
+
+---
+
+## 七、再补遗 —— `// mrd` 的 13 处
+
+注释规范收紧到"四段式"后，`// mrd` 这类个人标记同样属于【禁止：私人笔记】，
+故按前例再清一轮（批次见 docs/learn/50）。**13 条里 10 条与紧邻的正式注释完全重复**，
+删掉不丢信息；**3 条带独有信息**，已就地改写成正式注释（③ 动机段）。
+
+| 原出处 | 笔记 | 去向 |
+|---|---|---|
+| `src/parse/parser.cpp` 依赖限定名分支 | "这里的参数是模板形参……t 有可能是 box<int>，那么 T = box<int>" | 与上方「依赖限定名 `typename T::type`」注释重复；独有部分（形参本身可能是模板 id）已由 `Class` 节点挂 `templateArgs` 承载，见该处 `[parse:type] base = {} (class/tparam)` 日志行 |
+| `src/parse/parser.cpp` 模板 id 分支 | "这里的 class 是一个具体的模板" | 与上方「模板 id（P3）」注释重复，删除 |
+| `src/parse/parser.cpp` NTTP 字面量分支 | "这里并没有实际 advance" | ★ 独有信息：判据只**窥探** `m_tokens[m_pos+1]`、不前进（实参表此刻还停在 `'<'` 上）⇒ 已改写为正式注释的动机句 |
+| `src/parse/parser.cpp` 成员模板分支 | "这里就是嵌套 frame" | 与上方「形参作用域建帧」注释重复，删除 |
+| `src/parse/parser.cpp` 语句层类型判定 | "const 也是关键字" | ★ 独有信息：`const` 必须算进 `isTypeKeyword()`，漏了它语句层的 `const int x;` 会走不到类型分支 ⇒ 已改写为正式注释 |
+| `src/parse/parser.cpp` 裸名声明试探 | "有可能是 x; ==> x 是变量，所以会按照变量去解析" | 解释的是"试探失败即回退走表达式路径"，上方注释块已讲透，删除 |
+| `src/parse/parser.cpp` 登记表第一层闸 | "如果是模板但是名字又不是模板" | 与上方「模板 id 层的基名不在登记表 ⇒ 比较链」注释重复，删除 |
+| `src/parse/parser.cpp` 类型限定访问 | "标明这是一个类型访问，不是一个对象取值" | 与上方「类型限定访问：Cls<Args>::member」注释逐字重复，删除 |
+| `src/sema/template_instantiation.cpp` 引用折叠 | "这里就是检测如果是引用会直接返回左值引用" | 与上方「内层若已是引用，结果必须重新构造」注释重复，删除 |
+| `src/sema/template_deduction.cpp` unify 绑定 | "这里会对参数进行类型绑定" | 与上方 unify 理论注释重复，删除 |
+| `src/sema/template_deduction.cpp` `P = T*` 分支 | "对于指针类型，要判断是否都是指针类型" | 与上方「实参必须是指针」注释重复，删除 |
+| `src/sema/semantic_analyzer.cpp` 基类布局 | "标识 没有主基类，但是存在多态" | ★ 独有信息：`noPrimary` = 无**动态**主基类可摆而本类自身多态 ⇒ vptr 自己占 offset 0、基类从 8 起（BUGS.md B11）⇒ 已改写为正式注释 |
+| `src/sema/semantic_analyzer.cpp` 成员调用推导 | "对于成员类型 要继续往下推导" | 与上方 `inferType(mem)` 的作用说明重复，删除 |
+
+至此源码里**既没有 `// wangyang`，也没有 `// mrd`**。
 
 ---
 

@@ -393,7 +393,7 @@ public:
     }
 
     // 空语句：`;` 与无声明符的声明（`A<int*,int**>;`）共用。
-    // 无子节点、无类型，故是纯叶子 —— 对应 clang 的 NullStmt。
+    // 无子节点、无类型，故是纯叶子 —— 对应 clang 的 clang/include/clang/Basic/StmtNodes.td:NullStmt。
     // ★ B37：裸类型名声明（`S;`）带一个名字槽，打印时一并带出，便于看 AST 形状。
     void visit(EmptyStmt& s) override {
         printNode(m_prefix, m_isLast,

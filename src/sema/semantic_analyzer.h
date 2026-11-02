@@ -339,7 +339,9 @@ private:
     // ── 推导指引注册表（[temp.deduct.guide]）──
     // 类模板名 → 该模板的指引列表。CTAD 时**指引优先于构造函数**：只要用户写了指引，
     //   就按指引推（这正是指引存在的意义 —— 覆盖默认规则）。
-    // 对照 clang：ClassTemplateDecl::getDeductionGuides() 是一个独立的小集合，隐式指引
+    // 对照 clang：ClassTemplateDecl::getDeductionGuides() 是一个独立的小集合（⚠ 该符号在
+    //   【本地 clang 语料】里 grep 不到：clang/include/clang/AST/DeclTemplate.h 的
+    //   ClassTemplateDecl 段未收录该成员），隐式指引
     //   （从构造函数合成）与显式指引并排在候选列表里，显式优先。
     std::unordered_map<std::string, std::vector<DeductionGuideDeclPtr>> m_deductionGuides;
     // 递归别名防护：正在展开的别名名集合（X<T> 的底层又写 X<...> 时死循环）。
@@ -354,7 +356,7 @@ private:
     // resolveType 遇到带实参的类类型（Box<int>）时调用：查缓存 →
     // instantiate() 深拷贝蓝图 → processClassDecl 完整注册实例类。
     // 返回实例类型（如 Box_int）；已实例化过则直接返回缓存。
-    // 对照 clang：Sema::InstantiateClass（[temp.inst] 隐式实例化点）。
+    // 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::InstantiateClass（[temp.inst] 隐式实例化点）。
     TypePtr getOrInstantiateClass(TypePtr templateIdType, SourceLocation loc);
     // 类模板实例缓存：「模板名<实参串>」→ 实例类型。
     // [temp.inst]/3：同一实参组合只实例化一次，重复使用直接命中。
@@ -364,7 +366,7 @@ private:
     // 逐位比对结构化形参表 templateParams（带 kind）与实际实参：① 个数一致；
     //   ② 形态匹配（类型形参收类型实参 / 非类型形参收值实参）；③ NTTP 的值类型受支持。
     // ★ 用 templateParams 而非退化的 typeParams —— 只有前者知道哪位是 NTTP。
-    // 对照 clang：Sema::CheckTemplateArgumentList（SemaTemplate.cpp）。
+    // 对照 clang：clang/lib/Sema/SemaTemplate.cpp:Sema::CheckTemplateArgumentList（SemaTemplate.cpp）。
     void checkTemplateArguments(const TemplateDeclPtr& blueprint,
                                 const TypePtr& templateIdType,
                                 SourceLocation loc);
@@ -454,7 +456,7 @@ private:
     // memcpy/realloc/malloc/free：只在语义层登记"有这些名字、几个形参、
     // 返回什么"（无 body），Codegen 的 generate() 因 body 为空自动跳过
     // 发射——调用点按普通函数发射 callq，链接期由 libc 提供实现。
-    // 对照 clang：Builtins::Info 表 + __builtin_* 语义内建。
+    // 对照 clang：clang/include/clang/Basic/Builtins.h:Builtins::Info 表 + __builtin_* 语义内建。
     void registerBuiltins();
 
     // ── 语句处理 ──
@@ -512,14 +514,14 @@ private:
     //   decltype(a + 1) 非 id-expression                    ⇒ 表达式类型 ⇒ int（右值不加 &）
     // 抛 SubstitutionFailure —— 表达式不合法（immediate context），调用方按 SFINAE
     //   处理（移出候选集），而非报错。
-    // 对照 clang：Sema::ActOnDecltypeExpression + BuildDecltypeType。
+    // 对照 clang：clang/lib/Sema/SemaExprCXX.cpp:Sema::ActOnDecltypeExpression + clang/lib/Sema/SemaType.cpp:BuildDecltypeType。
     TypePtr evaluateDecltype(const ExprPtr& expr, bool paren) override;
 
     // ── 成员类型查表（实现 MemberTypeResolver 接口）────────────────────
     // 依赖类型名 `typename T::type` 在替换阶段（直接上下文）的回调：把限定者解析成
     //   具体类，再查它的 typeAliases；查不到抛 SubstitutionFailure（软失败，由
     //   Sfinae::attempt 吸收），而不是像 resolveType 那样硬报错。
-    // 对照 clang：Sema::SubstType 对 DependentNameType 的重新查找。
+    // 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 对 DependentNameType 的重新查找。
     TypePtr resolveMemberType(const TypePtr& qualifier,
                               const std::string& member) override;
 
@@ -535,7 +537,8 @@ private:
     //   返回 nullptr 表示该名字不是别名模板（调用方按类模板继续处理）。
     // 【不实例化】[temp.alias]/1：别名不是新类型，故这里【只替换不实例化】，也不产生
     //   任何新符号 —— Vec<int> 与 MyPtr<int> 是同一个类。
-    // 对照 clang：Sema::CheckAliasTemplateId + Type::getCanonicalType 解糖。
+    // 对照 clang：Sema::CheckAliasTemplateId（⚠ 本地语料缺 SemaTemplate.h，未能 grep 验证）
+    //            + clang/include/clang/AST/ASTContext.h:ASTContext::getCanonicalType 解糖。
     TypePtr expandAliasTemplate(const std::string& name,
                                 const std::vector<TemplateArg>& args) override;
     // 纯查询：名字是否登记为别名模板（推导器逐位匹配时用，无副作用）。
@@ -565,7 +568,7 @@ private:
     // 把类型限定访问（MemberExpr::isTypeAccess）在编译期求值成字面量，使运行期无需
     //   真的去内存里读（静态成员根本没有对象内存）。
     // 返回：可折叠时给出新的字面量表达式；否则原样返回。
-    // 对照 clang：Sema::BuildDeclarationNameExpr 命中静态数据成员后，在常量求值
+    // 对照 clang：clang/lib/Sema/SemaExpr.cpp:Sema::BuildDeclarationNameExpr 命中静态数据成员后，在常量求值
     //   上下文里由 Expr::EvaluateAsInt 折叠。
     ExprPtr foldStaticConst(ExprPtr expr);
     // 沿【继承链】查找静态常量（[class.member.lookup]）。
