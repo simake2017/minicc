@@ -9,7 +9,9 @@
 //     即可裁决——这是 clang Sema::ClassifyName（SemaDecl.cpp:912）骨架的
 //     minicc 投影版（docs/specs/parser-stage-name-recognition.spec.md）。
 //   · 声明优先于对象：[basic.scope.scope] 类型与普通名字在不同命名空间，
-//     `int S; struct S;` 合法并存，`S;` 判声明（不读对象），与 clang 同。
+//     `int S; struct S;` 合法并存 —— ★ B37 起，可见性由 Sema 的符号表裁决：
+//     块作用域的变量 S 遮蔽全局的类 S ⇒ 该处 `S;` 是【表达式】不是声明
+//     （clang: expression result unused，rc=0），与 clang 同。
 //   · 限定名作用域裁决：B35 的 Sema 尾剥「取 :: 末段查全局蓝图表」在
 //     N::B 真存在时语义正确（归一同一实例），但 N::B 不存在时会误绑
 //     全局模板 B（方向性错）。改经登记表 classifyQualified（scope 精确）
@@ -43,8 +45,11 @@ int main() {
     //   不再走表达式路径（旧：VarExpr(S) 撞符号表碰巧放行，AST 形状错）
     S;
 
-    // ★ 现场②：同名跨类 —— [stmt.ambig] 声明优先：S; 仍判声明，
-    //   表达式位置（return S）照常读对象 5
+    // ★ 现场②：同名跨类 —— 块作用域的变量 S 【遮蔽】全局的类 S，
+    //   故此处的 `S;` 是【表达式】不是声明（[basic.scope.scope] 遮蔽；
+    //   clang: warning expression result unused，rc=0）。
+    //   ★ B37 起与 clang 一致：可见性由 Sema 的符号表裁决，遮蔽生效；
+    //   B37 之前这里被判成声明（变量根本没被登记进符号表）。
     int S = 5;
     S;
     if (S != 5) return 1;

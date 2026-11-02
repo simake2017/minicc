@@ -2634,3 +2634,182 @@ unit_tests 二进制**，绿色是假象（与 logdiff「基线会把失败固�
 同族的第三种面具：陈旧产物掩盖失败）。修复：parseExpr 辅助函数前导
 声明 `template<class T> T foo(T);`（同时守住 a<b 未登记 ⇒ 比较链的
 负向用例），声明取下标从 [0] 改末位。重建后 362/362 全绿。
+
+---
+
+## B37. 裸类型名声明的可见性无人裁决：非法程序静默通过（判据答错了问题）
+
+**来源**：用户提问「对于嵌套类呢，感觉有问题，比如 A 里面有个 B，外面在有一个 B」
+引出的实测（docs/learn/48 §1）。起点是"嵌套类在 minicc 里压根不支持"，
+但顺着查下去发现同一族的问题**今天就能触发**。
+
+**复现**
+
+```cpp
+namespace N { struct S { int x; }; }   // S 只在 N 内可见
+int main() {
+    S;                      // clang rc=1；minicc（修前）rc=0 ★ 非法程序通过
+    return 0;
+}
+```
+
+| 程序 | minicc（修前） | clang++-18 |
+|---|---|---|
+| 命名空间里的类型，全局裸 `S;` | ❌ rc=0（静默放行） | ✅ rc=1 `use of undeclared identifier 'S'` |
+| 类内别名，全局裸 `B;` | ❌ rc=0（静默放行） | ✅ rc=1 `use of undeclared identifier 'B'` |
+| 可见的类型裸 `S;`（全局） | ✅ rc=0 | ✅ rc=0（clang 仅 warning） |
+
+**性质**：**静默放行非法程序**（方向性错，与 B31「漏收=方向性错」同族）。
+
+**根因**：**判据答错了问题**。语句层裸名判定用的是名字登记表（NameRegistry）
+的 type 位，而 `classify()` 对裸名是"对任意作用域 OR"的宽近似 ⇒ 它回答的是
+"**本 TU 某处**声明过这个类型吗"，而 [stmt.ambig] 需要的是"**此处**可见吗"。
+两个问题被当成了同一个：
+- 登记表 scope 键只到**命名空间**一级，类体内的名字归外层（spec 异常 1 的"宽方向"）；
+- 裸名查询跨作用域取并集 ⇒ 命名空间里的类型在全局也"命中"；
+- 命中即判声明 ⇒ 产出**无名** `EmptyStmt` ⇒ Sema 侧无任何落点（`visit(EmptyStmt&)`
+  此前不存在）⇒ 没有任何环节能再发现"它其实不可见" ⇒ 静默。
+
+**修法**（docs/designs/visible-name-lookup.design.md）：
+**可见性裁决下沉到 Sema**，判据单点化：
+1. `SemanticAnalyzer::lookupVisibleType(name)` —— 名字可见性判据（单点）：
+   当前类作用域 typeAliases → 命名空间链（**逐级外层**）→ 全局；
+   `isNameDeclared(name)` —— "这个名字声明过吗"（任意 kind）。
+2. Parser 侧只给**候选**：裸名分支产出 `EmptyStmt{typeName="S"}`（名字进 AST），
+   **不下"可见"的结论**（Parser 没有符号表）。
+3. `SemanticAnalyzer::visit(EmptyStmt&)` 新增落点：命中 ⇒ 合法；声明过但不是类型
+   ⇒ 走表达式路径（clang 是 warning expression result unused）；都没声明 ⇒ 报错
+   `use of undeclared identifier 'X'`（**与 clang 逐字，含位置**）。
+4. `resolveType` 的三段手写兜底与 `visit(ExprStmt)` 的 [stmt.ambig] 折叠
+   **一并收敛**到 `lookupVisibleType`（红线 3 判据单点）——原先这三处各写一份
+   查找，正是"同一判据写两处必不一致"的第三现场。
+
+**顺带修好的三处**（原先都**拒收合法程序**）：
+- `namespace A { struct S{}; namespace B { void f(){ S; } } }` —— 命名空间链
+  逐级外层（clang 的 DeclContext 链语义）；
+- 类模板**实例**的别名在成员函数体内裸用 —— 走 `m_classDecls[实例类]->typeAliases`
+  （实例类的别名只克隆进类声明，**没进符号表**）；
+- 类内别名遮蔽同名全局类型 —— 类作用域先查（clang 顺序）。
+
+**行为变更（向 clang 靠拢）**：`int S = 5;`（块作用域变量遮蔽全局的类 S）时，
+`S;` 从"声明"改判为"**表达式**"（clang: warning expression result unused）——
+变量因此第一次被登记进符号表。旧行为是 minicc 独有的偏差。
+
+**回归用例**：
+- `tests/lang/test_basics_25_bare_type_name_visibility.cpp`（正例：全局 / 命名空间内 /
+  类作用域别名三处可见 + 遮蔽走表达式，rc=0 与 clang 对拍）
+- `tests/lang/test_basics_26_bare_type_name_namespace_not_visible_error.cpp`
+  （rc=1，文案与位置逐字同 clang：`28:5: use of undeclared identifier 'S'`）
+- `tests/lang/test_basics_27_bare_type_name_class_alias_not_visible_error.cpp`
+  （rc=1，`29:5: use of undeclared identifier 'B'`）
+- `tests/unit/test_name_visibility.cpp`（NameVisibility.* 7 例：类作用域优先 /
+  命名空间链逐级外层 / 不可见报错 / 遮蔽走表达式）
+- **突变验证 4 条**（design §5 清单）：摘命名空间链外层 / 摘类作用域优先 /
+  摘第二问 / Parser 不带名字 ⇒ 对应用例实跑变红。
+
+**有意日志漂移**（3 处，已重刷基线 155→158 份）：
+- basics_23：多两行 `[sema:stmt] …` + 一行 `[resolve] 'S' → int (kind=Variable, …)`
+  （遮蔽语义改判为表达式 ⇒ 变量进了符号表）；
+- tmpl_54：unknown type name 的括注改写（旧文案自称"已由解析期名字登记表在语法期
+  消歧"，B37 后由语义期裁决）；
+- basics_25/26/27 三份新日志入列。
+
+**元命题（本次一并改写的东西）**：`docs/constraints/00-全局约束.md` 红线 1
+由**手段式**改写为**目标式**——"语义裁决权单一：名字的种类与可见性只由 Sema 的
+符号表裁定；Parser 可以通过窄的只读查询接口向 Sema 提问并服从其答复
+（clang 的 Actions 模式）；不得自行维护第二份名字/作用域表来下结论"。
+原措辞把"构造期前向收集的只读名字投影"这个**现方案**写成了红线，顺带禁掉了
+clang 的实际做法（`Parser.h:639` 的 `Sema &Actions;`）。详见 docs/learn/48 §3。
+
+---
+
+## B38. 作用域不是名字身份的一部分：限定名模板绑错、同名模板撞实例、嵌套命名空间丢外层
+
+**来源**：Stage 1（B37）收尾后的既定路线 —— 红线 1 改写后的三阶段里的
+**Stage 2「登记表退场」**。起点是 B37 查实时记下的三处既有缺口之一
+（"命名空间模板按裸名注册 ⇒ `N::B` 绑到全局 B"），本批把它连同它的兄弟一起修掉。
+
+**复现**
+
+```cpp
+template<class T> struct B { T v; };                    // 全局模板
+namespace N { template<class T> struct B { T v; T w; }; } // 同名，不同布局
+namespace M { template<class T> struct B { T v; T z; }; }
+
+int main() {
+    N::B<int> n; n.w = 3;      // ★ 修前：绑到全局 B ⇒ "No member 'w' in class 'B_int'"
+    M::B<int> m; m.z = 5;      // ★ 修前：与 N::B 撞成同一实例 ⇒ "No member 'z'"
+    return 0;
+}
+```
+
+```cpp
+namespace A { namespace B { int f() { return 7; } } }
+int main() { return A::B::f(); }   // ★ 修前：注册成 "B::f" ⇒ "Undefined variable 'A::B::f'"
+```
+
+| 程序 | minicc（修前） | clang++-18 |
+|---|---|---|
+| `N::B<int>`（N 里有 B，另有全局 B） | ❌ 绑到**全局** B | ✅ 绑 N 里的 B |
+| `N::B<int>` 与 `M::B<int>` | ❌ **撞成同一实例** `B_int` | ✅ 两个实例 |
+| `A::B::f()`（两层嵌套） | ❌ 注册名 `B::f` ⇒ 未定义变量 | ✅ rc=0 |
+| `N::B<int>`（N 里**没有** B，全局有 B） | ❌ 静默绑全局 B（宽方向） | ✅ rc=1 `no template named 'B' in namespace 'N'` |
+
+**性质**：**静默算错**（前两条：字段错位 / 实例被合并）与**拒收合法程序**（第三条）
+并存；第四条是**静默接受非法程序**。
+
+**根因（同一个）**：**作用域没有进到名字的身份里**。minicc 的三处实现各自漏了它：
+
+| 落点 | 修前 | 后果 |
+|---|---|---|
+| `processNamespaceDecl` 前缀化 | 用 `decl->name`（**只取本层**） | 嵌套命名空间丢外层 |
+| 模板注册 | 模板走 `default:` 分支，**不参与前缀化** ⇒ 按裸名注册 | 同名模板撞实例 |
+| 限定名模板 id 绑定 | 「剥 :: 末段查全局蓝图」 | 绑错模板 |
+
+而 clang 的模型一句话：**作用域是名字身份的一部分** —— 模板声明属于 DeclContext，
+`LookupName` 按上下文查；mangling 带上下文（`_ZN1N1BIiE` vs `_Z1BIiE`）；
+实例缓存键带上下文。
+
+**修复**（spec：docs/specs/scope-qualified-names.spec.md）
+1. **前缀化单点**：`processNamespaceDecl` 改用 `m_currentNamespace`（完整路径），
+   命名空间成员（函数 / 类 / 全局变量 / 枚举 / **模板**）共用同一句 —— 判据单点。
+2. **模板按作用域注册**：类模板 / 别名模板的蓝图名带 `M::` ⇒ 注册键、实例名
+   （`M::B_int`）、缓存键（`M::B<int>`）、mangling（`_Z4M__BIiE`）全部带作用域。
+3. **限定名不再剥尾**：`N::B` 按完整限定名查表，查不到就报
+   `no template named 'B' in namespace 'N'`（**与 clang 逐字**）—— 不再退到全局 B。
+4. **登记表退场一处**：Sema 侧的 `classifyQualified` 消费点删除，
+   `SemanticAnalyzer::m_names` 与 `setNameRegistry` 一并去掉 ——
+   第二份作用域事实只剩 Parser 侧那一张（过渡态，Stage 3 消灭）。
+5. **mangling 净化**：`mangleTemplateInstance` 对名字先过 `symbolSafe`
+   （与 `mangleRTTI` / `mangleVTable` 同一份），否则 `'::'` 进符号标签 ⇒ 汇编器报 junk。
+
+**行为变更（向 clang 靠拢）**：`N::B`（N 里没有 B，全局有 B）从"静默绑全局 B"
+改成**响亮报错** —— 收窄方向（红线 2「宁宽勿窄」的反面：这次是**由宽改严**，
+因为旧行为会静默算错，属方向性错）。
+
+**回归用例**
+- `tests/lang/test_basics_28_namespace_template_scope.cpp`（正例：全局 B /
+  `N::B` / `M::B` 三个实例并存且字段各自正确，rc=0 与 clang 对拍）
+- `tests/lang/test_basics_29_nested_namespace_qualified_call.cpp`
+  （正例：`A::B::f()` 与 `A::B::S`，rc=0 与 clang 对拍）
+- `tests/unit/test_scope_qualified_names.cpp`（ScopeQualifiedNames.* 5 例：
+  嵌套保完整路径 / 同名模板两实例 / 全局与命名空间模板相异 /
+  限定名查不到即报错 / mangling 无非法字符）
+- **突变验证 4 条**（逐条实跑变红）：① 前缀化改回本层名 ⇒
+  `NestedNamespaceKeepsFullPath` 红；② 模板不前缀化 ⇒ 同名模板用例红（3 例）；
+  ③ 限定名改回剥尾归一 ⇒ `QualifiedNameNotFoundIsAnError` 红；
+  ④ mangling 不净化 ⇒ `MangledNameHasNoIllegalChars` 红。
+
+**有意日志漂移**（已显式列出并重刷基线）
+- basics_22 / basics_23：命名空间模板的蓝图名、实例名、mangled 全部带作用域
+  （`B` ⇒ `N::B`、`B_int` ⇒ `N::B_int`、`_Z1BIiE` ⇒ `_Z4N__BIiE`）；
+  旧日志行 `[resolve] 限定模板名 'N::B' ⇒ 裸名 'B'` **消失**（不再剥尾）；
+- basics_28 / basics_29 两份新日志入列；
+- `_unit_cases.txt` / `_unit_summary.txt`：+7 例（5 个新单测 + 2 个新集成的
+  子进程包装）。★ 顺带发现：上一版基线里的 **369** 本身就是
+  **没重建的 unit_tests 二进制**留下的假象（learn/47 §6 的第三种失败面具
+  这回连**基线**也骗了），重建后是 371，再加本批 5 例 = 376。
+
+**遗留（Stage 3）**：解析期"名字是不是模板"这一问仍由登记表回答（过渡态近似）。
+clang 的答案是 Sema 的活符号表（`Actions.isTemplateName`）+ 语法试探兜底
+（`isTemplateArgumentList`）—— 需要边解析边 `ActOn*` 登记的架构改造。

@@ -440,18 +440,30 @@ struct Statement : ASTNode {
 
 // ─── 空语句 ───────────────────────────────────────────────────────────────────
 // 对应 [stmt]/1 的 null statement（`;`），clang: NullStmt。
-// 两个来源，语义同为"不做任何事"，故共用同一节点：
+// 三个来源，语义同为"不做任何事"，故共用同一节点：
 //   ① 裸分号            `;`                     —— [stmt]/1
 //   ② 无声明符的声明    `A<int*, int**>;` / `int;` —— [dcl.dcl]/1 的 simple-declaration
 //      里 init-declarator-list 是【可选】的，故 `decl-specifier-seq ';'` 合法，
 //      只是"什么都不声明"（clang 的 `-Wmissing-declarations` 正为它而设）。
-// ★ 二者都【不实例化任何模板】—— clang 对 `A<int*,int**>;` 不会实例化偏特化体
+//   ③ ★ 裸类型名声明    `S;`（S 是类型名）—— [stmt.ambig]/3「能当声明就当声明」。
+//      走 ② 那条路时"什么都不声明"；走 ③ 时是"声明了一个类型名但无声明符"。
+// ★ ① ② 都不【实例化任何模板】—— clang 对 `A<int*,int**>;` 不会实例化偏特化体
 //   （用 `typename T::nope boom;` 探针验证过：裸语句不报错，写成变量声明才报）。
-//   本节点不携带类型，Sema 因此根本不会去 resolveType ⇒ 天然对齐 clang。
-// demo: `;` ⇒ EmptyStmt；`A<int*,int**>;` ⇒ EmptyStmt
-// 对照 clang：NullStmt —— 同样只有位置、没有子节点。
+//   ③ 也不携带类型 ⇒ Sema 不会去 resolveType ⇒ 不实例化 ⇒ 天然对齐 clang。
+// ★ typeName（③ 专用）：语句层把 `S;` 判为声明后，把名字带进 AST 交给 Sema 裁决
+//   【这个名字在此处可见吗】——可见性只由 Sema 的符号表回答（红线 3 判据单点），
+//   Parser 只负责"这语法上可能是个类型名"。空串 = 不是 ③。
+//   源码锚点：clang Parser::TryAnnotateTypeToken → Actions.ClassifyName
+//   （clang/lib/Parse/Parser.cpp:1696）问的是"当前作用域里它是不是类型"，
+//   本实现改为在语义期问同一件事（解析期没有活符号表，见 docs/learn/48）。
+// demo: `;` ⇒ EmptyStmt("")；`A<int*,int**>;` ⇒ EmptyStmt("")；`S;` ⇒ EmptyStmt("S")
+// 对照 clang：NullStmt —— 同样只有位置、没有子节点（名字是本项目的额外一槽）。
 struct EmptyStmt : Statement {
     explicit EmptyStmt() : Statement(NodeKind::Empty) {}
+    explicit EmptyStmt(std::string n) : Statement(NodeKind::Empty),
+                                       typeName(std::move(n)) {}
+
+    std::string typeName;   // ③ 裸类型名声明的名字；空串 = 普通空语句
 
     void accept(AstVisitor& v) override { v.visit(*this); }
 };

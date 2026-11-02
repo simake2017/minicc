@@ -82,10 +82,21 @@ minicc <source.cpp> [-o output] [-I dir] [-S] [-E]
 | 5 代码生成 | codegen.cpp | CodeGenFunction | 栈机式求值，按宽度分派访存；零 RTTI（Visitor + 标签分派双轨） |
 | 6 链接 | linker.cpp | LLVM ELF Linker | 合并节 / 符号决议 / 重定位；内置 _start + 64KB bump malloc/free |
 
-**解析期语义识别**（本项目特色机制）：Parser 不持 Sema 句柄（红线），改为
-构造期前向收集**名字登记表**（type/namespace/template 三位 + 作用域键，
-对齐 `Sema::ClassifyName` 骨架）——`a < b > c;` 比较链、裸 `S;` 声明判定、
-限定模板名作用域裁决全靠查这张只读投影（docs/learn/46、47）。
+**名字的种类与可见性由 Sema 裁决**（红线 1，2026-11-02 改写）：单一事实来源是
+Sema 的符号表；Parser 只能通过窄的只读查询接口向 Sema 提问并服从答复
+（clang 的 Actions 模式：`Parser.h:639` 的 `Sema &Actions;` +
+`Parser.cpp:1696` 的 `Actions.ClassifyName(...)`），**不得自建第二份名字/作用域表**。
+
+- **可见性**（裸 `S;` 是声明还是表达式、名字在不在作用域链上）——已在 Sema 落地
+  （`lookupVisibleType`，docs/learn/48、B37）：类作用域 → 命名空间链 → 全局，逐级外层。
+- **作用域**（名字属于谁：`N::B` 还是 `::B`）——已在 Sema 落地
+  （`processNamespaceDecl` 的前缀化 = 完整命名空间路径，docs/learn/49、B38）：
+  作用域**只写一遍**，注册键 / 实例名 / 缓存键 / mangling 全部由它派生。
+- **种类**（`a < b > c;` 比较链 vs 模板调用）——当前仍由**名字登记表**（NameRegistry，
+  type/namespace/template 三位 + 作用域键，对齐 `Sema::ClassifyName` 骨架）做**候选过滤**：
+  构造期前向收集的只读投影（docs/learn/46、47）。它是**过渡态**——本质是第二份表，
+  只配决定「值不值得让 Sema 查一下」，不配当可见性/作用域的答案；
+  Stage 3 换成 clang 式边解析边 `ActOn*` 登记后整体退场。
 
 ## 支持的特性
 
@@ -186,7 +197,9 @@ logdiff.sh  build.sh  CMakeLists.txt
 | ADL / 别名模板 / CTAD | learn/26、27、28 |
 | AST 分派双范式（零 RTTI） | learn/29、REFACTOR-ast-visitor.md |
 | 解析期语义识别（名字登记表） | learn/46、47 |
-| 所有踩坑复盘 | BUGS.md（B01..B36）、PITFALLS.md |
+| 名字可见性（作用域链裁决） | learn/48、BUGS.md B37 |
+| 作用域即身份（模板/命名空间的名字带作用域） | learn/49、BUGS.md B38 |
+| 所有踩坑复盘 | BUGS.md（B01..B38）、PITFALLS.md |
 
 ## 未来计划
 

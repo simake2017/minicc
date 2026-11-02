@@ -394,8 +394,10 @@ public:
 
     // 空语句：`;` 与无声明符的声明（`A<int*,int**>;`）共用。
     // 无子节点、无类型，故是纯叶子 —— 对应 clang 的 NullStmt。
-    void visit(EmptyStmt&) override {
-        printNode(m_prefix, m_isLast, "EmptyStmt");
+    // ★ B37：裸类型名声明（`S;`）带一个名字槽，打印时一并带出，便于看 AST 形状。
+    void visit(EmptyStmt& s) override {
+        printNode(m_prefix, m_isLast,
+                  s.typeName.empty() ? "EmptyStmt" : "EmptyStmt[" + s.typeName + "]");
     }
 
     // ── 顶层声明（10）────────────────────────────────────────────────────
@@ -660,7 +662,9 @@ int main(int argc, char* argv[]) {
         // 递归下降解析（对照标准 [gram] 文法的子集），
         // 产出 TranslationUnit = 顶层声明列表（函数/类/模板）。
         // ★ parser 名字识别（spec §2 步骤 1）：先建登记表并前向收集，
-        //   Parser（消歧）与 Sema（限定名裁决）共享同一张只读表。
+        //   供 Parser 的消歧做【候选过滤】（"名字是不是模板"这一问）。
+        //   ★ B38 起 Sema 不再持有这张表 —— 限定名的作用域裁决改由 Sema 自己的
+        //   注册表回答（模板按完整限定名注册），第二份作用域事实随之退场。
         auto nameReg = std::make_shared<NameRegistry>();
         nameReg->collect(tokens);
         Parser parser(std::move(tokens), nameReg);
@@ -682,10 +686,7 @@ int main(int argc, char* argv[]) {
 
         // 类型检查 + auto 推导 + 类内存布局（字段偏移/对齐、vtable、RTTI）。
         // 布局结果供两处消费：下方打印（可观测性）与阶段 5 CodeGen（访存偏移）。
-        // ★ 与 Parser 共享名字登记表：限定模板名 N::B 的作用域裁决依据
-        //   （parser 名字识别 spec §2 步骤 4，docs/designs/parser-stage-name-recognition）。
         SemanticAnalyzer semaAnalyzer;
-        semaAnalyzer.setNameRegistry(nameReg);
         semaAnalyzer.analyze(unit);
 
         auto& classTypes = semaAnalyzer.getClassTypes();

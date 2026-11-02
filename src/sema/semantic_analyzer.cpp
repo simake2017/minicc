@@ -821,6 +821,84 @@ static bool containsTemplateParam(const TypePtr& t) {
     return false;
 }
 
+// ═══ 名字可见性判据（B37：单点判据，resolveType 与裸名声明裁决共用这一处）══════
+//
+// 是什么：回答"这个名字【在此处】可见吗、且它是个类型吗"。
+// 源码锚点：clang Sema::ClassifyName（clang/lib/Sema/SemaDecl.cpp:912）沿
+//   Scope / DeclContext 链查【活符号表】；本实现的对应物是 m_symbolTable +
+//   m_currentNamespace + m_currentClassName 拼出的"简化作用域链"。
+// 为什么这样设计：可见性是【语义】问题，只有 Sema 的符号表答得了。Parser 侧的
+//   名字登记表（B31）只是"本 TU 某处声明过这个类型"的【跨作用域并集】，拿它当
+//   "可见"就会静默放行非法程序 —— `namespace N { struct S{}; } int main(){ S; }`
+//   里 S 在 N 里、全局不可见，此前直接判声明 ⇒ 编译通过（clang rc=1）。
+//   ⇒ 可见性的裁决权必须落在 Sema（红线 3 判据单点：同一判据不许写两处）。
+// 查找顺序（clang [basic.lookup.unqual] 的简化版）：局部作用域链（minicc 里
+//   只有变量/参数、无类型，故对"找类型"无用）→ 当前类作用域 → 命名空间链
+//   （N::M::name → N::name → name，全局在最后）。类作用域先于命名空间，
+//   与 clang 一致（类内别名遮蔽同名全局类型）。
+// demo: 全局 struct S ⇒ level=3；namespace N 里 struct S ⇒ level=2（scope=N）；
+//       struct A { using B = int; } 在 A 体内 ⇒ level=1（scope=A）
+SemanticAnalyzer::VisibleType
+SemanticAnalyzer::lookupVisibleType(const std::string& name) {
+    VisibleType hit;
+
+    // ── ① 当前类作用域：类内类型别名（using X = T; / typedef T X;）──
+    // ★ 走 m_classDecls 而不是符号表：类模板【实例】的别名只克隆进了实例类的
+    //   typeAliases（template_instantiation.cpp:499），没进符号表 —— 走符号表会
+    //   漏掉 `Box<int>::type` 在成员函数体内的非限定用法。
+    if (!m_currentClassName.empty()) {
+        auto cit = m_classDecls.find(m_currentClassName);
+        if (cit != m_classDecls.end()) {
+            auto ait = cit->second->typeAliases.find(name);
+            if (ait != cit->second->typeAliases.end() && ait->second) {
+                hit.type = resolveType(ait->second);
+                hit.raw = ait->second;      // 未解糖的别名目标（日志逐字用）
+                hit.level = 1;
+                hit.scope = m_currentClassName;
+                return hit;
+            }
+        }
+    }
+
+    // ── ② 命名空间链：当前命名空间 → 逐级外层 → 全局 ──
+    //   命名空间成员的登记方式就是名字前缀化（"N::S"），故按前缀逐级查。
+    //   ★ 逐级外层是 clang 的 DeclContext 链语义：namespace A { struct S{}; namespace
+    //   B { void f(){ S; } } } 里 B 内的 S 可见 A 的 S（此前只查一层 ⇒ 报
+    //   unknown type name，拒收合法程序）。
+    std::string scope = m_currentNamespace;
+    while (true) {
+        const std::string qualified = scope.empty() ? name : scope + "::" + name;
+        Symbol* sym = m_symbolTable.lookup(qualified);
+        if (sym && sym->kind == SymbolKind::Type && sym->type) {
+            hit.type = sym->type;
+            hit.level = scope.empty() ? 3 : 2;
+            hit.scope = scope;
+            return hit;
+        }
+        if (scope.empty()) break;
+        const size_t sep = scope.rfind("::");
+        scope = (sep == std::string::npos) ? std::string() : scope.substr(0, sep);
+    }
+    return hit;   // level=0 ⇒ 不可见
+}
+
+// 这个名字【声明过】吗（任意 kind：变量/函数/类型皆算）——裸名声明裁决的第二问。
+//   （第一问"它是不是可见的类型"见 lookupVisibleType。）
+// 为什么单列一个：clang 的 ClassifyName 答的是"它是什么"，本实现拆成两问，
+//   因为 minicc 的类作用域没有变量、局部作用域没有类型 —— 两问的查找面不同。
+bool SemanticAnalyzer::isNameDeclared(const std::string& name) {
+    if (m_symbolTable.lookup(name)) return true;     // 局部 → 全局
+    std::string scope = m_currentNamespace;
+    while (true) {
+        const std::string qualified = scope.empty() ? name : scope + "::" + name;
+        if (m_symbolTable.lookup(qualified)) return true;
+        if (scope.empty()) break;
+        const size_t sep = scope.rfind("::");
+        scope = (sep == std::string::npos) ? std::string() : scope.substr(0, sep);
+    }
+    return false;
+}
+
 TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
     if (!type) return nullptr;
 
@@ -918,42 +996,32 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
         // 判定条件：携带非空实参，且该名字是已登记的类模板蓝图（m_classTemplates，O(1)）。
         // （普通已实例化类如 Box_int 实参为空，走下面的符号表替换。）
         if (!type->templateArgs.empty()) {
-            // ── ★ B35→47：限定名模板 id `N::B<Box>` ——蓝图按【书写名】（裸名）登记
-            // （processNamespaceDecl 只前缀化 Function/Class/GlobalVar/Enum，
-            // TemplateDecl 走 default 原样过去），故限定名查表落空。
-            // B35 的做法是「剥 :: 末段查全局蓝图表」——语义对（`N::B<int>` 与
-            // `B<int>` 是【同一实例】），但宽方向有洞：N::B 真不存在时会误绑
-            // 全局 B（方向性错）。parser 名字识别（spec §2 步骤 4）后改为
-            // 经名字登记表做【作用域精确裁决】：存在 (scope=N, name=B,
-            // template 位) 条目才归一裸名；配不上 ⇒ 报错，与 clang 逐字
-            // （clang/lib/Sema/SemaDecl.cpp 的 QualifiedNameLookup 沿
-            // DeclContext 链查找 + err_no_template_named 诊断）。
+            // ── ★★ B38：限定名模板 id `N::B<int>` ——【作用域是身份的一部分】──
+            // 蓝图按完整限定名注册（processNamespaceDecl 给模板也加作用域前缀）
+            // ⇒ 这里直接按 type->name 查表即可，命中即用，**不再剥尾归一**。
+            //
+            // 旧行为（B35→47）：蓝图按裸名注册 ⇒ 限定名查表落空 ⇒ 「剥 :: 末段查
+            // 全局蓝图表」把 N::B 归一成 B。两个错法：
+            //   ① 绑错模板 —— N 里的 B 与全局 B 是两个实体，旧逻辑一律绑全局的；
+            //   ② 同名撞实例 —— 两个命名空间的同名模板都归一成 B ⇒ 撞成一个实例
+            //      （`N::B<int>` 与 `M::B<int>` 都叫 B_int ⇒ 拿到错的类）。
+            // 对照 clang：模板声明属于 DeclContext，LookupName 按上下文查；
+            //   N::B 查不到就是查不到，不退到全局 B。诊断 err_no_template_named
+            //   （clang/lib/Sema/SemaDecl.cpp 的 QualifiedNameLookup）。
+            //
+            // ★ 行为收紧：以前 `N::B`（N 里没有 B）会静默绑到全局 B（宽方向），
+            //   现在报 "no template named 'B' in namespace 'N'" —— 与 clang 逐字。
+            //   对照 clang 探针：`namespace N{} int main(){ N::B<int> x; }`
+            //   → error: no template named 'B' in namespace 'N'。
             if (!m_aliasTemplates.count(type->name)
                 && !m_classTemplates.count(type->name)) {
                 if (auto sep = type->name.rfind("::");
                     sep != std::string::npos) {
                     const std::string scope = type->name.substr(0, sep);
                     const std::string tail = type->name.substr(sep + 2);
-                    bool resolved = false;
-                    if (m_names) {
-                        // 主线：登记表裁决（唯一依据，不做末段回退）
-                        resolved = m_names->classifyQualified(scope, tail)
-                                       .isTemplate;
-                    } else {
-                        // 单测兼容缺省（setNameRegistry 未注入）：
-                        // 维持 B35 裸尾剥近似
-                        resolved = true;
-                    }
-                    if (resolved) {
-                        std::cout << std::format(
-                            "  [resolve] 限定模板名 '{}' ⇒ 裸名 '{}'（蓝图按书写名登记，B35）\n",
-                            type->name, tail);
-                        type->name = tail;
-                    } else {
-                        error(std::format(
-                            "no template named '{}' in namespace '{}'",
-                            tail, scope), SourceLocation{});
-                    }
+                    error(std::format(
+                        "no template named '{}' in namespace '{}'",
+                        tail, scope), SourceLocation{});
                 }
             }
 
@@ -1131,48 +1199,31 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
         //   能【静默编译】。对照 clang：error: unknown type name 'Undeclared'
         // 注：Parser 只为【书写名】建 Class 节点；模板形参走 TemplateParam 节点、模板 id
         //   走上面的实例化分支，都不会落到这里。
-        if (!sym || sym->kind != SymbolKind::Type) {
-            // ── 命名空间作用域回退：命名空间内用【非限定】名字 ──
-            // `namespace N { struct S{}; int get(S s){...} }` 里那个 S：全局表只有
-            // "N::S"（命名空间成员的登记方式就是名字前缀化），故这里按
-            // "当前命名空间::名字" 再查一次。
-            // 对照 clang：LookupName 沿 DeclContext 链上溯；本实现只有一层。
-            if (!m_currentNamespace.empty()) {
-                std::string scoped = m_currentNamespace + "::" + type->name;
-                Symbol* nsSym = m_symbolTable.lookup(scoped);
-                if (nsSym && nsSym->kind == SymbolKind::Type && nsSym->type) {
-                    std::cout << std::format(
-                        "  [resolve] '{}' 在命名空间 '{}' 内 ⇒ {}\n",
-                        type->name, m_currentNamespace, scoped);
-                    return nsSym->type;
-                }
+        // ★★ B37：这段三段手写兜底（全局 → 命名空间一层 → 当前类）收敛到
+        //   lookupVisibleType 一处（红线 3 判据单点），且命名空间改为【逐级外层】
+        //   （clang 的 DeclContext 链语义）。裸名声明 `S;` 的可见性裁决也走同一处。
+        VisibleType hit = lookupVisibleType(type->name);
+        if (hit.type) {
+            if (hit.level == 2) {
+                // 命名空间命中：沿用既有日志行（逐字不变，基线契约）
+                std::cout << std::format(
+                    "  [resolve] '{}' 在命名空间 '{}' 内 ⇒ {}\n",
+                    type->name, hit.scope, hit.scope + "::" + type->name);
+            } else if (hit.level == 1) {
+                // 类作用域别名命中：打印【未解糖】的别名目标（既有日志行逐字不变）
+                std::cout << std::format(
+                    "  [sema:alias] {} 在类 '{}' 作用域内 ⇒ {}\n",
+                    type->name, hit.scope,
+                    hit.raw ? hit.raw->toString() : hit.type->toString());
             }
-
-            // ── 类作用域回退：类体内直接用别名（`type x;`）──
-            // [basic.lookup.unqual] 在类体内先查类作用域再查外层。本实现没有作用域链，
-            // 只有 m_currentClassName 这一个"当前类"，故用「查不到就回退到当前类的
-            // typeAliases」近似 —— 足够覆盖类模板体内 `using type = T;` 后紧跟
-            // `type x;` 这个最常见的写法。
-            if (!m_currentClassName.empty()) {
-                auto cit = m_classDecls.find(m_currentClassName);
-                if (cit != m_classDecls.end()) {
-                    auto ait = cit->second->typeAliases.find(type->name);
-                    if (ait != cit->second->typeAliases.end() && ait->second) {
-                        std::cout << std::format(
-                            "  [sema:alias] {} 在类 '{}' 作用域内 ⇒ {}\n",
-                            type->name, m_currentClassName,
-                            ait->second->toString());
-                        return resolveType(ait->second);
-                    }
-                }
-            }
-            error(std::format(
-                "unknown type name '{}' —— 该名字没有作为类/类型被声明过。"
-                "（语句层的声明/表达式歧义（`a < b > c;`、裸 `S;`）已由解析期"
-                "名字登记表在语法期消歧（B35/47，docs/learn/46/47）；能走到"
-                "这一步的 `名字 标识符/;` 是【真正的】未知类型名。）",
-                type->name), SourceLocation{});
+            return hit.type;
         }
+        error(std::format(
+            "unknown type name '{}' —— 该名字没有作为类/类型被声明过。"
+            "（语句层的声明/表达式歧义（`a < b > c;`、裸 `S;`）由语义期的"
+            "名字可见性判据裁决（docs/learn/48）；能走到这一步的 "
+            "`名字 标识符/;` 是【真正的】未知类型名。）",
+            type->name), SourceLocation{});
     }
     if (type->isPointer()) {
         auto base = resolveType(type->pointeeType);
@@ -1695,32 +1746,59 @@ void SemanticAnalyzer::processNamespaceDecl(NamespaceDeclPtr decl) {
         // 各自的处理入口。函数只改名不注册：注册是 Pass 2 的职责（forEachFunctionDecl
         // 会递归进命名空间）—— ⚠ 两处都注册会让同一个符号发射两次（汇编器报
         // symbol 'N__get' is already defined）。
+        //
+        // ★★ B38：前缀化用【完整的命名空间路径】（m_currentNamespace），不是
+        //   decl->name（本层名字）。旧写法在嵌套命名空间里丢外层：
+        //     namespace A { namespace B { int f(); } }  ⇒  旧："B::f"（A 没了）
+        //                                              ⇒  新："A::B::f"
+        //   症状：`A::B::f()` 报 "Undefined variable 'A::B::f'"（注册名与使用名对不上）。
+        //   作用域是名字身份的一部分（clang：DeclContext 链 + mangling 带上下文）。
         switch (innerDecl->kind) {
             case NodeKind::Function: {
                 auto func = std::static_pointer_cast<FunctionDecl>(innerDecl);
-                func->name = decl->name + "::" + func->name;
+                func->name = m_currentNamespace + "::" + func->name;
                 break;
             }
             case NodeKind::Class: {
                 auto cls = std::static_pointer_cast<ClassDecl>(innerDecl);
-                cls->name = decl->name + "::" + cls->name;
+                cls->name = m_currentNamespace + "::" + cls->name;
                 processClassDecl(cls);
                 break;
             }
             case NodeKind::GlobalVar: {
                 auto gvar = std::static_pointer_cast<GlobalVarDecl>(innerDecl);
-                gvar->name = decl->name + "::" + gvar->name;
+                gvar->name = m_currentNamespace + "::" + gvar->name;
                 processGlobalVarDecl(gvar);
                 break;
             }
             case NodeKind::Enum: {
                 auto enm = std::static_pointer_cast<EnumDecl>(innerDecl);
-                enm->name = decl->name + "::" + enm->name;
+                enm->name = m_currentNamespace + "::" + enm->name;
                 processEnumDecl(enm);
                 break;
             }
+            case NodeKind::Template: {
+                // ── ★★ B38：模板也按作用域注册 ──
+                // 蓝图名带上作用域前缀 ⇒ 注册键、实例名、缓存键、mangling
+                // 全都带上 ⇒ `N::B<int>` 与 `::B<int>` 是两个实例（clang 同：
+                // _ZN1N1BIiE vs _Z1BIiE）。
+                // 旧行为：模板按【裸名】注册 ⇒ 两个命名空间的同名模板撞成同一个
+                // 实例（`N::B<int>` 与 `M::B<int>` 都叫 B_int ⇒ 拿到错的类）。
+                auto tpl = std::static_pointer_cast<TemplateDecl>(innerDecl);
+                if (tpl->isClassTemplate() && tpl->classTemplate) {
+                    tpl->classTemplate->name =
+                        m_currentNamespace + "::" + tpl->classTemplate->name;
+                } else if (tpl->isAliasTemplate() && tpl->aliasTemplate) {
+                    tpl->aliasTemplate->aliasName =
+                        m_currentNamespace + "::" + tpl->aliasTemplate->aliasName;
+                }
+                // 函数模板与推导指引：名字不加前缀（限定名调用函数模板本项目
+                // 不支持，见 spec §2.2 第 2 条）。
+                processDecl(innerDecl);
+                break;
+            }
             default:
-                processDecl(innerDecl);   // 其余（别名、模板、推导指引…）走通用入口
+                processDecl(innerDecl);   // 其余（别名、推导指引…）走通用入口
                 break;
         }
     }
@@ -3636,6 +3714,43 @@ void SemanticAnalyzer::visit(AssignStmt& stmt) {
 
 // 表达式语句：只求类型不求值 —— 值被丢弃，语句的意义在副作用（典型如 `foo();`）。
 // 推导本身会触发符号决议与类型检查。
+// ─── 空语句 / 无声明符的声明 ────────────────────────────────────────────────
+// `;` 与 `A<int,int>;`：无事可做（不携带类型 ⇒ 不 resolveType ⇒ 不实例化模板，
+//   与 clang 的 NullStmt 同形）。★ B37：裸类型名声明 `S;` 在这里裁决可见性。
+void SemanticAnalyzer::visit(EmptyStmt& stmt) {
+    if (stmt.typeName.empty()) return;
+
+    // ── 第一问：它是不是【此处可见的类型】？──
+    //   判据单点：与 resolveType 的兜底链、visit(ExprStmt) 的 [stmt.ambig] 折叠
+    //   走的是同一个 lookupVisibleType（红线 3）。
+    VisibleType hit = lookupVisibleType(stmt.typeName);
+    if (hit.type) {
+        std::cout << std::format(
+            "  [sema:stmt] '{}' 可见的类型名 ⇒ 判为无声明符声明\n", stmt.typeName);
+        return;
+    }
+
+    // ── 第二问：这个名字【声明过】吗？──
+    //   声明过但不是类型 ⇒ 它是表达式语句（clang：warning expression result
+    //   unused，rc=0）⇒ 走表达式路径，让既有的表达式 machinery 处理。
+    if (isNameDeclared(stmt.typeName)) {
+        auto var = std::make_shared<VarExpr>(stmt.typeName);
+        var->location = stmt.location;
+        auto exprStmt = std::make_shared<ExprStmt>(var);
+        exprStmt->location = stmt.location;
+        processStmt(exprStmt);
+        return;
+    }
+
+    // ── 都没声明过 ⇒ 响亮拒收 ──
+    //   对照 clang：这类程序 clang 走的是【表达式】分支（ClassifyName 判"S 不是
+    //   类型名"⇒ 表达式语句 ⇒ 名字未声明），文案是 use of undeclared identifier。
+    //   本实现走的是【声明】分支，但语义结论相同（这个名字此处不可用），故
+    //   沿用 clang 的文案以便逐字对齐。
+    error(std::format("use of undeclared identifier '{}'", stmt.typeName),
+          stmt.location);
+}
+
 void SemanticAnalyzer::visit(ExprStmt& stmt) {
     // ── [stmt.ambig] 语句级歧义消解 ──
     // 裸标识符或限定名单独成行（如 `N::S;` / `Dog;` / `S::type;`）时，
@@ -3643,14 +3758,12 @@ void SemanticAnalyzer::visit(ExprStmt& stmt) {
     // Parser 无法区分，交由 Sema 查符号表权威裁决：
     //   若是类型名/别名/类模板，判定为无声明符声明，折叠为空（不发射汇编）；
     //   若是变量，维持表达式语句，正常走类型推导与求值。
+    // ★ B37：判据收敛到 lookupVisibleType 一处（红线 3）——原先这里是手写的
+    //   「全局 + 当前命名空间」两段查找，与裸名声明那条路各写一份，容易分叉。
     if (stmt.expr && stmt.expr->kind == NodeKind::Var) {
         auto& var = static_cast<VarExpr&>(*stmt.expr);
-        Symbol* sym = m_symbolTable.lookup(var.name);
-        if (!sym && !m_currentNamespace.empty()) {
-            sym = m_symbolTable.lookup(m_currentNamespace + "::" + var.name);
-        }
-        if ((sym && sym->kind == SymbolKind::Type) ||
-            m_classTemplates.count(var.name) ||
+        VisibleType hit = lookupVisibleType(var.name);
+        if (hit.type || m_classTemplates.count(var.name) ||
             m_aliasTemplates.count(var.name)) {
             stmt.expr = nullptr;
             return;

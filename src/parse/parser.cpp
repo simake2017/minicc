@@ -2214,6 +2214,8 @@ StmtPtr Parser::parseStatement() {
         TypePtr type;
         bool isDecl = false;
         std::string bareDeclName;   // 裸名声明判定的名字（commit 后打 [parse:stmt]）
+        // ★ B37：裸名声明的名字位置（诊断定位用）——当前 token 正是那个标识符。
+        SourceLocation bareDeclLoc = peek().location;
         {
             TokenCheckpoint cp(*this);
             try {
@@ -2238,6 +2240,12 @@ StmtPtr Parser::parseStatement() {
                     //   查不到 = 位未命中 = 走表达式（宁宽勿窄，spec 异常 1），
                     //   Sema 对未声明名的报错兜底。替换 B35「裸 S; 刻意不算、
                     //   留表达式路径给 Sema」的注释策略——当时登记表只有模板位。
+                    // ★★ B37：命中只是【候选】——"这个类型名在此处可见吗"由 Sema
+                    //   用自己的符号表裁决（红线 3 判据单点）。故此处把名字带进
+                    //   AST（EmptyStmt::typeName），Parser 不下"可见"的结论：
+                    //   登记表的 type 位是跨作用域并集，命中不等于可见
+                    //   （`namespace N { struct S{}; } int main(){ S; }` 里
+                    //   S 在 N 里、全局不可见 —— 此前直接判声明 ⇒ 静默放行）。
                     if (!isDecl && !hasTemplIdSyntax
                         && names().classify(type->name).isType) {
                         isDecl = true;
@@ -2265,7 +2273,11 @@ StmtPtr Parser::parseStatement() {
                     logParse("  [parse:stmt] '{}' 判为声明（type 位）\n",
                              bareDeclName);
                 advance();
-                return std::make_shared<EmptyStmt>();
+                // ★ B37：裸名声明把名字带进 AST —— 可见性由 Sema 裁决
+                //   （EmptyStmt::typeName，见 ast.h 该字段注释）。
+                auto empty = std::make_shared<EmptyStmt>(bareDeclName);
+                empty->location = bareDeclLoc;
+                return empty;
             }
             return parseVarDeclStmt(type);
         }

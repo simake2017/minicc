@@ -29,7 +29,6 @@
 #include "ast.h"
 #include "ast_visitor.h"
 #include "constant_folder.h"
-#include "name_registry.h"
 #include "type.h"
 #include "template_instantiation.h"
 #include <string>
@@ -249,13 +248,6 @@ public:
     // 获取符号表（供调试输出）
     SymbolTable& getSymbolTable() { return m_symbolTable; }
 
-    // ── parser 名字识别（spec §2 步骤 4 / 设计 3.4）：限定模板名 N::B 的
-    // 作用域裁决与 Parser 的消歧【同源一张表】（spec 拍板 2）。analyze 前注入；
-    // 未注入时 Sema 维持 B35 的裸尾剥近似（单测路径的兼容缺省）。
-    void setNameRegistry(std::shared_ptr<const NameRegistry> names) {
-        m_names = std::move(names);
-    }
-
     // ── 诊断可视化（--dump-* 系列）──
     // dumpHierarchy: 类层次结构图（继承树 + 每个类详情框 + typeinfo 链）
     // dumpLayout: 三层内存布局详图（对象 → vtable(含[-2][-1]) → typeinfo 链）
@@ -264,9 +256,6 @@ public:
     void dumpLayout(const std::unordered_map<std::string, TypePtr>& classTypes);
 
 private:
-    // ── parser 名字识别：限定名裁决的只读依据（可为 null = 单测兼容路径）──
-    std::shared_ptr<const NameRegistry> m_names;
-
     // ── 符号表管理 ──
     SymbolTable m_symbolTable;
 
@@ -494,9 +483,26 @@ private:
     void visit(AssignStmt& stmt) override;
     // 表达式语句：推导类型、丢弃值（副作用语句，如函数调用）
     void visit(ExprStmt& stmt) override;
+    // 空语句 / 无声明符的声明：`;` 与 `A<int,int>;` 无事可做；
+    // ★ B37：裸类型名声明（`S;`）在此裁决【这个名字在此处可见吗】——
+    //   可见性只由本类的符号表回答（红线 3 判据单点），Parser 只给候选。
+    void visit(EmptyStmt& stmt) override;
 
     // ── 类型与别名解析 ──
     TypePtr resolveType(TypePtr type);
+    // ★ B37：名字可见性判据（单点）——"这个名字在此处可见吗、且是个类型吗"。
+    //   两个消费点共用：resolveType 的兜底链、visit(EmptyStmt) 的裸名声明裁决。
+    //   查找顺序（clang [basic.lookup.unqual] 简化版）：当前类作用域 →
+    //   命名空间链（内→外，含全局）。详见 .cpp 处的判据说明。
+    struct VisibleType {
+        TypePtr    type;       // 可见的类型（已解糖）；nullptr = 不可见
+        TypePtr    raw;        // 命中的原始条目（类作用域别名 = 未解糖的目标；其余同 type）
+        int        level = 0;  // 1=类作用域 2=命名空间 3=全局；0=未命中
+        std::string scope;     // 命中的作用域（类名 / 命名空间名；全局为空）
+    };
+    VisibleType lookupVisibleType(const std::string& name);
+    // 这个名字声明过吗（任意 kind：变量/函数/类型）——裸名声明裁决的第二问。
+    bool isNameDeclared(const std::string& name);
 
     // ── decltype 求值（实现 DecltypeEvaluator 接口，理论见 docs/learn/20）──
     // [dcl.type.decltype] 两套规则，按原文形态分派（int a; int& r = a;）：

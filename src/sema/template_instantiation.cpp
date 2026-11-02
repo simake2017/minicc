@@ -136,11 +136,37 @@ std::string NameMangler::losslessArgumentsKey(
     return key;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 符号名净化（产生端与使用端同源 ⇒ 天然一致）
+// ─────────────────────────────────────────────────────────────────────────────
+// ★ 命名空间里的类/模板名带 "::"（"M::B" / "N::C"），直接拼进符号标签会让
+//   汇编器报 "junk at end of line"，故统一净化。⚠ 净化后 "N::S" 与 "N_S"
+//   会撞名 —— 教学实现接受（见 docs/learn/26）。
+// ★ B38：mangleTemplateInstance 也用它（模板名带作用域 ⇒ "M::B"）。
+static std::string symbolSafe(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        out += ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_' || c == '$') ? c : '_';
+    }
+    return out;
+}
+
 std::string NameMangler::mangleTemplateInstance(
     const std::string& templateName,
     const std::vector<TemplateArg>& args) {
 
-    std::string result = std::format("_Z{}{}I", templateName.size(), templateName);
+    // ★★ B38：模板名可能带作用域（"M::B"）⇒ 先净化再算长度。
+    //   '::' 不是合法的 mangling 字符，直接拼进去汇编器会报 "junk at end of line"。
+    //   净化规则与 mangleRTTI / mangleVTable 共用同一份 symbolSafe（产生端与
+    //   使用端同源 ⇒ 天然一致）。长度前缀按【净化后】的名字算（'::'→'__' 等长，
+    //   故对既有名字零影响 —— 既有模板名都是纯标识符）。
+    // 对照 clang（Itanium ABI）：嵌套名编成 N…E ⇒ `M::B<int>` 是 _ZN1M1BIiE，
+    //   本实现是 _Z4M__BIiE —— 编码形态不同（教学实现，见 docs/BUGS.md B7），
+    //   但【唯一性】一致：`M::B<int>` 与 `::B<int>` 必是不同符号。
+    const std::string safeName = symbolSafe(templateName);
+    std::string result = std::format("_Z{}{}I", safeName.size(), safeName);
 
     for (auto& arg : args) {
         // 按 [temp.arg] 的形态分派：类型实参 → 直接编码类型（Box<int> ⇒ …IiE）；
@@ -238,19 +264,6 @@ std::string NameMangler::mangleFunction(
 // RTTI 符号名（[class.rtti]，理论见 docs/learn/11）
 // ─────────────────────────────────────────────────────────────────────────────
 // 格式 _ZTI + 类名；demo: MyClass ⇒ _ZTI7MyClass
-// ★ 命名空间类的名字带 "::"，直接拼进符号标签会让汇编器报 "junk at end of line"，
-//   故统一净化（产生端与调用端都是本函数，天然一致）。⚠ 净化后 "N::S" 与 "N_S"
-//   会撞名 —— 教学实现接受（见 docs/learn/26）。
-static std::string symbolSafe(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) {
-        out += ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') || c == '_' || c == '$') ? c : '_';
-    }
-    return out;
-}
-
 std::string NameMangler::mangleRTTI(const std::string& className) {
     const std::string safe = symbolSafe(className);   // 先净化再算长度，自洽
     return std::format("_ZTI{}{}", safe.size(), safe);
@@ -1481,6 +1494,9 @@ StmtPtr TemplateInstantiator::cloneStmt(
         case NodeKind::Empty: {
             auto cloned = std::make_shared<EmptyStmt>();
             cloned->location = stmt->location;
+            // ★ B37：裸类型名声明的名字槽要跟着克隆（漏了 ⇒ 实例化后的裸名声明
+            //   变成无名空语句，可见性裁决失效 ⇒ 非法程序静默通过）。
+            cloned->typeName = static_cast<EmptyStmt&>(*stmt).typeName;
             return cloned;
         }
 

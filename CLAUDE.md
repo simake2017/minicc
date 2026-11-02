@@ -702,6 +702,77 @@ enum/typedef/using，**template 头后不置**——`Box;` 对类模板名保持
 ② 查不到 ≠ 不是，否定查询做正向推断是这类消歧最常见的错法。
 分层红线再确认（spec 否决记录）：**Parser 不持 Sema 活句柄**——用构造期
 只读投影换分层，是空间换架构的取舍。
+★ **B37 起这条已被改写**：见下条「名字可见性裁决下沉 Sema」。
+
+✅ **名字可见性裁决下沉 Sema（B37，docs/learn/48 + specs/designs 首例）** ——
+起点是用户追问「嵌套类 A 里有 B、外面也有 B，感觉有问题」——查下来嵌套类 minicc
+不支持，但**同一处作用域盲区今天就能踩到**：类作用域类型别名 + 命名空间模板。
+根因是**两个不同的问题被同一个 bit 回答**：登记表的 type 位答的是
+「这个 TU 里声明过吗」，而 [stmt.ambig]/3 要的是「**在这里**可见吗」。
+**修法（三层）**：① **红线 1 改写**——「语法期零语义分层」→「**语义裁决权单一**」：
+名字的种类与可见性只由 Sema 符号表裁定，Parser 只能通过窄的只读查询接口
+向 Sema 提问并服从答复（clang 的 Actions 模式：`Parser.h:639` 的 `Sema &Actions;`
++ `Parser.cpp:1696` 的 `Actions.ClassifyName(...)`），**不得自建第二份表**。
+★ 原措辞把**现方案**写成了红线、顺带禁掉了 clang 的实际做法——**红线该写目标
+不写现状**（架构现状不是原理约束）。
+② **可见性已下沉**：Sema 新增 `lookupVisibleType`（**判据单点**：类作用域别名表 →
+命名空间链逐级外层 → 全局；原 resolveType 里三处手写回退全部换成它），
+`EmptyStmt` 增 `typeName` 槽携带裸名到语义期，裁决分三支：
+可见的类型名 ⇒ 判为无声明符声明（[dcl.dcl]/1）/ 声明过但非类型 ⇒ 走表达式路径
+（局部变量遮蔽全局类 S，与 clang 同）/ 两不中 ⇒ `use of undeclared identifier`。
+③ **登记表降级**：NameRegistry 定位改写为**过渡态的候选过滤器**（「值不值得让
+Sema 查一下」），不得当可见性的答案。
+**Stage 2/3 已拍板未做**：Stage 2 = 登记表消费点逐个迁入 Sema + 模板 id 改用
+clang 式语法试探（`isTemplateArgumentList` + `RevertingTentativeParsingAction`）；
+Stage 3 = 换成边解析边 `ActOn*` 登记的正规模式。
+**顺带查实三处既有缺口（本批未修，已登记）**：命名空间变量在块作用域不可见
+（`namespace N { int g; }` 里裸用 g 不可见）/ 命名空间模板按**裸名**注册 ⇒
+`N::B` 会绑到全局 B（p7）/ 嵌套类不支持。
+测试 tests/lang/test_basics_25..27（1 正例 + 2 负例，文案与 clang **逐字同**，
+含列号 28:5 / 29:5）+ 单测 tests/unit/test_name_visibility.cpp（`NameVisibility.*` 7 例：
+全局/命名空间内/命名空间链外层/类作用域别名/全局不可见/类作用域别名全局不可见/
+局部变量遮蔽）；docs/specs/visible-name-lookup.spec.md + docs/designs/…design.md
++ docs/learn/48 + BUGS.md B37。
+**有意漂移 4 处**（basics_23 源注释位移 + 新增 [sema:stmt] 2 行 / tmpl_54 过时括注
+改写 / 新增 basics_25..27 三份 / 单测 +7）。全量 **369/369**（362 +7）。
+★ 单测曾被 3 处既有缺口绊住：`NamespaceChainOuterLevel` 里调用 `A::B::f()` 报
+`Undefined variable 'A::B::f'`——**命名空间嵌套函数的不限定调用本身不支持**，
+改成不调用函数（Sema Pass 3 照样走查函数体）。
+★ **这条坑在下一批被追平了**：那个 `A::B::f` 之所以不支持，根因是 B38 的
+「嵌套命名空间丢外层」——注册名是 `B::f` 而使用名是 `A::B::f`（见下条）。
+
+✅ **作用域即身份（B38，Stage 2，docs/learn/49 + specs/designs）** ——
+红线 1 改写后的三阶段里的 Stage 2「登记表退场」。**主题一句话**：
+**作用域是名字身份的一部分**（clang 的 DeclContext 链 + Itanium 的
+`<nested-name>` `N…E` 编码都是这件事的字面体现）。
+**探针（clang++-18 -std=c++20 对拍）暴露的三个症状，同一个根因**：
+① `N::B<int>` 绑到**全局** B（模板按裸名注册 + 限定名走"剥 :: 末段查全局蓝图"）；
+② `N::B<int>` 与 `M::B<int>` **撞成同一个实例** `B_int`（同名模板跨命名空间撞车）；
+③ `A::B::f()` 报 `Undefined variable 'A::B::f'`（前缀化只取本层 `decl->name`，
+嵌套时丢外层 —— 顺带解释了上一条里那个 unit test 的坑）。
+**修法（作用域只写一遍，其余全是派生 —— 判据单点的收益）**：
+`processNamespaceDecl` 的前缀化改用 `m_currentNamespace`（完整路径），
+函数/类/全局变量/枚举/**模板**（新增 `case NodeKind::Template`）共用同一句；
+派生 ⇒ 注册键 `N::B` / 实例名 `N::B_int` / 缓存键 `N::B<int>` /
+mangling `_Z4N__BIiE`（`symbolSafe` 净化，`::`→`__` 等长故长度前缀自洽）/
+汇编符号 `N__B_int`。
+**限定名不再剥尾**：`N::B` 查不到就报 `no template named 'B' in namespace 'N'`
+（**与 clang 逐字**；clang 另附 "did you mean simply 'B'?" 建议，本项目不做）——
+**由宽改严**：旧行为默默绑全局 B 是静默算错（方向性错）。
+**登记表退场一处**：删 `SemanticAnalyzer::m_names` / `setNameRegistry` /
+main.cpp 的注入 —— 第二份作用域事实只剩 Parser 侧那一张（过渡态，Stage 3 消灭）。
+测试 tests/lang/test_basics_28..29（两个正例，与 clang 对拍 rc=0）+ 单测
+tests/unit/test_scope_qualified_names.cpp（`ScopeQualifiedNames.*` 5 例，
+**突变验证 4 条逐条实跑变红**：①前缀化改回本层名 ⇒ 1 例红 ②模板不前缀化 ⇒ 3 例红
+③限定名改回剥尾 ⇒ 1 例红 ④mangling 不净化 ⇒ 1 例红）；
+docs/specs/scope-qualified-names.spec.md + docs/designs/…design.md +
+docs/learn/49 + BUGS.md B38。
+**有意漂移**：basics_22/23 的模板蓝图名+实例名+mangled 带作用域（旧日志行
+`[resolve] 限定模板名 'N::B' ⇒ 裸名 'B'` 消失）+ 新增 basics_28/29 两份 +
+`_unit_cases` +7。
+★ **基线也被过期二进制骗了**：上一版基线的 `369` 是**没重建的 unit_tests**
+留下的假象（learn/47 §6 第三种失败面具，这回连基线也骗）⇒ 重建后 371，
+本批 +5 ⇒ **376/376** 全绿。
 
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
@@ -715,7 +786,17 @@ enum/typedef/using，**template 头后不置**——`Box;` 对类模板名保持
 （depth > 1 直接报错）—— 见 docs/learn/33 §5；
 NTTP：**任意常量表达式** `Buf<2+2>` / `Buf<k>`（主线 D）、字面量溢出自动升格、
 `\x`/`\u` 转义、非整型 NTTP（指针/引用/枚举/字面量类）、`template<auto V>` 的**偏特化**模式
-—— 见 docs/learn/35 §5。
+—— 见 docs/learn/35 §5；
+**名字可见性三阶段（红线 1 改写后的路线，B37 起）**：Stage 1 = 可见性裁决下沉 Sema
+✅（B37/learn/48）；Stage 2 = 作用域即身份 + 登记表退场一处 ✅（B38/learn/49，
+登记表的**限定名**消费点已删，Parser 侧两处仍在）；Stage 3 = 边解析边 `ActOn*`
+登记的正规模式（clang 的 Actions 模式）+ 登记表整体退场（含 **value 位**：
+clang 对**未声明**的名字按 C++20 规则当 template-id 解释，探针
+`unknown<x>(y)` ⇒ clang 报 "use of undeclared identifier 'x'"，
+minicc 走比较链 ⇒ 报 "Undefined variable 'unknown'" —— 分水岭是"这个名字
+**声明过**吗"，登记表至今没有 value 位）；
+**B37 查实、到 B38 仍未修的两处缺口**：命名空间变量在块作用域不可见
+（`namespace N { int g; }` 裸用 g 不可见）/ 嵌套类不支持。
 ⏭ 后续计划见 **docs/ROADMAP.md**（主线 C 控制流 → D 常量折叠 → E 数组/高级类型 → F 深水区选做，
 每条含理论点/clang 参照/任务分解/验收）。新会话接手：先读本文件与 ROADMAP，选定主线再开工。
 

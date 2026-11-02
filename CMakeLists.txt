@@ -92,6 +92,8 @@ add_executable(unit_tests
     tests/unit/test_member_template_in_class_template.cpp
     tests/unit/test_arg_binding.cpp
     tests/unit/test_name_registry.cpp
+    tests/unit/test_name_visibility.cpp
+    tests/unit/test_scope_qualified_names.cpp
     src/lex/preprocessor.cpp
     src/sema/sfinae.cpp
     src/ast/constant_folder.cpp
