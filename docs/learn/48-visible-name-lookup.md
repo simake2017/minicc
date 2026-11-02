@@ -7,6 +7,33 @@
 > 学习产物：本篇。
 > 台账：BUGS.md B37；红线：`docs/constraints/00-全局约束.md` §二.1（措辞改写）。
 
+## §0 定位与能力清单
+
+"这个 TU 里声明过 S 吗"与"**在这里**可见吗"是两个不同的问题 ——
+名字登记表答前者，符号表答后者；拿前者的答案去回答后者，就是本批修掉的
+**静默放行**（非法程序通过）。修法不是给登记表再加一个位，而是把可见性
+裁决**交回有完整信息的那一侧**（Sema 的符号表），并把红线从"手段"改写成
+"目标"。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 非限定名字查找沿作用域链上溯 [basic.lookup.unqual] | 类作用域别名 → 命名空间链逐级外层 → 全局 | 已实现 |
+| 命名空间链**逐级外层** | `namespace A { namespace B { … } }` 里 B 能看到 A 的 S | 已实现 |
+| 类作用域**先于**命名空间 | 类内别名遮蔽同名全局类型 | 已实现 |
+| 同名遮蔽（局部变量遮蔽全局类型） | 判为表达式路径而非声明 | 已实现 |
+| [stmt.ambig]/3「能当声明就当声明」 | 裸名 `S;` 的三岔处置（见 §6.2） | 已实现 |
+| 未声明名的诊断 | `use of undeclared identifier 'S'`，与 clang 逐字（含列号 28:5） | 已实现 |
+| 判据单点 `lookupVisibleType` | `resolveType` / `visit(ExprStmt)` / `visit(EmptyStmt)` 三个消费点共用 | 已实现 |
+| 类模板实例的别名在成员函数体内裸用 | 走 `m_classDecls` 的 typeAliases（实例类的别名没进符号表） | 已实现 |
+| 可见类型名的诊断（clang 发 warning） | minicc 不发 warning，走合法路径 | 部分 |
+| 基类成员查找 / `using Base::f;` 引入名 | 只有"当前类的 typeAliases" | 未做 |
+| 嵌套类 | 解析期即拒收（`Expected type name`） | 未做 |
+| 命名空间成员的**变量**可见性 | `namespace N { int g; void f(){ g; } }` 里 g 查不到 | 未做 |
+| 命名空间模板蓝图的前缀化 | 修前按**书写名**注册 ⇒ `N::B` 的模板在全局以裸名可见（错绑） | 修前未做（learn/49 已修，B38） |
+| 解析期活符号表（clang 的 Actions 模式） | 无 | 未做（Stage 3） |
+
+---
+
 ## 1. 理论背景
 
 ### 1.1 [basic.lookup.unqual]：非限定名字查找沿作用域链上溯
@@ -257,3 +284,29 @@ minicc:  [sema:stmt] 'S' 可见的类型名 ⇒ 判为无声明符声明        
 4. **红线该写目标，不该写手段** —— "Parser 不持 Sema 句柄"是手段，
    "语义裁决权单一"才是目标；把手段写成红线，会把 clang 的正解一并禁掉。
 5. **命名空间链要逐级外层** —— 只查一层就会拒收合法程序（`namespace A { namespace B { … } }`）。
+
+---
+
+## 9. 真实版多做了什么、为什么
+
+素材来自 §4 对照表的「简化了什么」列与 §7 的边界表。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Actions` = `Sema&`（Parser 持 Sema **活句柄**），`Actions.ClassifyName(getCurScope(), …)` 查**当前作用域** | 本实现阶段 1 让 Parser 只产出**候选**（`EmptyStmt{typeName}`），把可见性推到语义期；阶段 3 才谈得上对齐 |
+| `Sema::ClassifyName` 沿 Scope / DeclContext 链查活符号表 | 本实现是"当前类 + 命名空间链 + 全局"三段近似：**没有基类链、没有 using-declaration 引入名** |
+| `Sema::LookupParsedName` 的完整查找 | minicc 的作用域链是"三个变量拼的"（`m_currentNamespace` / `m_currentClassName` / 符号表），不是链 |
+| `Sema::NameClassification` 的 payload（具体 `NamedDecl*` 实体） | 本实现只有 bit，没有实体 —— 判据只需要"可见的类型名"这一个结论 |
+| `Parser::isTemplateArgumentList` 的**语法试探**（clang 的模板 id 消歧不靠名字分类，还要再试探一次） | 本实现多一道"登记表 template 位"闸；Stage 2 拆掉、Stage 3 换成 clang 式 |
+| clang 的 `did you mean` 附注（`use of undeclared identifier 'S'` 后附建议） | 文案逐字对齐优先；建议属诊断体系，未做 |
+| clang 边解析边 `ActOn*` 登记（声明一进作用域符号表就有） | minicc 是三趟架构 —— 这条当初被写成红线，learn/48 已把它改写成"架构现状不是原理约束" |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-11-02 | 落地 B37：可见性裁决下沉 Sema —— 新增 `lookupVisibleType`（判据单点）、`EmptyStmt` 增 `typeName` 槽把裸名带到语义期、裸名三岔处置；同时把红线 1 的措辞从"语法期零语义分层"改写为"**语义裁决权单一**" | 原措辞把**现方案**写成了红线，顺带把 clang 的实际做法（Parser 持 `Sema &Actions`）一并禁掉 —— 红线该写目标不写现状（git 4f1fb49） |
+| 2026-11-02 | 顺带查实两处既有缺口（未修，已登记）：命名空间变量在块作用域不可见、嵌套类不支持 | 两者与"作用域链不完整"同族，留在 §7 边界表里 |

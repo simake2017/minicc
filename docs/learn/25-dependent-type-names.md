@@ -7,6 +7,29 @@
 
 ---
 
+## §0 定位与能力清单
+
+`T::x` 在模板定义期是个**悬案** —— 编译器不知道 `x` 是类型还是值。`typename`
+是原告的声明，真正的判决要等**替换**那一刻；而那一刻正是 [temp.deduct]/8 的
+**直接上下文**：查不到必须**当场软失败**，否则 `void_t<typename T::type>` 这套
+探测惯用法整个不成立。本篇把"悬案 → 判决 → 判决的地点决定软硬"这条链走通。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| `typename` 前缀的语法支持（[temp.res]/5） | Parser 收下 `typename` 前缀并建"限定者是模板形参"的嵌套节点 | 已实现 |
+| 定义期**保持依赖**、不提前查表 | 限定者是形参时 `resolveType` 原样返回，不落地 | 已实现 |
+| 替换期兑现（`substituteType` Case 5.5） | 先替换限定者，再查成员表解糖 | 已实现 |
+| **当场软失败**（[temp.deduct]/8 直接上下文） | 查不到成员类型 ⇒ `Sfinae::fail`，候选被移出而非报错 | 已实现 |
+| 硬错误对照 | 同一个"查不到"发生在**非直接上下文**（实例化出来的函数体里）必须报错 | 已实现（文案与 clang 逐字相同：`no type named 'type' in 'WithoutType'`） |
+| `void_t<typename T::type>` 探测惯用法 | 命中 ⇒ `true_type`，落空 ⇒ 回退主模板 | 已实现 |
+| 三种出现位置各有归属 | 字段/形参/返回类型、模板实参内部、非模板上下文 | 已实现 |
+| `MemberTypeResolver` 分层接口 | Sema 实现、instantiator 持可选指针，避免 Sema ⇄ Instantiator 双向依赖 | 已实现 |
+| `typename` 与**模板模板形参** | `template<template<class> class C> typename C<T>::type` | 未做 |
+| **非类型依赖名** | `T::value`（依赖的静态成员 / 枚举量） | 未做 |
+| **依赖基类** | `template<class T> struct D : T::base {};` | 未做 |
+| `typename` 用在**表达式位置** | `typename T::type{}` 这类构造表达式 | 未做 |
+| 直接上下文的**精确粒度** | 判据是"当前是否在 `Sfinae::attempt` 里"，而非标准的"是否在被替换类型自身的构成过程中" | 部分（对本项目覆盖的形态等价，更复杂的嵌套替换可能判宽） |
+
 ## 1. 理论背景
 
 ### 1.1 为什么需要一个关键字（[temp.res]/5）
@@ -209,3 +232,30 @@ ctest --test-dir build-linux                       # 154/154
 | 依赖基类 | `template<class T> struct D : T::base {};` 未支持 |
 | `typename` 用在表达式位置 | `typename T::type{}` 这类构造表达式未支持 |
 | 直接上下文的粒度 | 判据是"当前是否在 Sfinae::attempt 里"，而非标准的"是否在被替换类型自身的构成过程中"；两者对本项目覆盖的形态等价，但更复杂的嵌套替换可能判宽 |
+
+## 6. 真实版多做了什么、为什么
+
+（把 §1.1 / §1.3 / §3.2 里对 clang 的对照与 §5 的边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Parser::TryAnnotateTypeOrScopeToken` 看到 `typename` 就转 `ParseTypenameType`，产出 `DependentNameType`（限定者依赖）/ `TypenameType`（限定者不依赖）两种节点 | 本项目用**一个**带 `nestedQualifier` 的嵌套节点表示两种形态，靠"限定者是不是 TemplateParam"区分 —— 教学上更直观，也省掉一个节点种类 |
+| `Sema::SubstType` 里对依赖限定名重新做**限定名查找**（`getTypeName` + `LookupQualifiedName`） | clang 的 TreeTransform 本身就是 Sema 的一部分，这件事是"顺手"完成的；本实现必须把分层补回来 ⇒ 抽 `MemberTypeResolver` 回调接口 |
+| 直接上下文的判定是**精确**的（"是否在被替换类型自身的构成过程中"） | 本实现用 `SfinaeContext` 的 RAII 深度计数在关键路径上手工划分；两者对本项目覆盖的形态等价，更复杂的嵌套替换可能判宽 |
+| 依赖名支持**非类型**形态（`T::value`、依赖的静态成员 / 枚举量） | 本项目类内 `static const` 当时本身就缺 ⇒ 这条线整条未做 |
+| 依赖**基类**（`struct D : T::base`） | 依赖基类会把"替换期才知道基类是谁"这件事扩散到布局计算，是一整条独立主线 |
+| `typename` 可用在**表达式位置**（`typename T::type{}`） | 未做 —— 表达式位置的依赖类型与本文的"类型位置"是两条不同的路 |
+| `typename` 与**模板模板形参**组合 | 未做 —— 模板模板参数那条线本身是后面才补的（learn/33） |
+| 限定名查找有**完整作用域链**（`LookupQualifiedName` 走 DeclContext 链） | 本实现是单级查表（`m_classDecls[qual]->typeAliases`）—— 见 learn/24 §7 |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-16 | 模板机制主线收官（commit 5d9b78d）：Parser 收 `typename` 前缀 + 建"限定者是 TemplateParam"的嵌套节点；`resolveType` 遇依赖限定者原样保留；`substituteType` 新增 Case 5.5 在**替换当场**查成员表解糖 | [temp.res]/5 的悬案必须在替换期才判决；定义期判不出 `T::x` 是类型还是值 |
+| 2026-09-16 | 新增 `MemberTypeResolver` 回调接口（与 `DecltypeEvaluator` 同构） | "去某个类里查成员类型"住在 Sema，而需要它的地方在替换引擎里；直接互相依赖会形成 Sema ⇄ Instantiator 双向依赖 |
+| 2026-09-16 | 查不到成员类型时按 `Sfinae::fail` 软失败，硬错误文案与 clang 逐字相同（`no type named 'type' in 'WithoutType'`） | 失败发生在**直接上下文** ⇒ 候选移出而非报错 —— 这是 `void_t` 探测惯用法成立的前提 |
+| 2026-09-16 | 新增回归 `tests/tmpl/test_tmpl_49_dependent_type_name.cpp`（含"半软半硬对照"） | 把"软失败 vs 硬错误"的**地点**差异钉成可回归的断言 |
+| 2026-09-16 | 学习文档 18..29 一次性成文（commit 582887c） | — |
+

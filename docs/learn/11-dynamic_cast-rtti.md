@@ -7,6 +7,32 @@
 
 ---
 
+## §0 定位与能力清单
+
+`static_cast` 是一次**编译期的信仰之跃**：它只检查类型关系，不检查对象实况——
+`static_cast<Dog*>(animalPtr)` 在实际是 `Cat` 时是未定义行为，且**一声不吭**。
+`dynamic_cast` 是 C++ 里唯一"编译期检查合法性、**运行期才出结果**"的转型。
+它凭什么能在运行期知道对象的真实身份？靠 RTTI：编译器为每个多态类埋一份类型档案
+（typeinfo），对象里的 `_vptr` 指着 vtable，vtable 的 `[-1]` 槽又指着那份档案。
+本文讲这条链条在 minicc 里是怎么落地的。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| [expr.dynamic.cast]/3-5 静态层检查 | 目标类存在、源是类指针、与目标同体系可达 | 已实现 |
+| [expr.dynamic.cast]/7-9 动态层（指针版） | 成功返回指向目标子对象的指针，失败返回空指针 | 已实现 |
+| typeinfo 发射 | 每个多态类生成 `_ZTI<name>`，三槽布局（`__si` 风格：自身 vptr / mangled 名字 / 基类 typeinfo） | 已实现 |
+| vtable 表头区 | `[-2]` offset-to-top、`[-1]` typeinfo 指针 | 已实现 |
+| 运行时匹配助手 | `__minicc_dynamic_cast` **内联发射**进每个 `.s`，沿 typeinfo 链上溯比对地址 | 已实现 |
+| 继承链上溯 | 沿 typeinfo 第 3 槽（+16）逐级上溯，直到槽为 0 | 已实现（**仅单继承**） |
+| 继承图打印 | `printInheritanceGraph`（Pass 1 后 DFS）+ `--dump-hierarchy` | 已实现 |
+| 多继承 / 菱形的上溯与指针调整 | `__vmi_class_type_info` + `bases[].offset_flags` 解码 | 未做（布局侧已支持，运行时未做） |
+| 虚继承的 vbptr / vbtable | | 未做 |
+| `dynamic_cast<T&>` 引用版 | 失败抛 `std::bad_cast` | 未做 |
+| `typeid` 表达式 | 静态 typeid 引用 typeinfo 弱符号 | 未做（词法层没有 `typeid` 关键字） |
+| 静态层"源必须多态"的检查 | clang 报 `'X' is not polymorphic` | 未做（learn/16 §④ 缺口 #1） |
+| 非多态向上转型退化为 `static_cast` | 零运行期开销 | 未做（learn/16 §④ 缺口 #2） |
+| 跨 `.so` 的 typeinfo 合并 | 弱符号 + 名字比较 | 未做（单文件产物无此问题） |
+
 ## ① 理论背景
 
 **标准依据**：[expr.dynamic.cast]（dynamic_cast 的静态约束与运行时语义）。
@@ -642,15 +668,29 @@ downcast  MiA* → MiC*   差 = 0    （匹配最派生类型后回到起点）
 
 ---
 
-## ⑤ 本项目的已知简化与真实世界差距
+## ⑤ 真实版多做了什么、为什么
 
-| 简化 | 真实编译器 | 影响 |
-|---|---|---|
-| typeinfo 比地址 | 同（`__do_catch` 等才比内容） | 无 |
-| 仅单继承上溯 | `__vmi` 处理多继承/菱形 | 不支持多继承转型 |
-| 无 `dynamic_cast<T&>` | 失败抛 `std::bad_cast` | 仅指针形式 |
-| 无跨 .so 的 typeinfo 合并 | 弱符号 + 名字比较 | 单文件产物无此问题 |
-| 兄弟转型静态放行 | 同（[expr.dynamic.cast] 要求同体系） | 语义一致 |
+★ 本节由原「本项目的已知简化与真实世界差距」提升而来（原表内容**原样保留**，
+只把三列「简化 / 真实编译器 / 影响」改写成 mini-restore 的两列式）。
+素材来源：本文 §2.3 对照表 + §4.1 发射决策表 + §4.5~§4.6 的多继承/虚继承实测
++ `docs/BUGS.md` B11~B15/B20 + learn/16 §④ 缺口清单 + CLAUDE.md「未做」清单。
+**未查证的写「（本项目未查证）」**。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| typeinfo 的比较方式：真实编译器在 `__do_catch` 等场景比**内容**（弱符号 + 名字比较） | minicc 一律**比地址**——typeinfo 是链接期唯一的全局符号 ⇒ 影响：无 |
+| `__vmi_class_type_info` 处理多继承 / 菱形的上溯 | minicc 只做**单继承上溯** ⇒ 影响：不支持多继承转型 |
+| `dynamic_cast<T&>`：失败抛 `std::bad_cast` | minicc 未实现引用版 ⇒ 影响：仅指针形式 |
+| 跨 `.so` 的 typeinfo 合并 | minicc 是单文件产物 ⇒ 影响：单文件产物无此问题 |
+| 兄弟转型的静态放行 | 真实编译器**同样**放行（[expr.dynamic.cast] 要求同体系）⇒ 影响：语义一致 |
+| 匹配逻辑放在 **libstdc++ 的 `__dynamic_cast` 库函数**里，编译器只发 4 个参数 | minicc 把助手**内联发射**进每个 `.s`（`__minicc_dynamic_cast`）——产物自包含，一条 `gcc test.s` 即可链接运行，教学上每一步可观测；代价是每个 TU 都带一份助手代码 |
+| 多继承下的**指针调整**（`bases[].offset_flags` 高 24 位编码基类子对象偏移；次表还配 non-virtual thunk） | minicc 的助手"成功即返回原指针"（单继承下基类子对象就在偏移 0）——多继承的偏移调整与 thunk 整套未做 |
+| 虚继承的 **vbptr / vbtable**（vbptr 前 -24 处存 vbase 偏移）与**虚 thunk** | 未做：本项目无虚继承支持，构造期不需要安置 vbptr |
+| `typeid` 表达式与 `-fno-rtti` 开关 | 未做：词法层没有 `typeid` 关键字，也没有 RTTI 开关 |
+| 静态层的"源类型必须多态"检查（`'A' is not polymorphic`） | 未做：本项目的 `inferDynamicCast` 只查目标类存在 / 源是类指针 / 公共祖先可达——**漏了多态性检查**，错误被推迟到链接期 `undefined reference to '_ZTI1B'`（learn/16 §④ 缺口 #1） |
+| 非多态向上转型的**编译期退化**（`dynamic_cast<A*>` 退化成 `static_cast<A*>`，零开销） | 未做：本项目一律走运行期助手（learn/16 §④ 缺口 #2） |
+| Itanium ABI 的 `__fundamental_type_info` / `__si_class_type_info` / `__vmi_class_type_info` 三形态 | minicc 把 typeinfo **拍平成三槽**（自身 vptr / mangled 名字 / 基类 typeinfo）——语义结构同构，只是没有 `__vmi` 的基类数组 |
+| 跨 TU 的 vtable 去重（vague linkage / 主 vtable 规则） | 未做：教学编译器是单 TU 的 |
 
 ---
 
@@ -717,3 +757,15 @@ typeinfo 第三槽：1 个基类指针         __vmi：base_count + 基类数组
 命中 → 返回【原指针】                 命中 → 按 offset_flags 做指针调整
                                     （base[1]=0x1002 → 实测 +16）
 ```
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录；原 §⑤「已知简化与真实世界差距」提升为「真实版多做了什么、为什么」 | 规范见 docs/constraints/06；mini-restore 的 ③ 段式要求"每行 = clang 多做的 + 为什么可以砍" |
+| 2026-09-10 | 主线 B/G 批次落地：typeinfo 发射 + vtable `[-1]` 槽 + `__minicc_dynamic_cast` 内联助手 + 继承图打印 | RTTI 是**被需求拖出来**的：没有 `dynamic_cast` 就不发射 typeinfo（§4.1 发射决策表） |
+| 2026-09-10 | 内存布局实验补全：普通 / 多态 / 单继承 / 多继承 / 菱形 / 虚继承六张草图全部实测对拍（16 个用例） | "虚继承无虚函数 = 零运行时"这条推演**被实验推翻**（虚继承总是带 `_vbptr`）⇒ 记入 §4.9 勘误表 |
+| 2026-09-24 | 多继承成员/布局五条 bug 修复（B11~B15） | ① vptr 压字段是真 miscompile ② 继承来的成员方法查不到 ③~⑤ 把显示名当成了索引 |
+| 2026-10-08 | vtable 槽里的符号名与定义点不同源（B20） | 带参虚函数的槽写 `.quad A_f`、定义却是 `.globl A_f_1` ⇒ 链接期 `undefined reference` |
+| 2026-10-09 | 成员方法身份收口为「名字 + 形参类型」（B22 + B20 缺陷 c） | 非虚的 `f(int)` 曾认领虚的 `f()` 的槽并被误标 virtual ⇒ 运行返回 255 |
+| 2026-09-16 | 补出 learn/16：RTTI 存放粒度与"非多态 dynamic_cast"的缺口清单（4 条） | 本文的 §④ 只覆盖了"多态类"这一支；**非多态类上的 dynamic_cast** 的四条缺口（源多态性检查、向上退化、目标类多态要求、助手双向搜索）被单独拎出来问清楚 |

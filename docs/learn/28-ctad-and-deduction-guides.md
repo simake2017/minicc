@@ -10,6 +10,34 @@
 
 ---
 
+## §0 定位与能力清单
+
+`MyPtr m(7);` 没写 `<...>`，编译器**拿构造实参反推类模板形参**（CTAD）。
+它与函数模板实参推导是**同一套合一算法的反向使用** —— 把构造函数形参表当成那个
+`f`，被推的是类模板自己的形参。标准给的出口是**推导指引**（[temp.deduct.guide]）：
+一条长得像函数、但**不产生任何代码**的映射规则，用来补上构造函数根本推不出的形参。
+本篇还顺带暴露了一个此前一直存在却没被触发的洞：**替换 ≠ 实例化**。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| CTAD 的触发条件（[dcl.type.class.deduct]/1） | 裸模板名 + **直接初始化** `MyPtr m(7);` | 已实现 |
+| `Type name(args);` 的文法 | Parser 得先认得这条语法，否则直接报 `Expected ';'` | 已实现 |
+| **隐式指引**（从构造函数合成） | 遍历主模板的构造函数，`P = 构造形参类型` / `A = 构造实参类型` | 已实现 |
+| **显式指引**（模板形态）`template<class T> Box(T) -> Box<T>;` | 前瞻靠"配对右括号后是否跟 `->`" | 已实现 |
+| **显式指引**（非模板形态）`Two(int) -> Two<int,int>;` | 用来补构造函数**根本推不出**的形参 | 已实现 |
+| 指引**优先于**构造函数 | 用户写了就按用户的来 | 已实现 |
+| 复用 `deducePair` 实现 CTAD | 与函数模板推导同一个合一算法 | 已实现 |
+| 构造函数符号回填（`ctorSymbol`） | mangling 是有状态的，"该调哪个重载"只有 Sema 知道 | 已实现 |
+| 实例化后的**签名落地** | 替换后必须再过一次 `resolveType` 才成 `MyPtr_int` | 已实现 |
+| `auto m = MyPtr(7);` | 纯右值 → auto 类型 | 未做 |
+| 拷贝推导 `MyPtr m = other;`（C++17） | 需要先有拷贝构造语义 | 未做 |
+| 聚合推导（无构造函数的聚合类） | 需要聚合初始化语法 | 未做 |
+| 指引参与**重载决议** | 本实现"找到第一条能推通的就用" | 未做 |
+| CTAD 用于 `new` / 函数返回类型 | `new MyPtr(7)` / `return MyPtr(7);` | 未做 |
+| 构造函数**重载**的完整决议 | CTAD 里只按参数个数挑构造函数 | 未做 |
+
+> ★ §5「边界」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 理论背景
 
 ### 1.1 CTAD 的准确触发条件（[dcl.type.class.deduct]/1）
@@ -277,6 +305,22 @@ clang++-18 -std=c++20 -fsyntax-only /tmp/ct3.cpp
 | `Sema::BuildCXXConstructExpr`（选构造函数） | `processVarDecl` 末尾按参数个数挑 + 回填 `ctorSymbol` | 不做重载决议，只按个数 |
 | `CodeGenFunction::EmitCXXConstructExpr` | `emitVarDecl` 路径② 的带参分支 | 实参上限 5 个（寄存器传参），超出不处理 |
 
+## 6 之补 真实版多做了什么、为什么
+
+（把 §6 对照表第三列与 §5 边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Sema::DeduceTemplateSpecializationFromInitializer` **建候选集**，全部候选一起决议，歧义时报 `ambiguous` | 本实现"找到第一条能推通的就用" —— 教学取舍：先把"隐式 / 显式指引谁优先"这条主线钉准 |
+| 指引与模板是**三个独立的 Decl 类**（`CXXDeductionGuideDecl` / `ClassTemplateDecl` / `FunctionTemplateDecl`） | 本项目让三者共用一个 `TemplateDecl` 外壳 ⇒ **每个"按 kind 分派"的地方都要为指引开一条路**（§3.2 记了三个漏一处就空指针崩溃的点）—— 这正是"判别依据是数据看起来像什么，而不是它是什么"的教训 |
+| 隐式指引由 `DeclareImplicitDeductionGuides` **合成**，并按构造参数是**按值还是按引用**改写签名 | 本实现直接遍历 `classTemplate->methods` 里的 ctor，不做形态改写 |
+| `Parser::TryParseDeductionGuide` 先把声明**解析出来**再决定归属 | 本实现用纯 token 扫描前瞻（括号配对 + 看 `->`）—— 更省事，但拿不到"解析结果" |
+| `Sema::BuildCXXConstructExpr` 做**完整重载决议**选构造函数 | 本实现按参数个数挑 + 回填 `ctorSymbol`；完整重载决议是另一条线 |
+| `CodeGenFunction::EmitCXXConstructExpr` 支持任意个实参 | 本实现实参上限 5 个（寄存器传参），超出不处理 |
+| clang 的实例类型**本身就是** `MyPtr<int>` 那个 Decl | minicc 的实例类型是**改名后的 Type**（`MyPtr_int`）⇒ 替换后残留的半成品 `MyPtr<int>` 必须再过一次 `resolveType` 才落地（§1.4） |
+| 拷贝推导 / 聚合推导 / `auto` 从纯右值推导 | 本项目类对象无拷贝语义、无聚合初始化语法、`auto` 只从表达式类型取 ⇒ 三条整块未做 |
+
+
 ---
 
 ## 7. 关键日志片段（`test_tmpl_51` 实跑）
@@ -303,3 +347,16 @@ clang++-18 -std=c++20 -fsyntax-only /tmp/ct3.cpp
 `MyPtr<int>` 与 `MyPtr<T>` 能对上，靠的是 docs/learn/27 里补的
 "实例出身"记录。三个子阶段（别名模板 / 类模板 id 结构合一 / CTAD）
 在这里闭环了。
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-16 | 模板机制主线收官（commit 5d9b78d）：CTAD + 推导指引（模板形态 / 非模板形态）+ `Type name(args);` 文法 | CTAD 是**同一套合一算法的反向使用** —— 直接复用 `TemplateDeducer::deducePair`，零重复代码 |
+| 2026-09-16 | 顺带修掉"替换 ≠ 实例化"：实例化函数后补一步**签名落地**（`resolveType` 一次） | 否则函数体里 `p.value` 报 `No member 'value' in class 'MyPtr'` —— 类型其实是对的，只是"还没被兑现" |
+| 2026-09-16 | 构造函数符号由 Sema 选定并回填 `VarDeclStmt::ctorSymbol` | mangling 是**有状态**的（同名多参追加 `_N` 后缀），CodeGen 按 `Name_Name` 硬拼会拼出不存在的符号 ⇒ 链接期 undefined |
+| 2026-09-16 | 学习文档 18..29 一次性成文（commit 582887c） | — |
+| 2026-09-16 | 别名模板 / 类模板 id 结构合一 / CTAD 三个子阶段在同一处闭环（`readOf(m)`） | 见 docs/learn/27 §7 的日志：CTAD 推出的类型回头又参与一次普通函数模板推导 |
+| 2026-10-22 | **表达式级构造调用** `Box<int>(7)` 落地（commit 0f54443，与全局/命名空间别名同批） | 显式实参的构造调用另开一条路，与本文的"裸类名 CTAD"路径并存 —— 两条路径都落到同一个 `ctorSymbol` 回填机制上 |
+

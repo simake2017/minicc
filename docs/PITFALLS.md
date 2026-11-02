@@ -1,3 +1,14 @@
+---
+title: minicc 踩坑史（PITFALLS）
+date: 2026-11-02
+category: compiler
+tags: [pitfalls, postmortem, compiler, minicc, codegen]
+type: index
+severity: high
+status: maintained
+related: ["[[docs/BUGS]]", "[[docs/learn/17-multiple-inheritance-layout]]", "[[docs/learn/22-name-resolution-layers]]", "[[docs/learn/23-cv-position-and-type-identity]]", "[[docs/constraints/05-文档标准与冲突裁决]]", "[[docs/constraints/06-文档骨架规范]]"]
+---
+
 # 踩坑史（PITFALLS）
 
 > 本文件收纳**已修复 bug 的现场记录**。它们原本写在代码注释里，但复盘经过对
@@ -52,6 +63,8 @@
 
 ### C1. 帧大小漏算序言区
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/24, tests/unit/test_codegen_frame.cpp
+
 **症状**
 
 极具迷惑性：变量**单独**读出来是对的，一旦参与「需要压栈暂存」的二元表达式、
@@ -88,6 +101,8 @@ return a + h;      // 期望 9，实际返回 2
 
 ### C2. 嵌套类字段初始化走了标量路径
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/17
+
 **症状**
 
 ```cpp
@@ -114,6 +129,8 @@ Wrap w(7, 9);      // 应该是"在 w.f 子对象上调用 Five::Five(7,9)"
 
 ### C3. 标量字段初始化一律 movq
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/learn/14
+
 **症状**
 
 4 字节 `int` 字段被写 8 字节 ⇒ 踩坏相邻字段。
@@ -136,6 +153,8 @@ Wrap w(7, 9);      // 应该是"在 w.f 子对象上调用 Five::Five(7,9)"
 ---
 
 ### C4. 字段写入硬编码 movl
+
+- severity: high ｜ status: partial ｜ related: docs/BUGS.md#b3-字段写入路径-3-硬编码-movl, tests/tmpl/test_tmpl_53_dependent_default_template_arg.cpp, tests/unit/test_codegen_field_write.cpp
 
 **症状**
 
@@ -184,6 +203,8 @@ q.p = pv;          // 写完 q.p != pv
 
 ### C5. 嵌套类字段取值走了 movq
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/17
+
 **症状**
 
 ```cpp
@@ -209,6 +230,8 @@ w->tag      // 正常
 ## parser
 
 ### P1. 模板形参注册晚于默认实参
+
+- severity: medium ｜ status: fixed ｜ related: docs/learn/30, tests/tmpl/test_tmpl_53_dependent_default_template_arg.cpp
 
 **症状**
 
@@ -237,6 +260,8 @@ introduce the type parameter into the local scope"；代码上 `ParseTypeName`
 
 ### P2. 帧出栈靠手工配对，异常路径泄漏
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/30
+
 **症状**
 
 模板体内发生语法错误后，**形参作用域泄漏到后续解析** —— 后面那些本该
@@ -257,6 +282,8 @@ introduce the type parameter into the local scope"；代码上 `ParseTypeName`
 ---
 
 ### P3. 语句层前瞻不跳 `&`
+
+- severity: medium ｜ status: fixed ｜ related: docs/learn/22
 
 **症状**
 
@@ -284,6 +311,8 @@ Identifier ⇒ 误判为表达式语句。
 
 ### P4. 缺直接初始化文法，CTAD 无从触发
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/28, tests/tmpl/test_tmpl_51_ctad_and_guides.cpp
+
 **症状**
 
 `MyPtr m(7);` 报 `Expected ';' after variable declaration` —— CTAD 根本没机会发生。
@@ -303,6 +332,8 @@ Identifier ⇒ 误判为表达式语句。
 ---
 
 ### P5. const 在类型说明符侧的应用位置
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/23, tests/tmpl/test_tmpl_47_cv_position.cpp
 
 **症状**
 
@@ -329,6 +360,8 @@ C<const int&> x;                                  // 悄悄落到主模板
 ---
 
 ### P6. NTTP 名在模板实参位置被误判
+
+- severity: medium ｜ status: fixed ｜ related: docs/learn/27, tests/tmpl/test_tmpl_50_alias_templates.cpp
 
 **症状**
 
@@ -357,6 +390,8 @@ minicc 没有那层分派，故只能保守处理。
 ## type
 
 ### T1. `Type::toString()` 不是单射
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/23, tests/tmpl/test_tmpl_47_cv_position.cpp
 
 **症状**
 
@@ -388,6 +423,8 @@ Pointer(Const(Int))  ┘
 
 ### T2. 模板实参不能一律存成 TypePtr
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/18
+
 **症状**
 
 `template <int N>` 的实参 `4` **无处安放** —— 值不是类型，而实参容器只装类型。
@@ -408,6 +445,8 @@ Pointer(Const(Int))  ┘
 ---
 
 ### T3. 引用折叠必须在构造点完成
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/12, tests/tmpl/test_tmpl_52_reference_collapsing.cpp
 
 **症状**（同一根因的三种表现）
 
@@ -445,6 +484,8 @@ Pointer(Const(Int))  ┘
 
 ### I1. 类模板 id 的实参不参与替换
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/27, tests/tmpl/test_tmpl_50_alias_templates.cpp
+
 **症状**
 
 ```cpp
@@ -471,6 +512,8 @@ template <class T> using Vec = MyPtr<T>;       // 别名展开后仍是 MyPtr<T>
 
 ### I2. 删除语句在克隆时被静默丢弃
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/10
+
 **症状**
 
 模板体内的 `delete p;` 实例化后**凭空消失**：不报错、不警告，只是内存泄漏。
@@ -492,6 +535,8 @@ template <class T> using Vec = MyPtr<T>;       // 别名展开后仍是 MyPtr<T>
 ---
 
 ### I3. 实例名清洗不是单射
+
+- severity: medium ｜ status: fixed ｜ related: docs/learn/19, tests/tmpl/test_tmpl_46_ptr_vs_ref_instance.cpp
 
 **症状**
 
@@ -515,6 +560,8 @@ template <class T> using Vec = MyPtr<T>;       // 别名展开后仍是 MyPtr<T>
 ---
 
 ### I4. 蓝图摘要读错了形参表
+
+- severity: low ｜ status: fixed ｜ related: docs/learn/18, docs/learn/35
 
 **症状**
 
@@ -548,6 +595,8 @@ template <class T> using Vec = MyPtr<T>;       // 别名展开后仍是 MyPtr<T>
 
 ### F1. `isTypeKeyword()` 缺 `KwConst`
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/22
+
 **症状**
 
 ```cpp
@@ -580,6 +629,8 @@ int main() {
 ---
 
 ### F2. 演示代码固定传 double 去填 NTTP 槽
+
+- severity: medium ｜ status: fixed ｜ related: tests/tmpl/test_tmpl_22_nttp_mixed.cpp, tests/tmpl/test_tmpl_52_nttp_spec_pattern.cpp
 
 **症状**
 
@@ -623,6 +674,8 @@ int main() {
 
 ### S1. resolveType 查不到就静默放行
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/22, docs/BUGS.md#b37-裸类型名声明的可见性无人裁决非法程序静默通过判据答错了问题
+
 **症状**
 
 ```cpp
@@ -649,6 +702,8 @@ a < b > z;           // [stmt.ambig] 误判成声明，静默编译出算错的�
 
 ### S2. 类内别名的登记时机
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/24, tests/tmpl/test_tmpl_48_class_type_aliases.cpp
+
 **症状**
 
 ```cpp
@@ -669,6 +724,8 @@ struct S { using Int = int; Int a; };   // 报 unknown type name 'Int'
 ---
 
 ### S3. 继承布局边扫边放
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/BUGS.md#b11-本类自身多态而基类全非多态时-_vptr-与首基类字段压在同一-offset
 
 **症状**
 
@@ -697,6 +754,8 @@ class D : public A, public B { ... };  // B 是多态基类
 
 ### S4. place 被 anyPoly 守卫
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/BUGS.md#b11-本类自身多态而基类全非多态时-_vptr-与首基类字段压在同一-offset
+
 **症状**
 
 `D : A{int x}, B{int y}` ⇒ `x@0` 与 `y@0` 互踩，构造 B 时覆盖掉 x。
@@ -713,6 +772,8 @@ class D : public A, public B { ... };  // B 是多态基类
 ---
 
 ### S5. 两处选了不同的 primary 基类
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/BUGS.md#b11-本类自身多态而基类全非多态时-_vptr-与首基类字段压在同一-offset
 
 **症状**
 
@@ -737,6 +798,8 @@ class D : public A, public B { ... };  // B 是多态基类
 
 ### S6. classType 的挂载时机
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/BUGS.md#b11-本类自身多态而基类全非多态时-_vptr-与首基类字段压在同一-offset
+
 **症状**
 
 字段偏移漏掉 `_vptr`、`totalSize = 0` ⇒ CodeGen 按 **0 字节** malloc，
@@ -758,6 +821,8 @@ class D : public A, public B { ... };  // B 是多态基类
 
 ### S7. 嵌套实例化未保存上下文
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/05, docs/learn/06
+
 **症状**
 
 `main` 分析到一半、中途实例化了一个 **void** 函数后，main 自己的 `return`
@@ -775,6 +840,8 @@ class D : public A, public B { ... };  // B 是多态基类
 ---
 
 ### S8. 成员 callee 漏了补推导
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/BUGS.md#b20-vtable-槽里的符号名与定义点不同源带参虚函数链接失败--次基类假符号
 
 **症状**
 
@@ -797,6 +864,8 @@ class D : public A, public B { ... };  // B 是多态基类
 
 ### S9. 以裸名为键的方法表
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/06, docs/BUGS.md#b22-同名同个数的成员重载sema-静默取第一个汇编期撞符号
+
 **症状**
 
 返回类型与参数**全错**（随机命中别的类的方法）。
@@ -815,6 +884,8 @@ class D : public A, public B { ... };  // B 是多态基类
 
 ### S10. 候选池混进了模板实例
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/06, docs/learn/26, docs/BUGS.md#b27-无可行候选时静默退回候选集首个
+
 **症状**
 
 `test_tmpl_17` 链接失败：`undefined 'mix'`。
@@ -832,6 +903,8 @@ class D : public A, public B { ... };  // B 是多态基类
 ---
 
 ### S11. Pass 2/3 漏掉命名空间
+
+- severity: medium ｜ status: fixed ｜ related: docs/learn/26
 
 **症状**
 
@@ -853,6 +926,8 @@ Pass 2/3 扁平遍历 `unit.declarations`，漏掉了命名空间内的类与函
 
 ### S12. 实参个数校验读错形参表
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/18, docs/learn/35
+
 **症状**
 
 `template <class T, int N>` 被数出 **2 个「类型」形参** ⇒ 对 `Buf<int,4>` 必然错位。
@@ -872,6 +947,8 @@ Pass 2/3 扁平遍历 `unit.declarations`，漏掉了命名空间内的类与函
 ---
 
 ### S13. 放宽数据结构时忘了拆守卫
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/32, docs/learn/35, tests/tmpl/test_tmpl_52_nttp_spec_pattern.cpp
 
 **症状**
 

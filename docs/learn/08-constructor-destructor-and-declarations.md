@@ -5,6 +5,32 @@
 
 ---
 
+## §0 定位与能力清单
+
+面向对象落到机器上的第一课是**对象的生死**：`new` 只是要了一块内存，
+`delete` 只是还了一块内存——真正让那块内存"成为一个对象"的，是构造函数；
+真正让它"不再是一个对象"的，是析构函数。本文讲 minicc 怎么把这条链子接通，
+以及顶层声明体系（全局变量 / 枚举 / 命名空间 / 类型别名）怎么分派。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| [class.ctor] 构造函数 | 语义期检测类未声明则注入默认无参构造 | 已实现 |
+| [class.base.init] 成员初始化列表 | 构造时逐个初始化成员（`Point(int px) : x(px) {}`） | 已实现 |
+| [class.dtor] 析构函数 | 显式声明或由语义期合成默认析构 | 已实现 |
+| [class.dtor] 虚析构 + 多态 delete | `delete` 基类指针时经 vtable[0] 派发到派生类析构 | 已实现 |
+| [expr.new] / [expr.delete] | new = 分配 + 构造；delete = 析构 + 释放 | 已实现 |
+| [dcl.dcl] 顶层声明分派 | 全局变量 / 函数 / 枚举 / 命名空间 / 类型别名 / 模板各走一支 | 已实现 |
+| [dcl.enum] 枚举 | 非限定枚举项提升到外层作用域，`enum class` 限定在自身作用域 | 已实现 |
+| [dcl.typedef] 类型别名 | `using` / `typedef` 注册为 `SymbolKind::Type`，语义期透明展开 | 已实现 |
+| [namespace.def] 命名空间 | 符号名前缀化 + 命名空间作用域链 | 部分（命名空间变量在块作用域不可见、嵌套命名空间支持不完整，见 learn/48 / learn/49） |
+| [class.base.init] 按**声明顺序**初始化 | clang 严格按成员在类内的声明顺序初始化，与列表书写顺序无关 | 未做（本实现按列表书写顺序依次发射） |
+| [class.dtor] deleting destructor 变体 | clang 的 D0（deleting）/ D1（complete）两个析构变体 | 未做（本实现单析构槽位 + `free`） |
+| [class.dtor] 基类析构链 | 派生类析构完自动析构基类 | 未做 |
+| `.bss` 未初始化零值优化 | clang 把未初始化全局放进 .bss | 未做（本实现统一在 `.data` 段发射初始值） |
+| 拷贝构造 / 移动构造 / 赋值运算符 | | 未做 |
+| 类外成员定义 `int C::f() const {}` | | 未做 |
+| 成员函数的默认实参 | | 未做 |
+
 ## ① 理论背景
 
 **标准依据**：[class.ctor]、[class.dtor]、[class.base.init]、[expr.new]、[expr.delete]、[dcl.dcl]、[dcl.enum]、[namespace.def]、[dcl.typedef]。
@@ -130,3 +156,34 @@ grep -A 10 "delete" /tmp/dtor02.s
 # 观察 .data 段全局变量发射与 Math::scale 符号调用：
 grep -A 10 ".data" /tmp/decl01.s
 ```
+
+## ⑥ 真实版多做了什么、为什么
+
+★ 素材来源：本文 §④ Clang 源码对照表的「教学级简化说明」列
++ `docs/BUGS.md` B9/B10/B11/B12/B13/B14/B15/B20/B22/B34 + CLAUDE.md「未做」清单。
+**未查证的写「（本项目未查证）」**。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `ParseTopLevelDecl` 支持声明说明符的**复杂自由组合**（`static inline const volatile ...`） | 本项目用 LL(1) + 局部试探解析区分"全局变量 vs 函数"；说明符组合的自由度被砍到教学够用 |
+| `SemaDeclCXX.cpp:ActOnMemInitializers` 严格按成员在类内的**声明顺序**初始化 | 本实现按**列表书写顺序**依次发射——写错顺序不会被编译器纠正。教学取舍：顺序错了语义也错，但错误可见（值不对），不会静默 |
+| `CGExprCXX.cpp:EmitDeleteExpr` 的 deleting destructor（D0）/ complete object destructor（D1）**两个变体** | 本实现单析构槽位 + `free`；少一个变体 ⇒ 少一套槽位身份判据（`C1/C2/D0/D1/D2` 的区分），B20/B22 的教训已经说明槽位判据极易写错 |
+| `CodeGenModule.cpp:EmitGlobalVarDefinition` 的 `.bss` 段未初始化零值优化 | 本实现统一在 `.data` 段发射初始值——少一段 ELF 布局规则（段合并/对齐），代价是产物里带着一堆显式 0 |
+| 派生类析构后**自动析构基类**（析构链） | 未做：本项目的析构只调自己那一层 |
+| `struct X : Base` 的默认继承级别 | clang 默认 **public**（[class.derived]/2）；本项目此前按 private 拒收，是**拒收合法程序**的 bug（B9），已修为 public |
+| 拷贝构造 / 移动构造 / 赋值运算符的完整生成 | 未做：一旦要做，就要处理"平凡拷贝 vs 用户定义拷贝"的判据（B34 踩过：平凡拷贝判据用 `equals` 不成立 ⇒ 拷贝初始化静默退化成默认构造） |
+| 成员函数的默认实参、类外成员定义（`int C::f() const {}`） | 未做：两者都要在符号表里维护"声明与定义分离"的第二条路径 |
+| `enum class` 的底层类型显式指定（`enum class E : unsigned char`） | 未做 |
+| 命名空间变量的**块作用域可见性** | 部分：clang 里命名空间成员在块作用域**可见**（经 using-directive 规则），本项目"命名空间变量在块作用域不可见"是 B37 查实、到 B38 仍未修的缺口（learn/48） |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-08-27 | 主线 A 落地：构造函数 / 初始化列表 / 虚析构 + delete / 全局变量 / 枚举 / 命名空间 / 类型别名 | 主线 A 的验收点（tests/unit/test_decl_and_ctor.cpp + tests/test_ctor_01..02 + tests/test_decl_01） |
+| 2026-09-10 | 主线 B/G 批次：vtable 与 RTTI 打通，虚析构槽与 typeinfo 符号同源 | 链接器要按**裸字符串**匹配槽里的符号 ⇒ 槽名与定义名必须同源（B20，learn/13） |
+| 2026-09-24 | 多继承成员/布局五条 bug 修复（B11~B15）+ 带参成员方法符号回填（B10） | ① vptr 压字段是真 miscompile ② 继承来的成员方法查不到 ③④⑤ 把显示名当成了索引；`c.f(1)` 一律 `undefined reference to 'C_f'`——**编译期全程绿灯** |
+| 2026-10-08 | vtable 槽符号与定义点同源（B20） | 带参虚函数的 vtable 槽写 `.quad A_f`、定义却是 `.globl A_f_1` ⇒ 链接期 `undefined reference` |
+| 2026-10-09 | 成员方法身份收口为「名字 + 形参类型」（B22 + B20 缺陷 c） | 同名同个数的重载曾静默取第一个并被误标 virtual ⇒ 运行返回 255 |
+| 2026-10-27 | const 类对象端到端修复（B34） | `const` 包壳让类性判定全部失准：成员访问误报 + 掉标量路径 **SIGSEGV** + 拷贝静默退化 |

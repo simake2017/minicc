@@ -7,6 +7,31 @@
 
 ---
 
+## §0 定位与能力清单
+
+`template <template <class> class C, class T> struct Wrap { C<T> inner; };` ——
+形参本身是"**类型构造器**"而不是类型。对应编译原理：**高阶类型**
+（higher-kinded type），实例化时发生的是**二级替换**：先换掉构造器名，
+再对新构造出的类型做一次普通实例化。对应标准：[temp.param]/4（形参声明）、
+[temp.arg.template]（实参匹配）。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 形参表的**第三种形态**（模板模板形参） | `template <template <class> class C>` | 已实现 |
+| 内层形参表**逐位建节点** | `TemplateParam::innerParams`（kind / NTTP 类型 / 默认值全带上） | 已实现 |
+| 模板位实参按**模板名**处理 | 实参 `Box` 按【模板名】处理，不走 `resolveType` | 已实现 |
+| **逐位签名匹配**（[temp.arg.template]/2，P0522R0 口径） | 位数相同 + 逐位同 kind + 值位声明类型相同 | 已实现 |
+| `too few` / `kind 不符` 的诊断 | 文案与 clang **逐字相同** | 已实现 |
+| **带实参的模板 id** 不是模板名 | `Wrap<Box<int>, int>` 必须拒收 | 已实现 |
+| 二级替换 `C<T>` → `Box<T>` → `Box_int` | 先换构造器名，再做一次普通实例化 | 已实现 |
+| 别名模板作模板模板实参 | 形参表取别名自身、替换期正常解糖 | 已验证 |
+| 签名偏序（`isTemplateTemplateParameterAtLeastAsSpecializedAs`） | 形参包位 `template<class...> class C` 收任意位数 | 未做（本项目不支持形参包，全序比对不可达） |
+| 模板模板形参的**默认实参** | `template <template <class> class C = Box>` | 未做 |
+| **嵌套**模板模板参数 | `template <template <template<class> class> class C>` | 未做（depth > 1 直接报错） |
+| 形参包 `class...` / `int...` | 一切 [temp.variadic] 用法 | 未做（Parser 遇 `...` 直接报错） |
+
+> ★ §5「边界」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 理论背景
 
 ### 1.1 形参的三种形态，这次补齐最后一种
@@ -295,6 +320,22 @@ clang++-18 -std=c++20 -c /tmp/ttp_mng.cpp -o /tmp/ttp_mng.o && nm /tmp/ttp_mng.o
 | `TreeTransform::TransformTemplateSpecializationType` | `substituteType` Case 5.3 | 只换名字段；不做 clang 的 sugar 重建 |
 | `ItaniumMangle` 的模板模板实参路径 | `mangleTemplateInstance` 的 `isTemplate()` 分支 | 只支持简单模板名（`3Box`），不支持 `X<...>E` 的复杂形态 |
 
+## 6 之补 真实版多做了什么、为什么
+
+（把 §6 对照表第三列与 §5 边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `TemplateTemplateParmDecl` 是 `TemplateDecl` 的**子类**，自带 `TemplateParameterList*` | 本项目不建独立 Decl 节点，内层表挂在形参的 `TemplateParam::innerParams` 上 —— AST 保持扁平 |
+| `TemplateArgument::Template` 带 `TemplateDecl*`（**指针**） | 本项目 `TemplateArg{kind=Template, templateName}` 存**名字** —— 本项目的模板注册表本来就按名字索引 |
+| `ParseTemplateParameter` 遇 `kw_template` 递归 `ParseTemplateParameterList` | 本项目的 `KwTemplate` 分支逐位建 `TemplateParam`（含 kind / NTTP 类型），但**不注册进符号表** —— 内层形参不是本 TU 的命名实体 |
+| `CheckTemplateTemplateArgument` 做**完整**的签名比对，含**偏序** `isTemplateTemplateParameterAtLeastAsSpecializedAs` | 本项目做"位数 + 逐位 kind/类型"三条判据，不做偏序 —— 偏序只影响**放宽规则**（P0522R0 已废除"实参多出的位有默认实参即可"），不影响拒绝方向 |
+| `TreeTransform::TransformTemplateSpecializationType` 重建 **sugar** | 本项目只换名字字段，不做 sugar 重建 |
+| `ItaniumMangle` 支持模板模板实参的复杂形态（`X<...>E`） | 本项目只支持简单模板名（`3Box`）—— 教学代码里的模板模板实参都是简单名 |
+| 形参包 `template<class...> class C` 收任意位数的模板 | 本项目无 `ParameterPack` 形态（Parser 遇 `...` 直接报错）⇒ 签名的全序比对不可达 |
+| 嵌套模板模板参数（depth > 1） | 本项目 Parser **显式报错**，不是静默算错 |
+
+
 ---
 
 ## 7. 关键日志片段（`test_tmpl_53` 实跑）
@@ -338,3 +379,17 @@ template, but 'Box<int>' is not a template
 
 ★ 注意 `Wrap_Box_int` 这个名字里出现了模板名 `Box` —— 实例名清洗把实参的
 `toString()`（模板实参印模板名）拼了进去，与 `Wrap_int_double` 天然不撞。
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-22 | 语言基础补齐 + 模板三项收尾（commit e0ff653）：模板模板参数成形（形参表第三形态 + 二级替换） | ★ 此前内层表**只数个数**（`size_t templateArity`，且该字段从没被读过）⇒ 收一个位数不对的模板一路放行，直到替换出假类型才在下游报错 —— 诊断指向派生类型，不是根因 |
+| 2026-09-28 | 模板模板实参的**逐位签名匹配**落地（[temp.arg.template]/2，P0522R0 口径，commit 09f50e5） | 内层表逐位建 `TemplateParam` 节点存进 `TemplateParam::innerParams`；`checkTemplateArguments` 新增 `ttpSignatureMismatch` 三条判据 |
+| 2026-09-28 | ★ 口径全部以 **clang++-18 -std=c++20 探针实测**确定（§3.4 六条探针） | 第一版按旧规则写"实参多出的位有默认实参即可"，clang 当场报 `too many`（P0522R0 已废除该放宽） |
+| 2026-09-28 | 顺带修一个同族的**静默接受**：`Wrap<Box<int>, int>`（拿模板特化类型填模板位） | Parser 把 `Box` 与 `Box<int>` 都建成 Class 节点、**名字字段都是 "Box"** ⇒ "查名字在不在注册表"的形态守卫被骗过去，`<int>` 静默蒸发；修法是守卫补 `!arg.type->templateArgs.empty()` |
+| 2026-09-28 | 新增单测 `tests/unit/test_ttp_signature.cpp`（`TtpSignature.*` 5 例）+ 集成 `test_tmpl_57..59` | 四条分支逐条做了**突变负向验证**（删掉条件即变红） |
+| 2026-09-28 | 本篇成文（commit 09f50e5 / 5542887） | — |
+| 2026-09-28 | **有意日志漂移**：模板位的绑定标签 `(non-type)` → `(template)` + 新增 `✓ 签名匹配` 行 | 日志是契约；漂移只在 `test_tmpl_53`，已随本批重刷基线 |
+

@@ -7,6 +7,31 @@
 
 ---
 
+## §0 定位与能力清单
+
+`struct Acc { template <class T> T add(T x) { return base + x; } };` ——
+成员模板的**推导规则与自由函数模板完全一致**（[temp.deduct]），
+合一算法本身一字不差；差别全在"**解得之后怎么落地**"：有没有隐式 this、
+符号怎么起名、住在哪个环境里求解。对应编译原理：**绑定在哪个环境里求解**。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 类内**成员函数模板**的解析与注册（[temp.mem]） | `parseClassDecl` 认 `template<...>` 头 | 已实现 |
+| 成员模板的**推导** | 直接复用 `TemplateDeducer::deduce` | 已实现 |
+| 成员模板的**符号命名** | `类名_方法名_实参后缀`（`Acc_add_int`） | 已实现 |
+| 隐式 **this** 传递 | 成员变量访问经 this | 已实现 |
+| 成员模板住在**类模板**里（两层形参、绑定时机不同） | 外层 `T` 由类实例化绑定，内层 `U` 由调用点推导绑定 | 已实现（B18 修复后） |
+| `static` 成员模板 | 标准写法 `template<class U> static U f(U x)` | 已实现（[class.static]/2） |
+| `virtual` 成员模板 | [temp.mem]/2 末句禁止 | **响亮拒收**（文案与 clang 逐字相同） |
+| 成员模板**显式实参** `a.id<int>(5)` | 成员访问路径未走 template-id 试探 | 未做 |
+| **类外定义**成员模板 | `template <class T> T S::id(T x) {…}` | 未做（类外成员定义整体未实现） |
+| 成员模板**偏特化** | `template <class T> T S::id<T*>(T*)` | 未做（函数模板偏特化本身未实现） |
+| 变参成员模板 / 参数包 | `template <class... Ts>` | 未做 |
+| 成员**类**模板 / 成员别名模板 / 静态数据成员模板 | — | 未做（§3.5 明确只做成员**函数**模板） |
+| 静态成员模板的"不带对象调用" `O::f(3)` | 限定名调用语法 | 未做（声明已支持，`o.f(3)` 可用） |
+
+> ★ §5「边界」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 理论背景
 
 ### 1.1 一句话：推导复用，落地分叉
@@ -330,6 +355,21 @@ clang++-18 -std=c++20 tests/tmpl/test_tmpl_69_member_template_in_class_template.
 | `ItaniumMangle::mangleFunctionEncoding`（成员模板实例仍编成 `_ZN…`） | `sanitizeSymbolChars(类名_方法名) + 实参后缀` | 不走 Itanium —— 保持与普通成员调用约定一致 |
 | `SemaTemplateInstantiateDecl.cpp` · `InstantiateDecl` 对 `TemplateDecl` 走 `TransformTemplateDecl`（带着类的实参重建、内层形参保持未绑定） | `instantiateClassTemplate` 步骤 5.6（§3.3） | 只替换外层形参；不重建 Decl 层级，直接克隆 `TemplateDecl` |
 
+## 6 之补 真实版多做了什么、为什么
+
+（把 §6 对照表第三列与 §5 边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `MemberTemplateDecl` / `CXXMethodDecl` + `TemplateParameterList` 是**独立的 Decl 层级** | 本项目复用外层 `TemplateDecl`（`ClassDecl::memberTemplates`）—— AST 保持扁平；代价是 §3.5 记的那类"漏一处就空指针"的维护负担 |
+| `Sema::CheckMemberTemplateDeclaration` 做**签名合法性检查** | 未做 —— 诊断增强，不是正确性缺口 |
+| `Sema::AddTemplateOverloadCandidate`：成员模板与普通重载走**同一条**候选路径，带隐式转换序列排序 | 本项目"名字 + 推导成功"即命中，不做隐式转换序列排序 —— 教学取舍：先把"推导复用、落地分叉"这条主线钉准 |
+| `Sema::BuildCXXMemberCallExpr` 返回 `CXXMethodDecl*` | 本项目存**符号名**（`MemberExpr::resolvedCalleeSymbol`）而非 Decl 指针 —— CodeGen 只需要符号 |
+| `ItaniumMangle::mangleFunctionEncoding`：成员模板实例仍编成 `_ZN…` | 本项目用 `sanitizeSymbolChars(类名_方法名) + 实参后缀` —— 不走 Itanium，保持与普通成员调用的约定一致 |
+| `InstantiateDecl` 对 `TemplateDecl` 走 `TransformTemplateDecl`，**重建 Decl 层级**并带着类的实参 | 本项目直接克隆 `TemplateDecl`，只替换外层形参、内层保持未绑定（§3.3）—— 不重建层级，少一层样板 |
+| clang 支持成员模板的**显式实参**、**类外定义**、**偏特化**、**变参**、成员**类**模板 | 本项目只做成员**函数**模板，其余在 `parseMethodDecl` 处响亮拒收（§3.5）—— 判据决定范围，不是工作量决定 |
+
+
 ---
 
 ## 7. 关键日志片段（`test_tmpl_56` 实跑）
@@ -356,3 +396,17 @@ clang++-18 -std=c++20 tests/tmpl/test_tmpl_69_member_template_in_class_template.
   ║ Symbol: identity → Acc_identity_intP
   [call] Acc::identity → Acc_identity_intP (member template instantiated) → int*
 ```
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-22 | 语言基础补齐 + 模板三项收尾（commit e0ff653）：成员模板成形（解析 + 推导复用 + 符号命名） | 推导与自由函数模板**完全一致** ⇒ 直接复用同一套合一算法 |
+| 2026-09-22 | 符号改用 `类名_方法名_实参后缀` | 两个不同实参必须落到两个不同符号，否则第二个实例撞第一个 |
+| 2026-09-22 | 新增 `tests/tmpl/test_tmpl_56`（成员模板）与 §3.3 的"两层形参"回归 | 把"只替换外层、保留内层"钉成可回归的断言 |
+| 2026-10-08 | 类模板里的成员模板在实例类中丢失（BUGS.md **B18**，commit 3b15fc0） | ★ **两层模板形参、绑定时机不同** —— 外层 `T` 由类实例化绑定、内层 `U` 由调用点推导绑定；"类实例化"这一步只搬了字段/方法/类内别名，**没搬 `memberTemplates`**，且类模板蓝图从不经过 `processClassDecl` ⇒ 注册表里根本没有那张表 |
+| 2026-10-08 | 修法：新增实例化步骤 **5.6**，把**本次命中的那份蓝图**（主模板 / 偏特化 / 全特化一视同仁）的成员模板克隆一份挂到实例类，只替换外层形参 | 三种错法三种症状：忘了搬 ⇒ 拒收合法程序；搬了但**就地改蓝图** ⇒ 第二个实例串到第一个的绑定（**静默算错**）；把内层 `U` 也替换掉 ⇒ 调用点无可推导 |
+| 2026-10-08 | static / virtual 的**识别位置**写反（BUGS.md **B19**，commit acbc48f） | 同一处判据**两个方向都反了** —— 拒收合法程序（`template<class U> static U f(U x)`）+ 接受非法程序（`static template<class U> ...`） |
+| 2026-10-08 | 顺带把 §5 边界表补上"成员模板住在类模板里"这一行 | ★ 教训：**边界表要按组合列**（特性 × 特性），只按特性列会漏掉交叉点上的缝 —— 那一行原先之所以没被列，是因为它"以为做了、其实是坏的" |
+

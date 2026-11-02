@@ -2,8 +2,20 @@
 
 > 对应源码：`src/sema/semantic_analyzer.cpp`（判据与裁决）、
 > `src/parse/parser.cpp`（给候选）、`include/ast.h`（携带名字的一槽）。
-> 来源：`docs/specs/visible-name-lookup.spec.md`（2026-11-02 签字）。
+> **本项目按 clang 目录组织，不采用 skill 的"1 设计 = 1 flow 文件"**
+> —— 用户 2026-10-23 拍板，见 `docs/constraints/00-全局约束.md` 头部。
+> 来源：`../specs/visible-name-lookup.spec.md`
+> （= 仓库内 `docs/specs/visible-name-lookup.spec.md`，2026-11-02 签字）。
+> 标准：不看 spec 也能照本文实现。
 > 审法：**每个消费点问的是同一个问题吗？** 答案必须是"是，且都走同一个函数"。
+> 读者：改名字查找 / 作用域链 / 裸名声明判据的人。
+> 名词版本：v1
+
+## 变更记录
+
+| 日期 | 版本 | 改了哪条 |
+|---|---|---|
+| 2026-11-02 | v1 | 按文档骨架规范补齐头部与变更记录：对应源码补「不采用 1 设计 = 1 flow 文件」拍板注、来源改相对路径、补读者与名词版本；补「§7 裁量区清单」 |
 
 ## 1. spec → 设计映射表
 
@@ -138,3 +150,14 @@
 | `tests/lang/test_basics_23_name_registry.cpp` | 多两行 `[sema:stmt] …` + 一行 `[resolve] 'S' → int (kind=Variable, …)` | 现场②的遮蔽语义改成与 clang 一致（变量被登记 ⇒ 走表达式路径） |
 | `tests/tmpl/test_tmpl_54_error_tparam_scope_after_declarator.cpp` | unknown type name 的括注改写 | 旧文案自称"已由解析期名字登记表在语法期消歧"，B37 后由语义期裁决 |
 | `tests/lang/test_basics_25..27_*.cpp` | 新文件入列 | 本批新增 |
+
+## 7. 裁量区清单
+
+| AI 可以自决 | 必须问人 |
+|---|---|
+| `VisibleType` 结构体的**字段集合与命名**（`level` / `scope` / `raw`）——只要 `lookupVisibleType` 单点返回，且 `raw` 能供 `[sema:alias]` 行打印**未解糖**的别名目标 | 是否保留「声明过但不是类型 ⇒ 走表达式路径」这条**宽容分支**（clang 是 warning，minicc 无 warning 机制 ⇒ 静默放行）——放宽方向的取舍须问 |
+| §3.1 内部**用不用统一的"逐级候选生成器"**把类作用域与命名空间链抽象成一层——实现自由度（判据单点已由函数边界保证） | **类作用域只查 `typeAliases` 一级近似**（不含基类成员、不含 `using Base::f;` 引入名）——何时补齐 |
+| `isNameDeclared` 的**检索范围**（符号表全局表 vs 含命名空间前缀的键）——只要与 `lookupVisibleType` 分工不重叠、不互相代答 | **命名空间成员变量**在块作用域不可见（`namespace N { int g; }` 里裸用 `g`）——是缺陷还是特性，须问 |
+| §3.3 表达式路径的具体构造（`ExprStmt{VarExpr}` 交给既有表达式路径）——只要复用既有路径，不新写一套求值 | **命名空间模板蓝图按裸名注册** ⇒ `N::B` 错绑全局 B——本批未修（已在下一批 B38 修掉），同类缺口何时再收 |
+| 负例文案的**位置前缀格式**（`[Semantic Error] 28:5: …`）——只要与 clang 逐字一致 | **嵌套类**不支持（解析期即响亮拒收）——特性排期 |
+| §5 突变验证 4 条的**具体写法与用例挑选** | 登记表**消费点 ①② 的搬迁**（Stage 2/3：模板 id 改用 clang 式语法试探 / 边解析边 `ActOn*` 登记）何时启动 |

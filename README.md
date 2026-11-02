@@ -8,7 +8,7 @@
 
 - 每个阶段输出**中文日志**，推导逐对打印（如 `P=T A=int ⇒ T := int ✓`）；
 - 每个新判据先拿 `clang++-18` 当语义 oracle 探针实测，报错文案逐字对齐；
-- **日志即契约**：155 份集成基线逐字节比对，重构不许改变任何可观测行为。
+- **日志即契约**：160 份集成基线逐字节比对，重构不许改变任何可观测行为。
 
 > 难度选择：项目主战场是 C++ 里最难的**模板机制**（实参推导 ≈ 合一算法、
 > 实例化 ≈ 结构化替换、两阶段查找、重载决议、SFINAE、偏序裁决）——
@@ -19,9 +19,9 @@
 | 指标 | 数值 |
 |---|---|
 | 核心代码（include + src） | 约 2.4 万行 C++20，全阶段中文日志 |
-| 单测 | **362** 例（googletest，断言不变量而非具体符号名） |
-| 集成测试 | **155** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
-| 学习文档 | docs/learn/ 01..47（每篇点名标准章节 + clang 源码对照表） |
+| 单测 | **376** 例（googletest，断言不变量而非具体符号名） |
+| 集成测试 | **160** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
+| 学习文档 | docs/learn/ 01..50（每篇点名标准章节 + clang 源码对照表） |
 | 配套标准库 | ministl：vector / list / map / set（红黑树）/ 智能指针 / function / algorithm / ranges，与 std 随机对拍 |
 | 外部依赖 | 编译期零依赖；运行期借系统 `as` 产 .o，链接与运行时（_start + bump malloc）自研，**不依赖 libc/crt** |
 
@@ -176,14 +176,21 @@ tests/
   unit/               googletest 单测
   pp/ search-path/    预处理器 fixtures
 docs/
+  00-项目章程.md      立项需求原文（项目定位与六大阶段要求的原话）
   business/00..08     ★ 业务流水线文档（每个业务一份：定位/判据/代码地图/测试/学习索引）
-  learn/01..47        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
+  learn/01..50        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
   specs/ designs/     业务流水线产物（spec 签字 → 设计 → 代码）
-  constraints/        项目约束唯一权威
+  specs/legacy/       早期 spec/design（保留作档案，不参与现行流程）
+  constraints/        项目约束唯一权威（00..06，含文档标准与冲突裁决）
+  lines/              端到端调用链（一条线 = 一条跑出来的子流程）
+  arch/               架构图（archify：HTML + 可复现 JSON 源）
+  upstream/           上游机制科普（clang 标准库与头文件搜索）
   BUGS.md  PITFALLS.md  ROADMAP.md  TODO.md
 logdiff.sh  build.sh  CMakeLists.txt
 check-comment-style.sh       # 注释四段式守卫（判据①②③④）
 verify-comment-mutations.sh  # 守卫脚本的突变验证（判据是否承重）
+check-doc-standard.sh        # 文档骨架守卫（判据①②③④⑤）
+verify-doc-mutations.sh      # 守卫脚本的突变验证（判据是否承重）
 ```
 
 ## 文档索引
@@ -202,6 +209,11 @@ verify-comment-mutations.sh  # 守卫脚本的突变验证（判据是否承重�
 | 名字可见性（作用域链裁决） | learn/48、BUGS.md B37 |
 | 作用域即身份（模板/命名空间的名字带作用域） | learn/49、BUGS.md B38 |
 | 注释四段式标准（审计 + 守卫脚本） | learn/50、specs/comment-standard-conformance.spec.md |
+| 文档骨架标准与技能冲突裁决 | constraints/05（冲突裁决 C1..C14）、constraints/06（骨架规范） |
+| 编译流水线全景（一张可交互图） | arch/compile-pipeline.html（源：arch/compile-pipeline.dataflow.json） |
+| 端到端调用链 | lines/（一条线 = 一条跑出来的子流程） |
+| 项目定位与六大阶段要求（需求原文） | 00-项目章程.md |
+| 上游标准库与头文件搜索机制 | upstream/clang-stdlib-and-header-search.md |
 | 所有踩坑复盘 | BUGS.md（B01..B38）、PITFALLS.md |
 
 ## 未来计划

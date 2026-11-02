@@ -4,6 +4,34 @@
 > 「类型 vs 值」两形态分流。本文记录一次**真实缺陷的定位与修复**：
 > 旧实现在替换映射一层无法区分 `template<class T>` 与 `template<int N>`。
 
+## §0 定位与能力清单
+
+模板实参不只有类型一种——`Buf<4>` 里的 `4` 是一个**值**，不是类型。
+要让编译器同时接受 `Box<int>` 和 `Buf<4>`，实参的表示必须是 **tagged**
+（带一个"这是类型还是值"的标签）。本文记录一次**真实缺陷**的定位与修复：
+旧实现在替换映射一层无法区分 `template<class T>` 与 `template<int N>`——
+报错点在第 166 行，根因却分散在三处（见 §②）。本文也顺带讲清一件事：
+**替换 ≠ 实例化**——NTTP 让替换天然分成两层（类型位 / 表达式位）。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| [temp.param] 类型形参 | `typename T` / `class T`，两种拼写等价 | 已实现 |
+| [temp.param] 非类型形参 | `int N`（最初只认 `int`） | 部分（2026-09-30 扩展到整型家族 + 字符 + `auto`，见 learn/35） |
+| [temp.arg] **tagged 实参** | `TemplateArg{kind, type, value}`，对应 `clang::TemplateArgument` | 已实现 |
+| [temp.subst] 替换**分两层** | 类型位置走 `substituteType`、表达式位置走 `cloneExpr` | 已实现 |
+| 形参 kind 判据 | 看**该位形参自己**是什么（`templateParams[i].kind`），不看实参长什么样 | 已实现 |
+| 值的**可表示性** | `Type::canRepresentValue`（[expr.const]/10 → [dcl.init]/7） | 已实现（learn/35） |
+| 形态归一 | `Buf<4L>` 与 `Buf<4>` 归一到同一形态 ⇒ 认作同一个实例 | 已实现（learn/35） |
+| `template<auto V>` | deduced non-type parameter：形态即类型（`K<4>` 与 `K<4L>` 是两个实例） | 已实现（learn/35） |
+| NTTP **值位**参与偏特化模式 | `enable_if<true, T>` 这类模式里值位参与匹配 | 已实现（learn/32） |
+| NTTP 的**任意常量表达式**实参 | `Buf<2+2>` / `Buf<k>` | 已实现（learn/39 / learn/40） |
+| NTTP **形参本身**的偏特化 | `Box<int, N>`（按 N 的值挑偏特化） | 未做（learn/32 §5 边界） |
+| 字面量溢出自动升格 | `3000000000` 的类型应是 `long`（[lex.icon]/2） | 未做 |
+| 非整型 NTTP | 指针 / 左值引用 / 枚举 / `std::nullptr_t` / 字面量类 | 未做 |
+| 函数模板的 NTTP | | 未做（显式实参直接报 not supported yet） |
+| `VarExpr` 按**名字**匹配替换 | clang 走 `DeclRefExpr` 的 `ValueDecl*` 绑定 | 未做（已知边界：同名局部变量遮蔽 NTTP 时会误伤） |
+| 包展开 / 可变参数模板 | | 未做 |
+
 ## ① 理论背景
 
 ### 两类模板形参（[temp.param]）
@@ -257,3 +285,38 @@ nm /tmp/t24.o | grep Buf
 一组固定实参。有了形态校验后，`template<int N>` 的模板若被演示块用类型实参
 硬填会直接报错——已按 `templateParams[0].kind` 分流修正，但该演示块本身
 （对用户源码里的模板"擅自实例化"）仍是既有设计，不在本次范围内。
+
+## ⑨ 真实版多做了什么、为什么
+
+★ 素材来源：本文 §④ clang 对照的「简化了什么」列 + §③ 的取舍说明 + §⑧ 边界表
++ `docs/BUGS.md` B17 + learn/32 / learn/35 / learn/39 的条目 + CLAUDE.md「未做」清单。
+**未查证的写「（本项目未查证）」**。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `clang::TemplateArgument` 的 **9 种 ArgKind**（Null / Type / Declaration / NullPtr / Integral / Template / TemplateExpansion / Expression / Pack） | 本项目只留 **2 种**（Type / Integral）——够讲清"值不是类型"这条主线。代价：包展开（Pack）、模板模板实参（Template）等形态另走专门的表示（learn/33） |
+| `llvm::APSInt` 的**任意精度**整数 | 本项目用机器整型（`long long`）——教学场景的值位不会超出 64 位；代价是超大常量需要提升处理 |
+| `TemplateTypeParmDecl` / `NonTypeTemplateParmDecl` 的**继承层次** | 本项目用 `TemplateParamKind` 枚举 + 单结构体，保持 AST 扁平（与全项目"零继承"的取向一致） |
+| `Parser::ParseTemplateArgumentList` 解析**任意常量表达式** | 本项目最初只认整数字面量与一元负号；后来补上常量折叠（learn/39）与常量变量（learn/40）⇒ `Buf<2+2>` / `Buf<k>` 端到端可用 |
+| `Sema::CheckTemplateArgumentList` 的**隐式转换**（`Buf<4>` 的 4 → unsigned） | 本项目改为**可表示性**判据（[expr.const]/10 → [dcl.init]/7）+ **形态归一**——比 clang 更严的是"形态精确相等"那条旧规则（B17：clang 认可的三条合法程序被拒） |
+| 形参的**默认实参**填充 | 未做：形参表里没有"默认值"这个槽位 |
+| **包展开**（`Args...`） | 未做：形参表不能表达"参数包" |
+| `MultiLevelTemplateArgumentList`（外层模板的实参表） | 未做：本项目的模板实例只处理单层实参表 |
+| `TreeTransform::TransformDeclRefExpr` 按 `ValueDecl*` **绑定**替换 | 本项目按**名字**匹配（§③ 的取舍）——蓝图期的 `VarExpr` 尚未绑定声明。代价：模板体内同名局部变量遮蔽 NTTP 时会误伤（§⑧ 已登记为已知边界） |
+| Itanium ABI `<expr-primary>` 的完整编码（`L...E` 支持多种值类型） | 本项目只支持**整型字面量**——mangling 的 `L i 4 E` 一段与 clang 逐字符一致 |
+| NTTP **形参本身**的偏特化（`Box<int, N>`） | 未做（learn/32 §5 边界）；已做的是"NTTP **值位**参与偏特化模式"（`enable_if<true,T>`） |
+| 字面量溢出自动升格（[lex.icon]/2：十进制 `3000000000` 的类型是 `long`） | 未做 |
+| 非整型 NTTP（指针 / 左值引用 / 枚举 / `std::nullptr_t` / 字面量类） | 未做 |
+| 函数模板的 NTTP（含 `template<auto V>` 在**函数**模板上的编码 `TnDa`） | 未做：函数模板的显式 NTTP 实参目前直接报 not supported yet，**没有能到达该编码的路径** ⇒ Itanium 的 `TnDa` 段有意不写 |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-16 | NTTP 首次落地：实参改 tagged（`TemplateArg`）、替换**分两层**（`substituteType` / `cloneExpr`）、形参 kind 判据改看"该位形参自己" | 旧实参一律存 `TypePtr` ⇒ `Buf<4>` 的 `4` **在结构上无处安放**——这不是"没写判断"，是类型系统里没有表示该判断结果的地方 |
+| 2026-09-16 | 顺带修掉 NTTP 分支误把名字 push 进 `typeParams` 的真 bug | `template<class T,int N>` 的 `typeParams` = `["T","N"]`（2 个"类型"形参）⇒ 实参侧只收得到 1 个 ⇒ 个数校验必然错位 |
+| 2026-09-16 | 类模板特化批次（learn/19 / learn/32）：NTTP **值位**参与偏特化模式 | `enable_if<true,T>` 的地基——旧的"实参含值位就跳过特化"守卫把这条路堵死了 |
+| 2026-09-30 | NTTP 类型域扩展（learn/35）：整型家族 + 字符 + `auto` 形参 + 可表示性判据 + 形态归一 | 旧版要求形态**精确相等** ⇒ clang 认可的三条合法程序被拒（B17）；同时修掉一个**静默撞键**（`K<4>` 与 `K<4L>` 键相同 ⇒ 第二个静默复用第一个） |
+| 2026-10-15 | 主线 D：常量折叠 + 常量传播 + NTTP 常量表达式实参（learn/39 / learn/40） | `Buf<2+2>` / `Buf<k>` 由此可用；求值归一必须发生在**算缓存键之前**，否则 `Buf<2+2>` 与 `Buf<4>` 撞键/分键都错 |
+| 2026-11-02 | 源码注释对齐「四段式」标准（learn/50） | 注释对语义零影响 ⇒ logdiff 零漂移是**标准保证**的 |

@@ -6,6 +6,27 @@
 
 ---
 
+## §0 定位与能力清单
+
+`decltype` 与 SFINAE 是模板元编程的两块地基：前者回答"**这个表达式的类型是什么**"，
+后者回答"**这个候选不成立时该怎么办**"。两块拼起来才有 `is_range<T>` 这类惯用法 ——
+在编译期探测某个类型是否具备某项能力，而探测失败**不是错误**，只是换一个候选。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| decltype 的两条求值规则（[dcl.type.decltype]） | 未加括号取**实体**的声明类型；加括号取**表达式**的类型，左值带 `&` | 已实现 |
+| decltype 的两段式求值 | 解析段只存表达式不求值，替换段（`substituteType`）才真正求值 | 已实现 |
+| SFINAE 软失败（[temp.deduct]/8） | 直接上下文里的替换失败只把候选移出候选集，不升级为错误 | 已实现 |
+| "直接上下文"的可观测性（`SfinaeContext` RAII 深度计数） | 失败发生在直接上下文内/外会打进日志，可单测钉住 | 已实现 |
+| `void_t` 探测惯例（CWG 1558） | 实参全部合法 ⇒ 归约为 `void`；任一失败 ⇒ 整条偏特化消失 | 已实现 |
+| `declval`（未求值上下文里凭空取值） | 只声明不定义，在 decltype 里给出 `T&&` | 已实现（内建按名识别，不走函数模板实例化） |
+| `std::false_type` / `std::true_type` 垫片 | 编译器内建注入，用户不需要写头文件 | 已实现（代价：这些名字用户不能重新定义） |
+| `decltype(auto)` | 推导式 decltype | 未做 |
+| 函数形参里的**依赖** decltype 表达式 | `f(T t, decltype(t.begin())* g)`：推导期不把 `t` 绑到实参类型再求值 | 未做 |
+| `decltype((a))` 作**局部变量**类型 | 会退化成 `int` 拷贝且**不报错**（静默偏差） | 未做（已知问题，见 §⑥） |
+| `std::declval` 的使用位置检查 | 不检查"只在未求值上下文出现" | 未做（有意简化） |
+| 成员访问控制（private/protected） | `inferMember` 只做引用穿透，不判可见性 | 未做 |
+
 ## ① 理论背景
 
 ### decltype：两套求值规则
@@ -306,6 +327,26 @@ minicc 目前**没有任何输出能力** —— 自研链接器只注入 `_star
 | libcxx `declval`<br>libcxx/include/utility:63 | `inferCall` 内建分支<br>src/semantic_analyzer.cpp（按名识别） | 不检查"只在未求值上下文出现"；不走函数模板实例化 |
 | `Sema::CheckMemberAccess` / `BuildMemberExpr` | `inferMember` | 加了引用穿透（[expr.ref]），但不做访问控制 |
 
+## ④ 之补 真实版多做了什么、为什么
+
+（把 §④ 对照表第三列"简化了什么"与 §⑥ 已知边界、§⑦ 缺口表合并成一张两列表：
+左列是 clang 真实版多做的事，右列是本项目砍掉它的理由。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| SFINAE 用**模板技巧 + 编译期分支**（`SFINAETrap`）表达"此刻失败可恢复" | 本实现用一个静态计数器（`SfinaeContext` RAII）表达同一件事：信号发出时标注"直接上下文内/外"，可观测且不引入模板元层 |
+| SFINAE 失败用**返回码** `TDK_SubstitutionFailure` 传递 | 本实现借 C++ 异常做栈回退，语义等价、代码更短；且 `SubstitutionFailure` 是**独立异常类型**，真错误不会被误吞 |
+| `Sema::SubstitutionFailure` 的捕获点散落在 Sema 各处 | 本实现把收口点收敛为**三处显式调用**（`Sfinae::attempt`），读代码的人能一眼回答"SFINAE 到底在哪儿发生" |
+| `Sema::getDecltypeForExpr` 覆盖 decltype 的**全部**规则 | 只留两条主线规则（声明类型 / 表达式类型），不支持 `decltype(auto)`、pack indexing、lambda 捕获相关规则 |
+| `Sema::BuildDecltypeType` 对"未求值上下文有副作用"发 **warning** | 本实现不做该诊断 —— 教学取舍：先把两条主线规则钉准，再补诊断 |
+| `DecltypeType` 是完整的**依赖类型** | 本实现只区分"加括号/不加括号"一位布尔，不做完整的依赖类型推导 |
+| `void_t` 是**通用**的别名模板展开 | 本实现只识别 `void_t` 一个名字（`TemplateDeducer::reducePattern`），不是通用的别名模板展开 |
+| libcxx 的 `declval` 是**真实函数模板**，且只准出现在未求值上下文 | 本实现走 `inferCall` 的内建按名识别分支，不检查出现位置、也不走函数模板实例化 —— 代价是 `int x = declval<int>();` 会被接受（真 C++ 报错） |
+| clang 有完整的**访问控制**（private/protected/public） | 本项目的 `inferMember` 只做引用穿透，不做访问控制 —— 成员可见性不是本主题的范围 |
+| clang 的 `std::` 垫片是**真实头文件里的真模板**（依赖别名模板、类内 static 数据成员、NTTP 形参依赖前置形参） | 那三样本项目当时还没有，故改由 `registerBuiltins()` 内建注入 —— **有意的简化，不是遗漏**；代价是这些名字用户不能重新定义 |
+| "直接上下文"是**精确判定** | 本实现用异常类型 + `SfinaeContext` 在关键路径上手工划分，不做精确判定 |
+| 类模板（异常式）与函数模板（返回码式）**两套**失败表达并存 | 机制不同：函数模板推导本来就是返回值驱动的，硬套异常只会让调用栈多一次无谓展开；两者只共用 `Sfinae::rejected` 这个日志出口 |
+
 ---
 
 ## ⑤ 实验
@@ -446,3 +487,15 @@ bool value1 = is_range<decltype(1)>::value;         // ✅ 已跑通
 | 尾置返回类型 + 默认模板实参组合 | 部分可用，见 ROADMAP |
 
 这些都在 `docs/ROADMAP.md` 主线 H 的"未做"清单里。
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-16 | 模板机制主线收官（commit 5d9b78d）：decltype 两套规则 + SFINAE 软失败 + `void_t` + `declval` 落地 | 与 learn/21（偏序裁决）同批，二者互为前提 |
+| 2026-09-16 | 学习文档 18..29 一次性成文（commit 582887c） | — |
+| 2026-09-16 | SFINAE 抽成独立模块 `include/sfinae.h` + `src/sfinae.cpp`（信号 `SubstitutionFailure` / 吸收器 `Sfinae::attempt` / 直接上下文 `SfinaeContext` / 统一日志出口），收口点全项目仅三处 | 协议不集中就会散成一堆彼此不认识的 `try/catch`，读者无法回答"SFINAE 到底在哪儿发生" |
+| 2026-09-16 | 顺带修了 `matchPattern` 的引用结构检查（此前 `Probe<int>` 会错误匹配 `Probe<T&>`） | 引用结构检查漏了 ⇒ decltype 的括号规则被错误观测（`decltype((a))` 该是 `int&`） |
+| 2026-09-16 | std 垫片（`false_type` / `true_type` / `void_t` / `declval`）改走 `registerBuiltins()` 内建注入 | 绕开别名模板与类内 static 的语法缺口，且不写头文件即可用 |
+

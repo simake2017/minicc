@@ -332,6 +332,27 @@ SFINAE 探测不命中时**静默回退**而非报错；与 clang oracle 对拍�
 
 ---
 
+## ✅ 主线 J：文档骨架标准（已完成 2026-11-02）
+
+> 定位：**不改语言特性**，把散落的文档按"族 → 技能"归位、补齐骨架，
+> 并把规范变成机器断言。口径由用户拍板：**补齐骨架、保留内容资产**（正文不重写）。
+> ★ 与主线 I 的关系：主线 I 治**源码注释**，主线 J 治**文档骨架** —— 两套标准不互相套用。
+
+| # | 任务 | 修法要点 | 验收 |
+|---|---|---|---|
+| 1 ✅ | **冲突裁决先行**（不先裁决就动手 = 返工） | 新建 `constraints/05-文档标准与冲突裁决.md`：三条原则（P1 项目级约束优先 / P2 一个族一个技能 / P3 保留资产）+ 14 条裁决 C1..C14，解决"tech-doc 不拆 spec+design" ⟷ "biz-dev-pipeline 拆两份"、"wiki-postmortem 要 frontmatter" ⟷ "BUGS.md 是单文件"等 | 裁决表逐条可查；后续改动按裁决执行 |
+| 2 ✅ | **骨架规范成文** | `constraints/06-文档骨架规范.md`：8 个文档族各自的骨架（技术/开发/学习/复盘/端到端线/架构图）+ 头部三行（读者/审法/名词版本）+ 变更记录 | 规范本身 0 占位符（判据④豁免它） |
+| 3 ✅ | **根目录与重名归位** | `2.md` → `docs/00-项目章程.md`（需求原文）；`docs/learn.md` → `docs/upstream/clang-stdlib-and-header-search.md`（**消解与 `docs/learn/` 目录重名**）；`docs/superpowers/specs/` → `docs/specs/legacy/`（归档 + 指针） | 全仓引用改指新路径；重名消失 |
+| 4 ✅ | **各族补骨架**（保留正文资产） | 技术文档（business 28 份 + 专题 7 份）/ 开发文档（constraints + specs + designs + 归档类）/ 学习文档（01..50 三段式：定位与能力清单 + 真实版多做了什么 + 演进记录）/ 复盘文档（BUGS 38 条补 severity/status/related + PITFALLS + NOTES） | `check-doc-standard.sh` 0 违规 |
+| 5 ✅ | **新增两类产物** | `docs/lines/`（line 技能：一条线 = 一条跑出来的端到端子流程，首批 3 条）；`docs/arch/`（archify：编译流水线 HTML + **可复现的 JSON 源**，图挂了能重生成） | archify validate 9/9（0 error / 0 warning）+ visual-check 四视口不溢出 |
+| 6 ✅ | **规范变机器断言** | `check-doc-standard.sh`（5 条判据：①头部 ②骨架节 ③元数据 ④占位符 ⑤资产——⑤ 专门防"重写时丢内容"）+ `verify-doc-mutations.sh`（每条判据**两次实测**：引入违规必须红 + 放松判据必须绿） | 突变验证 22/22；守卫 0 违规 |
+
+★ **方法论沉淀**：**先裁决、再立规范、后建断言、最后才动文档** ——
+断言建在动手之前，基线（初始违规数）才是可测的；反过来做，
+"改好了没有"就变成了不可证伪的自我感觉。
+
+---
+
 ## 约定（所有主线通用）
 
 1. 遵循 CLAUDE.md 的交付三件套与改动顺序（README → Ast/Parser → Sema → 新模块 → CodeGen → tests → docs/learn）

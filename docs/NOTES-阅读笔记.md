@@ -1,3 +1,14 @@
+---
+title: minicc 阅读笔记（NOTES-阅读笔记）
+date: 2026-11-02
+category: compiler
+tags: [reading-notes, postmortem, compiler, minicc, notes]
+type: notes
+severity: medium
+status: active
+related: ["[[docs/BUGS]]", "[[docs/PITFALLS]]", "[[docs/learn/17-multiple-inheritance-layout]]", "[[docs/learn/50-comment-standard-audit]]", "[[docs/constraints/05-文档标准与冲突裁决]]", "[[docs/constraints/06-文档骨架规范]]"]
+---
+
 # minicc 阅读笔记
 
 > 这些是通读源码时随手记下的理解要点，原先以 `// wangyang` 的形式散落在各个 `.cpp`
@@ -19,6 +30,8 @@
 ---
 
 ## 一、Lexer —— 游标与 peek 的语义
+
+- severity: low ｜ status: maintained ｜ related: src/lex/lexer.cpp, docs/learn/07, docs/learn/35
 
 **出处**：`src/lexer.cpp:122,149,275,302,303,442`
 
@@ -47,6 +60,8 @@ scanIdentifier 里 `text += advance();` 的循环条件用的是 `peek()` ——
 ---
 
 ## 二、Preprocessor —— 条件编译的状态机
+
+- severity: medium ｜ status: maintained ｜ related: src/lex/preprocessor.cpp, docs/learn/07
 
 **出处**：`src/preprocessor.cpp:213,231,237,260,461,610,685,704,713`
 
@@ -88,6 +103,8 @@ struct CondState {
 
 ## 三、Parser —— 解析出的"只是符号"
 
+- severity: high ｜ status: maintained ｜ related: docs/learn/22, docs/learn/45, docs/learn/09
+
 **出处**：`src/parser.cpp:210,547,551,805,822,1215,1398,1410,1548,1557,1593`
 
 > ★ **`parseType()` 解析出的类型只是符号，只是把类型的结构描述出来**
@@ -111,6 +128,8 @@ struct CondState {
 ---
 
 ## 四、Sema —— 类布局与 vtable 拼装
+
+- severity: high ｜ status: maintained ｜ related: docs/learn/17, docs/BUGS.md#b11-本类自身多态而基类全非多态时-_vptr-与首基类字段压在同一-offset
 
 **出处**：`src/semantic_analyzer.cpp`（本文件是全项目最大的一块）
 
@@ -152,6 +171,8 @@ struct CondState {
 
 ## 五、模板实例化 —— 我最初卡住的地方
 
+- severity: high ｜ status: maintained ｜ related: docs/learn/19, docs/learn/20, docs/learn/27
+
 **出处**：`src/semantic_analyzer.cpp:4184,4193,4235`
 
 > ★ **"这里就是我一直想要的部分：对 template 进行实例化解析"**
@@ -181,6 +202,8 @@ resolveType(Box<int>)                        ← 只认名字
 
 ## 六、补遗 —— 后发现的 4 处
 
+- severity: medium ｜ status: maintained ｜ related: docs/learn/28, docs/learn/30, docs/BUGS.md#b19-static--virtual-的识别位置写反标准写法被拒非法写法被收
+
 首轮整理（69 处）之后仍留在源码里的 4 条，行号按**当前**代码记（前三节的行号是首轮整理
 时的旧号，仅供对照）。清掉它们的改动见 docs/BUGS.md B19 那一次提交。
 
@@ -196,6 +219,8 @@ resolveType(Box<int>)                        ← 只认名字
 ---
 
 ## 七、再补遗 —— `// mrd` 的 13 处
+
+- severity: medium ｜ status: maintained ｜ related: docs/learn/50, docs/BUGS.md#b11-本类自身多态而基类全非多态时-_vptr-与首基类字段压在同一-offset
 
 注释规范收紧到"四段式"后，`// mrd` 这类个人标记同样属于【禁止：私人笔记】，
 故按前例再清一轮（批次见 docs/learn/50）。**13 条里 10 条与紧邻的正式注释完全重复**，
@@ -222,6 +247,8 @@ resolveType(Box<int>)                        ← 只认名字
 ---
 
 ## 附：源码里保留了哪些
+
+- severity: low ｜ status: maintained ｜ related: src/parse/parser.cpp, src/sema/semantic_analyzer.cpp, src/sema/template_instantiation.cpp, src/lex/preprocessor.cpp, include/ast.h
 
 去掉个人名字后**就地保留**的注释，是那些本身就在解释"为什么"的：
 

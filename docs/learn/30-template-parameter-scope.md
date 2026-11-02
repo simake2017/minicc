@@ -7,6 +7,31 @@
 
 ---
 
+## §0 定位与能力清单
+
+`template<class T, class U = T>` 为什么编译不过？答案牵扯三层 —— 作用域的**形状**
+（扁平表 → 帧链）、形参的**存储**（值 → 指针）、形参的**登记时机**
+（循环外 → 循环内、默认实参之后）。三层里只有一层是"真 bug"，另外两层是让它能站住的底座。
+本篇的落点是把 [basic.scope.pdecl]/9（声明点）**编码进数据结构的形状里**：
+帧链 + `count` 的增长顺序，本身就把"逐个条目按解析顺序生效"这条规则表达掉了。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 模板形参的**声明点**（[basic.scope.pdecl]/9） | 形参名从"它自己的声明写完"那一刻起才可见 | 已实现 |
+| **依赖默认实参** `class U = T` | 默认实参能看见前面已声明的形参 | 已实现 |
+| **自引用默认实参** `class U = U` | 报 `unknown type name 'U'`（与 clang 同文案） | 已实现 |
+| 形参的**帧链作用域**（`TemplateParamFrame`） | 帧内线性扫描，找不到才上行 ⇒ 内层优先 | 已实现 |
+| 形参节点的**指针化存储** | `vector<TemplateParamPtr>`，避免 `push_back` reallocate 导致地址失联 | 已实现 |
+| 登记时机排在**默认实参之后** | 第 i 位默认实参恰好看得见第 0..i−1 位 | 已实现 |
+| 默认实参在**使用点**补全 | 蓝图里存依赖形式，使用点做替换 | 已实现 |
+| **成员模板** | 帧链已就位，Parser 无入口 | 已实现（learn/34 补齐 ⇒ 帧链栈深从此不止 1） |
+| **嵌套类模板** | 帧链已就位，Parser 无入口 | 未做 |
+| 形参**遮蔽警告** | 内层同名遮蔽（`maybeDiagnoseTemplateParameterShadow`） | 未做（静默接受） |
+| `Self<>` **空实参表** | 需写 `Self<int>` | 未做 |
+| NTTP 形参名的**类型位**诊断 | `template<int N> struct A { N x; };` | 部分（本实现报 `unknown type name 'N'`，clang 报 `err_not_type` —— 文案不同、方向一致） |
+
+> ★ §8「边界与代价」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 问题的三段式
 
 最初的疑问是：「`m_templateParamScope` 是每个 `template` 生效吗？用一个全局的容易有歧义」。查下来，这是个**三合一**的问题，必须分开：
@@ -444,6 +469,21 @@ clang 把"实参位 vs 类型位"的区分放在 `ParseTemplateArgument`，
 minicc 没有那层分派，故在此保守处理：**值名一律走旧路径**，
 由替换阶段按"替换表里绑的是值"还原。
 
+## 8 之补 真实版多做了什么、为什么
+
+（把 §3 的 clang 怎么做 与 §6 对照表第三列、§8 边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `TemplateParameterList` 用 `TrailingObjects` 内联存**指针数组**（`NamedDecl*`），节点住在 **arena** | 本项目用 `shared_ptr` 代替 arena —— 换来"形参节点可被多处共享"，代价是分配开销且没有 `FoldingSet` 去重 |
+| `TemplateTypeParmDecl::Create` 把类型形参与 NTTP **分成两类节点** | 本项目用 `kind` 字段**扁平化**成一种节点 —— 少一层继承，多一个分支判断 |
+| 复用**统一的 `Scope` 链**（`Scope.h:81` 的 `TemplateParamScope` + `MultiParseScope`） | 本项目没有通用 `Scope` 类，用 `TemplateParamFrame` **帧链**模拟 —— 教学上更直白：作用域就是一条链，内层优先 |
+| `Sema::AddDecl(Param)` 把形参挂进 Scope 链 | 本项目用帧内线性扫描代替 Scope 链查找 —— 形参数量是**个位数**，线性扫足够 |
+| `maybeDiagnoseTemplateParameterShadow` 给**形参遮蔽**发警告 | 未实现 —— 静默接受。诊断增强，不是正确性缺口 |
+| `SubstDefaultTemplateArgumentIfAvailable` 对默认实参做**常量表达式求值** | 本项目只做类型替换 —— 常量折叠那条线由后来的主线 D 接手（见 learn/39 / 40） |
+| Parser 有**实参位 vs 类型位**的分派（`ParseTemplateArgument`） | minicc 没有那层分派 ⇒ `parseType` 被两处复用，"值形参名"在类型位也会被当类型 ⇒ 只能在替换阶段按"表里绑的是值"还原（§8） |
+| `Scope` 有完整的**进入 / 离开**语义与嵌套（`MultiParseScope`） | 本项目的帧链成文时**栈深最多 1** —— 帧链是为成员模板那一步预留的（后来由 learn/34 兑现） |
+
 ---
 
 ## 9. 顺带修掉的两个 bug
@@ -479,3 +519,18 @@ minicc 没有那层分派，故在此保守处理：**值名一律走旧路径**
 > 错的是**形参注册进作用域的时机**——它必须发生在**这位形参自己的默认实参解析完之后**
 > （[basic.scope.pdecl]/9），从而让第 i 位的默认实参恰好看得见第 0..i−1 位。
 > 帧链 + `count` 的增长顺序把这条规则**编码进了数据结构的形状**里。
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-21 | 引用折叠正确性 + 模板形参作用域**帧化**（commit fd79893） | `template<class T, class U = T>` 编译不过的根因是**登记时机**（真 bug）；形状与存储是让它能站住的底座 |
+| 2026-09-21 | 注册点挪进循环、排在 `match(Assign)` **之后** | [basic.scope.pdecl]/9：形参名从"自己的声明写完"起可见 ⇒ 第 i 位默认实参恰好看得见第 0..i−1 位 |
+| 2026-09-21 | 形参节点从值语义改为**指针化**（`vector<TemplateParamPtr>`） | 解析期 `push_back` 会 reallocate ⇒ 存下的元素**地址**失联（存下标则无恙） |
+| 2026-09-21 | 独立探针 `docs/learn/probes/vector_growth_probe.cpp` 入库 + 修正 vector 扩容说明的因果（commit cff8aba） | 让"扩容搬家"这件事可复现，而不是只写在注释里；因果也写准（存下标 vs 存地址） |
+| 2026-09-21 | 顺带修掉 codegen 的 8 字节字段赋值宽度（写路径硬编码 `movl`） | 读写不对称 ⇒ "写得进、读出来错"；此前没暴露是因为**从没有用例给 8 字节字段赋过值** |
+| 2026-09-21 | 顺带修掉 NTTP 名注册进作用域的副作用 | 值形参名被 `lookupTemplateParam` 命中 ⇒ 只在 `kind == Type` 时才建模板形参节点 |
+| 2026-09-22 | 成员模板落地（learn/34，commit e0ff653） | §8 里"成员模板 / 嵌套类模板 ❌"中的**成员模板**一项被填上 —— 帧链的栈深从此不止 1 |
+| 2026-10-15 | 常量折叠 + constexpr 求值落地（主线 D，commit 5af6604） | `SubstDefaultTemplateArgumentIfAvailable` 的"常量表达式求值"那一半由主线 D 接手，见 learn/39 / 40 |
+

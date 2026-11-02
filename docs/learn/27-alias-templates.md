@@ -10,6 +10,33 @@
 
 ---
 
+## §0 定位与能力清单
+
+别名模板 `template<class T> using Vec = MyPtr<T>;` 里的 `Vec` **不是模板**，
+它是"给一族类型起的一个共用名"。所以 `Vec<int>` 没有"实例化"这一步 —— 只有
+**解糖（desugar）**：把形参换掉，得到的是 `MyPtr<int>` **本身**，不是"另一个碰巧
+长得像的类型"。不造新类、不发新符号。也正因为"只是名字"，它在**三个时机**各要解一次，
+漏一个就出错，而且往往**不报错、只是静默选错或静默不匹配**。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 别名模板的解析与登记 | `parseTemplateDecl` 分派 `using`；单独一张 `m_aliasTemplates` 表，不混进类模板表 | 已实现 |
+| 别名**不是新类型**（[temp.alias]/1） | `Vec<int>` 与 `MyPtr<int>` 是同一个类型、同一份 mangling | 已实现 |
+| 解糖点①：使用点（非依赖） | `resolveType` 的模板 id 分支，排在类模板分支**之前** | 已实现 |
+| 解糖点②：替换期（依赖，直接上下文） | `substituteType` Case 5.8；解糖失败即 `Sfinae::fail` 软失败 | 已实现 |
+| 解糖点③：推导期（合一之前） | `TemplateDeducer::desugarAlias` —— 漏了**不报错**，只是候选被静默剔除 | 已实现 |
+| 递归别名检测 | `template<class T> using X = X<T>;` 展开时检出并报错 | 已实现（**使用期**才报） |
+| 实参个数 / 形态校验（[temp.alias]/2） | `Vec<int,int>` 报个数错 | 已实现 |
+| 类模板 id 的**结构合一**（[temp.deduct.type]/8 的 `T<T1...>`） | `MyPtr<T>` vs `MyPtr_int` 逐位合一 | 已实现 |
+| 实例"出身"记录 | `Type::templateOriginName` / `templateOriginArgs` | 已实现 |
+| NTTP 名在实参位被误判为类型 | 替换期按"表里绑的是值"还原成值实参 | 已实现 |
+| 别名模板作**模板模板实参** | `Wrap<Alias>` 位宽/kind 取别名自身 | 已验证（learn/33） |
+| `std::enable_if_t`（**std 版**） | 需要"条件选型" + std 名字注入 | 部分（机制已通：用户自写的 `enable_if` + `enable_if_t` 别名模板端到端可用；`std::` 前缀的垫片未注入） |
+| 别名模板的**偏特化** | `template<class T> using X<T*> = ...` | 未做 |
+| 递归别名的**定义期**报错 | 标准要求定义期即报 | 未做（本项目在使用期才报） |
+
+> ★ §5「边界」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 理论背景
 
 ### 1.1 别名 vs 类模板：一张尺子量到底
@@ -323,6 +350,25 @@ NTTP 别名 `BufA<4>` 与 `Buf<4>` 等价 —— 五条均与 clang 结论一致
 | `ClassTemplateSpecializationDecl` 自带 `TemplateArgumentList` | `Type::templateOriginName` / `templateOriginArgs` | 本项目实例类型是**改名后的 Type**，只能额外挂一份出身记录 |
 | `Parser::ParseTemplateArgumentList` + `TemplateParameterScope` | `parseTemplateArgumentList` + 替换期的"值实参还原"（§3.3） | Parser 只认 Token 形态，NTTP 名的判定推迟到替换阶段 |
 
+## 6 之补 真实版多做了什么、为什么
+
+（把 §3.1~§3.3 与 §6 对照表第三列、§5 边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| 别名模板有**独立的 Decl**（`TypeAliasTemplateDecl`） | 本项目不建独立 Decl，塞进 `TemplateDecl` 的一个字段（类 / 函数 / 别名三选一）—— 保持 AST 扁平 |
+| 保留 `AliasTemplateSpecializationType` 这层 **sugar** 供诊断 | 本项目**直接扔掉名字**：解糖后只剩底层类型；代价是诊断里看不到"原来是别名" |
+| `Type::getCanonicalType` 在**全类型系统**里先剥别名 | 本项目只在**推导入口**剥（`desugarAlias`）—— 不是规范化，是"名字不等 ⇒ 候选被剔除"的修正 |
+| `Sema::CheckAliasTemplateId` 有**专用诊断** | 本项目走 `Sfinae::fail` 而非专用诊断 —— 因为失败发生在直接上下文里，必须是软失败 |
+| `TreeTransform::TransformTemplateSpecializationType` 做 sugar **重建** | 本项目无 sugar 重建、无推导指引参与 |
+| 实例类型自带 `TemplateArgumentList` | 本项目的实例类型是**改名后的 Type**（`MyPtr_int`），只能额外挂一份"出身"记录（`templateOriginName` / `templateOriginArgs`） |
+| `Parser::ParseTemplateArgumentList` 配 `TemplateParameterScope`，非类型形参在实参位**直接**走常量表达式解析 | 本项目 Parser 只认 Token 形态 ⇒ `N` 被建成 `Class("N")`；还原推迟到替换阶段（依据是"替换表里绑的是值"） |
+| `Sema::CheckTemplateIdType` 遇依赖实参建 `TemplateSpecializationType`（带 sugar 的依赖类型） | 本项目用 `containsTemplateParam` 守卫**保持依赖、不去实例化** —— 否则会造出假实例 `Box_T`，不报错只是全线算错 |
+| 别名模板的**偏特化**（写成另一个别名模板） | 未做 —— 涉及别名模板的局部特化语法，是独立的一条线 |
+| 递归别名的**定义期**静态分析 | 本项目在**使用期**（展开时）才检出 —— 定义期查需要"别名模板不允许直接 / 间接引用自身"的静态分析 |
+| clang 的 TreeTransform **派生自 Sema** | 本项目为保住分层与可单测性把它外提 ⇒ 多三个同形状的接口（`DecltypeEvaluator` / `MemberTypeResolver` / `AliasTemplateResolver`） |
+
+
 ---
 
 ## 7. 关键日志片段（`test_tmpl_50` 实跑）
@@ -349,3 +395,17 @@ NTTP 别名 `BufA<4>` 与 `Buf<4>` 等价 —— 五条均与 clang 结论一致
 
 最后两行就是 **§1.4(a)** 那块拼图落地时的样子 ——
 `Vec<T>` 与 `MyPtr_int` 能对上，靠的正是"先解糖、再按出身逐位合一"。
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-16 | 模板机制主线收官（commit 5d9b78d）：别名模板的解析 / 登记 / 三级解糖 + `AliasTemplateResolver` 接口 | 别名不是新类型 ⇒ 没有"实例化"只有"解糖"；但三个解糖点缺一不可 |
+| 2026-09-16 | 顺带补齐两块拼图：类模板 id 的**结构合一**（[temp.deduct.type]/8）与实例"出身"记录 | ①漏了 ⇒ `MyPtr<T>` vs `MyPtr_int` 名字不等、候选被静默剔除；②minicc 的实例类型是**改名后的 Type**，模板 id 的信息在改名那刻就丢了 |
+| 2026-09-16 | 加 `containsTemplateParam` 守卫 | 否则 `Box<T>` 会拿形参 T 当实参真的去实例化，造出假实例 `Box_T` —— 不报错只是全线算错 |
+| 2026-09-16 | NTTP 名在实参位被误判为类型：按"替换表里绑的是值"在替换阶段还原 | Parser 缺的是"这个作用域里 N 是值"的知识，替换阶段恰好有 ⇒ `template<int N> using BufA = Buf<N>;` 由此可用 |
+| 2026-09-16 | 学习文档 18..29 一次性成文（commit 582887c） | — |
+| 2026-09-22 | NTTP 值位参与偏特化模式（learn/32，commit e0ff653） | ★ **补上了 §5 第一行的地基**：值位必须真的比，`enable_if<true,T>` / `enable_if<false,T>` 才能一真一假地分流 |
+| 2026-09-28 | 别名模板作模板模板实参获验证（learn/33，commit 09f50e5） | 形参表取别名自身、替换期正常解糖 ⇒ §5 第三行由"未做"改为"已验证" |
+

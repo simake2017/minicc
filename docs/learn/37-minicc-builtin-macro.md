@@ -7,6 +7,30 @@
 > clang 对照：`lib/Lex/Preprocessor.cpp` `InitPreprocessor()`
 > → 本实现：`src/preprocessor.cpp` 构造函数（preprocessor.cpp:129）
 
+## §0 定位与能力清单
+
+内建宏是"翻译单元开始之前就已存在"的宏 —— 它是**编译器向库作者发信号**的
+唯一通道：库代码靠它分成"给宿主编译器跑"与"给 minicc 跑"两条支路。
+minicc 只做一个（`__MINICC__`），但这一个就足以让 ministl 头文件成为
+**双栖**代码。代价是这个信号会占掉宏表的一个表位，于是还牵出一条
+**统计口径**的账（§2.2）。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 内建静态宏（[cpp.predefined] 的实现定义宏） | `__MINICC__` 值恒 1，与 `#define` 产物同表 | 已实现 |
+| `#ifdef` 查表分支 | 条件栈查 `m_macros.count`（[cpp.cond]） | 已实现 |
+| `#if` 表达式里"先展开再求值" | [cpp.cond]/4：宏展开后就地换成 1 再递归下降求值 | 已实现 |
+| `defined()` 运算符 | [cpp.cond]/5：先于宏展开单独处理 | 已实现 |
+| 动态宏 `__LINE__` / `__FILE__` | 展开现场就地生成，不存表（本批之前已有） | 已实现 |
+| 统计口径分层（内建宏不计入 `N macro(s) defined`） | `userMacroCount()` 剔除内建名单 | 已实现 |
+| `#define` 同名覆盖 / `#undef` 删除对内建宏同样生效 | 与 clang 一致（标准不禁止重定义内建宏） | 已实现 |
+| 版本号编码（`__GNUC__ = 12` 那种） | minicc 没有版本号概念 | 未做 |
+| target 宏族（`__x86_64__` / `__linux__` 等） | 只出 x86-64 Linux，暂不需要 | 未做 |
+| 函数式内建宏 `__has_include` / `__has_cpp_attribute` | 需预处理器在条件表达式里回调文件系统探测 | 未做 |
+| `#undef` 内建宏的诊断 | 教学版宽松，无警告 | 未做 |
+
+---
+
 ## 1. 理论背景：内建宏的两种体质
 
 [cpp.predefined] 列了翻译单元**开始之前**就已存在的宏。按实现方式分两类：
@@ -156,3 +180,30 @@ clang++-18 -std=c++20 tests/pp/test_pp_05_minicc_macro.cpp -o /tmp/p && /tmp/p; 
 - 飞轮下一步：ministl 侧按 `__MINICC__` 分支提供
   `detail/shim_cstddef.h` 等自供桩头（README「现状 2026-10」的路线图），
   之后才会撞上真 parser 缺口（`initializer_list` 文法、`throw`）。
+
+---
+
+## 8. 真实版多做了什么、为什么
+
+素材来自 §3 的「简化了什么」列与 §7 的边界清单。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `InitPreprocessor()` 注册几十上百个内建宏，值从 `LangOpts` / 版本号推导 | minicc 只出 x86-64 Linux 且无版本号概念；一个 `__MINICC__` 已够"双栖"这一个用途 |
+| 版本号编进宏值（`__GNUC__ = 12`） | 教学项目不演"版本考古" —— 头文件不会写 `__MINICC__ >= 9` 这类门槛 |
+| target 宏族（`__x86_64__`、`__linux__` 等） | 目标平台唯一，不存在"按宏分支选实现"的需求 |
+| `__has_include` / `__has_cpp_attribute` 这类**函数式内建** | 需要预处理器在条件表达式里回调文件系统探测 —— 当前预处理器语法面没有这个入口 |
+| 内建宏按类别注册（builtin / predef / command line 三类分别登记） | minicc 只有一张 `m_macros`，分类维度对双栖这个用途没有增量 |
+| 内建宏的 `#undef` 语义（clang 的 `BuiltinMacro` 带 `isPredefined` 属性，undef 后另有处理） | 本项目一条宏路走通即可；标准不禁止重定义内建宏，诊断属 quality of implementation（§2.2 已述） |
+
+★ 与 clang **同构、未简化**的两处（不在本表列）：宏表即 `MacroInfo` 池
+（`#define` 产物与内建宏同池）；动态宏 `__LINE__` 也是展开现场特判。
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-15 | 与 ministl::map/set 同一提交落地内建静态宏 `__MINICC__`，并把统计口径分层（`userMacroCount()` 剔除内建名单） | 飞轮第一块砖：让 ministl 头文件成为双栖代码；不剔除的话 114 份日志基线全漂移且漂移不含教学信息（git 3a2f6be） |

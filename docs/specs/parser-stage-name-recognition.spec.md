@@ -1,10 +1,25 @@
 # SPEC：parser 阶段名字识别（对齐 clang ClassifyName 骨架）
 
+状态：已签字（2026-10-23）
+签字：2026-10-23（用户拍板，三项全部按推荐项拍定；逐条见文末「拍板记录」）
+来源：需求原文「parser 阶段实现类似 clang 的语义识别」＋ docs/BUGS.md B35（语句层前瞻重写）/ B36（限定模板名误绑全局模板）＋ 上游技能 biz-dev-pipeline（spec 骨架）
+
 > 场景类型：**合成判定型**（多分类位判定 + 作用域匹配，无长流程、无写入风险）。
 > 对应需求原文：「parser 阶段实现类似 clang 的语义识别」。
 > 关联：docs/learn/46（B31 登记表现状）、docs/learn/45（TokenCheckpoint 机制）、
 > docs/BUGS.md B35（语句层前瞻重写）、ROADMAP 主线 I。
 > 状态：**已签字**（2026-10-23，三项拍板见文末拍板记录）。
+
+- 读者：改名字登记表模块或那 4 处消费点的人
+- 审法：每个消费点问一句——「查不到时走哪条支，会不会静默」；消费点**只允许依赖
+  单个位的命中与否**，禁止用「不在表里」做正向判定
+- 名词版本：v1
+
+## 变更记录
+
+| 日期 | 版本 | 改了哪条 |
+|---|---|---|
+| 2026-11-02 | v1 | 按文档骨架规范补齐头部与变更记录；§5 标题改为「观测点（日志键）」；补文末「附：实施记录」 |
 
 ## 1. 概念
 
@@ -172,7 +187,7 @@
 6. 不做 multi-declarator `int a = 1, b = 2;`（探针时发现的相邻缺口，另案登记）。
 7. 不做函数风格转型 `S()` / `S(x)` 的类型判定消费点（本机制铺路，消费点另批）。
 
-## 5. 日志键
+## 5. 观测点（日志键）
 
 格式规则在约束里（迁移必打 / 有意漂移申报），本篇只钉键名与时机：
 
@@ -191,3 +206,33 @@ Sema 限定名裁决  复用 [resolve] 行；实例 B 报错文案与 clang 逐�
 | 1 | value 分类位 | **保留占位**+注释：查询接口与 clang ClassifyName 同形（四个分类位），value 恒 false，不参与任何判定 |
 | 2 | 登记表落点 | **独立小模块共享**：`include/name_registry.h` + `src/name_registry.cpp`，Parser 与 Sema 各持 const 访问；对齐 clang「表在 Sema 侧、查询经分类函数」的形状 |
 | 3 | 裸名判定日志键名 | **`[parse:stmt]`**（与 parse:type / parse:targ / parse:member 同族） |
+
+---
+
+## 附：实施记录
+
+**拍板**见上方「拍板记录」；本节回填**实际怎么落的**与**验收数据**。
+
+| 项 | 实测值 | 出处 |
+|---|---|---|
+| 新模块 | `include/name_registry.h` + `src/name_registry.cpp`（`NameClassification` 四 bool + `NameRegistry` 查表；Parser 与 Sema 各持 `const` 共享） | 拍板 2 |
+| 收集器 | B31 扫描骨架原样搬迁 + type 位（struct/class/enum/typedef/using；**template 头后不置**）+ namespace 位（`namespace X {` 推作用域栈按花括号深度配对 / `namespace A = B;`）+ declval 种子（移进构造函数，空表也在） | docs/learn/47 |
+| 消费点（4 个） | 语句层裸名 `S;` 判声明（新增，打 `[parse:stmt]`）／表达式模板闸／语句层模板 id 链闸（换入口，等价性保证零漂移）／Sema 限定模板名裁决（B35 尾剥改作用域精确裁决） | §2 步骤 2~4 |
+| 新增集成用例 | `tests/lang/test_basics_23_name_registry.cpp`、`tests/lang/test_basics_24_name_registry_negative.cpp` | docs/learn/47 |
+| 新增单测 | `tests/unit/test_name_registry.cpp`（`NameRegistry.*` 13 例） | docs/learn/47 |
+| 回归 | 全量 **362/362** 单测全绿（存量 346 ＋ `NameRegistry.*` 13 ＋ 2 集成包装 ＋ 3 修复的陈旧假象用例）、`build.sh` **0 警告** | docs/learn/47 §5 |
+| 有意日志漂移 | **2 处**：`tmpl_54` 的 unknown-type-name 括注改写（旧「跳过 <...> + 回滚」文案自 B35 起因过时误导排查）＋ 新增 basics_23/24 两份日志；基线 153 → **155** 份，其余逐字节零漂移 | docs/learn/47 §5 |
+| 突变验证 | **3 条**逐条实跑变红/恢复转绿：摘 type 位判定／回退尾剥／摘 struct 登记 | docs/designs/parser-stage-name-recognition.design.md §10、BUGS.md B36 回归小节 |
+| 学习产物 | `docs/learn/47-parser-stage-name-recognition.md` | — |
+| 台账 | `docs/BUGS.md` **B36**（限定模板名 `N::B<...>` 误绑全局模板 B） | — |
+| 落库提交 | `83b4891`（2026-10-28） | git log |
+
+★ **两条教训**（docs/learn/47 §6，已写进约束）：
+① **陈旧二进制是第三种失败面具**——B31 引入登记表第一层闸时
+`test_expr_parser` 的 template-id 套件其实当场就红了，但当次 ctest 跑的是
+**没重建的 unit_tests**，绿色是假象；
+② **查不到 ≠ 不是**——消费点只依赖「位命中」做正向判定，「全 false」只表达未知。
+
+★ **后续批次的改写**（不在本批范围内，登记在此以便追溯）：本 spec 把"可见性"
+也交给了登记表；**B37 批次**已把可见性裁决改回 Sema 符号表
+（`docs/specs/visible-name-lookup.spec.md`），登记表降级为**过渡态的候选过滤器**。

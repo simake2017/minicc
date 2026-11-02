@@ -6,6 +6,33 @@
 > `tests/tmpl/test_tmpl_75_error_nttp_non_const_expr.cpp`（负例）。
 > 新模块：`include/constant_folder.h` + `src/constant_folder.cpp`。
 
+## §0 定位与能力清单
+
+**折叠（folding）**与**常量求值（constant evaluation）**共享同一棵表达式的
+遍历，但裁判标准相反 —— 折叠"折不动就放过"，求值"折不动就报错"。
+minicc 用**一个递归**同时干这两件事（`ConstantFolder`），代价是
+"折叠发生在语义层、结果写回 AST"，于是下游（定型 / 代码生成）对折叠
+**零感知**，既有 112 个模板用例逐字节零漂移。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 二元 / 一元 / 三元字面量折叠 | 自底向上归约，结果写回 AST | 已实现 |
+| 折叠的诚实边界 | 除零不折、含变量不折（UB 不在编译期替程序"决定"） | 已实现 |
+| 恒定条件三元的死分支消除 | `true ? 11 : touch()` ⇒ touch() 从 AST 消失 | 已实现 |
+| 常量求值裁决 [expr.const]/5 | 求值器返回 (值, **形态**)，形态不丢 | 已实现 |
+| NTTP 常量表达式实参 `Buf<2+2>` | Parser 存树、Sema 求值归一，归一必须赶在**缓存键之前** | 已实现 |
+| 实参表里的 `>` 歧义（[stmt.ambig] 实参表版） | `m_stopAtGreater` 罩住，括号分组内豁免 | 已实现 |
+| 形态归一（`K<2+2>` 与 `K<4L>` 形态不同） | 形态取折叠后字面量自带的 `literalType` | 已实现 |
+| 折叠覆盖面（`sizeof` / 取地址 / 字符码点 / 函数调用） | 只折二元 / 一元 / 三元 | 部分 |
+| 非整型常量（浮点 / 指针 / 引用 / 聚合） | 求值器只求整数值 + 形态 | 未做 |
+| 浮点常量折叠 | 与 B23（浮点字面量缺失）同族 | 未做 |
+| `constexpr` 关键字与"初始化式必须可折叠" | 本批未做 | 未做（learn/40 已补） |
+| 变量间常量传播（`const int n = 4;`） | 本批未做 | 未做（learn/40 已补） |
+| `Buf<k>`（const 变量作 NTTP 实参） | 需符号表参与求值，本批未做 | 未做（learn/40 已补） |
+| `Buf<x>`（普通变量作 NTTP 实参）的诊断文案 | 走类型实参 fast path，报 `unknown type name 'x'`（clang 报 not a constant expression） | 部分 |
+
+---
+
 ## 1. 理论背景
 
 ### 1.1 常量折叠是什么
@@ -162,3 +189,27 @@ Less/Greater —— `Buf<4>` 的收尾 `>` 与小于/大于同 token，收进来
   "unknown type name 'x'"而非 clang 的"not a constant expression" ——
   同为响亮拒收，文案不同；根治需要解析期符号表（[stmt.ambig] 完整
   裁决，已在清单）。
+
+---
+
+## 6. 真实版多做了什么、为什么
+
+素材来自 §1.3 对照表的「简化了什么」列与 §5 的边界清单。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `ExprConstant.cpp` 求值器求**任意类型**的常量（浮点 / 指针 / 引用 / 聚合） | 本项目只求整数值 + 形态；浮点整套缺失（B23），指针 / 引用 / 聚合的常量求值要一路铺到类型系统 |
+| clang **随手折**（`Sema::ActOnBinOp` 一路向上试折），折的点更多（数组长度、case 标号……） | 本项目只在 6 个语句访问点挂折叠钩子；数组长度与 case 标号分别是 learn/42 / learn/41 的范围 |
+| LLVM InstCombine 后端兜底的折叠表 | 教学项目一层就够；后端兜底属优化工程，不属语义 |
+| `TemplateArgument` 的 Expression→Value 形态转换做在 `CheckTemplateArgument` 内 | 本项目把求值归一挪到**缓存键之前**（`getOrInstantiateClass`）—— 这不是简化而是**必需**：塞进 `checkTemplateArguments` 会太晚，键里值位是占位 0，`Buf<2+2>` 与 `Buf<4>` 会撞键 / 分键都错 |
+| CodeGen 对恒定条件只发选中分支 | 本实现在**折叠期**就把落选支从 AST 移除 ⇒ CodeGen 更省一步；代价是折叠器必须知道"落选支可能有副作用"，不能顺手折两支 |
+| clang 的常量求值器对**除零**报错（`IntExprEvaluator::VisitBinDiv`） | 本项目分两道工序接力：折叠器除零**不折**（放过），求值器见非字面量树才报错 ⇒ 与 clang 逐字同文案 |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-15 | 落地主线 D 首批：新增 `ConstantFolder` 模块 + Sema 六个 fold 钩子 + NTTP 常量表达式实参 `Buf<2+2>` + 实参表 `>` 歧义处理 | 求值归一必须赶在缓存键之前；`evaluateIntegral` 必须带形态否则 `K<2+2>` 与 `K<4L>` 静默撞键（git 5af6604） |

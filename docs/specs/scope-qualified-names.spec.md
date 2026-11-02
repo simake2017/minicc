@@ -1,9 +1,24 @@
 # 规格：作用域即身份（模板与命名空间成员的名字带上作用域）
 
+状态：已签字（2026-11-02）
+签字：2026-11-02（用户拍板；Stage 1 拍板表第 1 条「阶段 1 → 阶段 2（登记表退场）」，拍板记录见 docs/learn/48）
+来源：docs/BUGS.md **B38**（跨命名空间同名模板撞实例 / 限定名绑错模板）＋ docs/learn/48 Stage 1 拍板表 ＋ 上游技能 biz-dev-pipeline（spec 骨架）
+
 > 阶段：**Stage 2**（承 Stage 1 的红线 1 改写 —— docs/learn/48）
 > 关联缺陷：BUGS.md **B38**（跨命名空间同名模板撞实例 / 限定名绑错模板）
 > 关联学习产物：docs/learn/49-scope-qualified-names.md
 > 签字：2026-11-02（Stage 1 拍板表第 1 条「阶段 1 → 阶段 2（登记表退场）」）
+
+- 读者：改命名空间成员注册 / 模板注册 / mangling / 限定名绑定的人
+- 审法：同一个名字的「作用域」是不是**只写了一遍**？答案必须是「是，只写一遍，
+  其余全是派生」；任何第二处前缀化都是缺陷
+- 名词版本：v1
+
+## 变更记录
+
+| 日期 | 版本 | 改了哪条 |
+|---|---|---|
+| 2026-11-02 | v1 | 按文档骨架规范补齐头部与变更记录；§2.2 标题改为「Out of Scope」；补「§7 观测点」与文末「附：实施记录」 |
 
 ## 1. 需求与动机
 
@@ -38,7 +53,7 @@ minicc 现状（探针实测，clang++-18 -std=c++20 对拍）：
 | S2-3 | **限定名模板 id 不再剥尾归一**：按作用域精确绑定；查不到即报错 | `resolveType` |
 | S2-4 | **登记表退场一处**：Sema 侧的 `classifyQualified` 消费点删除（不再有第二份作用域事实） | `semantic_analyzer.cpp` |
 
-### 2.2 本阶段不做（明确的边界）
+### 2.2 Out of Scope（本阶段不做的边界）
 
 1. **不做** `using namespace N;`（本项目不支持该语法 ⇒ 无"非限定名回退到命名空间"这一路）。
 2. **不做**函数模板的作用域化（`N::f<int>(x)` 仍不支持；函数模板的候选集按裸名管理）。
@@ -114,3 +129,48 @@ Stage 3 = clang 式「边解析边 `ActOn*` 登记」。届时 Parser 侧的
 |---|---|---|
 | `tests/lang/test_basics_23_name_registry.cpp` | `[resolve] 限定模板名 'M::B' ⇒ 裸名 'B'` 一行**消失**；`[instantiate:name] 'B<int>' → 'B_int'` 变成 `'M::B<int>' → 'M::B_int'`；汇编里的 `B_int` 符号变成 `M__B_int` | 剥尾归一取消（§3.3）+ 实例名带作用域（§3.2） |
 | 新增集成用例 | 入列 | 本批新增 |
+
+---
+
+## 7. 观测点
+
+本批**没有新增任何日志键**——作用域是**身份**的改动，改动体现在既有行的
+**内容**上（同一个键，参数里多带了作用域），不体现在键名上。
+故观测方式只有一种：**逐字节比对**。
+
+| 观测点 | 键名 | 必打时机 | 本批的变化 |
+|---|---|---|---|
+| 进入命名空间 | `[namespace]` | `processNamespaceDecl` 进入时 | 行内容不变（`enter namespace 'N'`） |
+| 蓝图名 / 实例名 | `[instantiate:name]` | 实例首次创建时 | 参数由 `'B<int>'` / `'B_int'` 变为 `'M::B<int>'` / `'M::B_int'`（行中间的 `汇编符号前缀` 字样不变） |
+| 实例化种类 | `[instantiate:class]` | 实例化类模板时 | 蓝图名带作用域后同现 |
+| 限定名绑定失败 | `[Semantic Error] … no template named 'B' in namespace 'N'` | 使用点查不到限定名时 | 由「静默绑全局 B」改为**响亮报错**（rc=1） |
+| 旧的剥尾归一行 | `[resolve] 限定模板名 'N::B' ⇒ 裸名 'B'` | —— | **本批消失**（剥尾归一取消，见 §3.3） |
+
+★ 因为「键名不变、参数变」，所以只有逐字节比对才能看出作用域有没有生效——
+`./logdiff.sh diff` 是本批唯一的硬验收手段（见文末「附：实施记录」）。
+
+---
+
+## 附：实施记录
+
+**范围**见 §2.1；本节回填**实际怎么落的**与**验收数据**。
+
+| 项 | 实测值 | 出处 |
+|---|---|---|
+| 前缀化单点 | `processNamespaceDecl` 改用 `m_currentNamespace`（完整命名空间路径）而非 `decl->name`（本层名字）；函数 / 类 / 全局变量 / 枚举 / **模板（★本批新增分支）** 五种成员共用 | §3.1、docs/learn/49 |
+| 模板注册 | `processNamespaceDecl` 新增 `case NodeKind::Template`：类模板蓝图名带 `M::`、别名模板 `aliasName` 带 `M::`；函数模板与推导指引**不加前缀**（限定名调用函数模板本项目不支持） | §3.2 |
+| 实例身份三处派生 | 实例名 = 蓝图名 + `_` + 实参（`M::B_int`）；缓存键 = 使用点限定名（`M::B<int>`）；mangled = `symbolSafe(蓝图名)` + 实参编码（`_Z4M__BIiE`）；汇编符号 = `asmSymbol`（`M__B_int`） | §3.2 |
+| 限定名绑定 | `resolveType` 模板 id 分支按**完整限定名**查 `m_classTemplates` / `m_aliasTemplates`，不再剥尾；查不到即报错 | §3.3 |
+| 登记表退场一处 | 删 `SemanticAnalyzer::m_names` / `setNameRegistry` / `main.cpp` 的注入 | §3.4、S2-4 |
+| 新增集成用例 | `tests/lang/test_basics_28_namespace_template_scope.cpp`、`tests/lang/test_basics_29_nested_namespace_qualified_call.cpp` | docs/learn/49 |
+| 新增单测 | `tests/unit/test_scope_qualified_names.cpp`（`ScopeQualifiedNames.*` 5 例） | docs/learn/49 |
+| 突变验证 | **4 条**逐条实跑变红：①前缀化改回 `decl->name` ②模板注册不前缀化 ③限定名改回剥尾 ④mangling 不净化 —— 分别打红 **1 / 3 / 1 / 1** 个用例 | §4、docs/designs/scope-qualified-names.design.md §5 |
+| 回归 | 全量 **376/376** 全绿（★ 上一版基线里的 369 是**没重建的 unit_tests** 留下的假象，重建后 371，本批 +5） | docs/learn/49 §7、BUGS.md B38 |
+| 有意日志漂移 | basics_22/23 的模板蓝图名 + 实例名 + mangled 带作用域（旧行 `[resolve] 限定模板名 'N::B' ⇒ 裸名 'B'` 消失）＋ 新增 basics_28/29 两份 ＋ `_unit_cases` +7 例 | §6 |
+| 学习产物 | `docs/learn/49-scope-qualified-names.md` | — |
+| 台账 | `docs/BUGS.md` **B38** | — |
+| 落库提交 | `4f1fb49`（2026-11-02） | git log |
+
+★ **Stage 3 的债**（本批未做，已定位）：解析期「名字是不是模板」这一问仍由
+登记表回答（过渡态近似）。clang 的答案是 Sema 的活符号表 + 语法试探兜底，
+需要边解析边 `ActOn*` 登记的架构改造——不是判据调整能解决的。

@@ -1,11 +1,26 @@
 # SPEC：名字可见性裁决下沉语义期（裸类型名声明 + 作用域判据单点）
 
+状态：已签字（2026-11-02）
+签字：2026-11-02（用户在会话中拍板"按推荐方式走，尽量贴切 clang"；三项拍定见文末「拍板记录」）
+来源：需求原文「能否改成类似 clang 的正规模式，或者一边 parser 一边进行简单语义识别，不需要像后面那么复杂的语义识别」＋ docs/BUGS.md B37（裸类型名声明的可见性无人裁决）＋ 上游技能 biz-dev-pipeline（spec 骨架）
+
 > 场景类型：**合成判定型**（一个判据的多处消费点收敛，判定结果可观测）。
 > 关联：docs/specs/parser-stage-name-recognition.spec.md（2026-10-23 签字，
 > 本篇是它的**修正**：把"可见性"从解析期的名字投影挪回语义期的符号表）、
 > docs/learn/46（B31 登记表）、docs/learn/47（多 bit 分类）、
 > docs/BUGS.md B37、ROADMAP 主线 I。
 > 状态：**已签字**（2026-11-02，用户在会话中拍板"按推荐方式走，尽量贴切 clang"）。
+
+- 读者：改名字查找 / 作用域链 / 裸名声明判据的人
+- 审法：每个消费点问的是**同一个问题**吗？答案必须是「是，且都走同一个函数」；
+  拿「本 TU 某处声明过」当「此处可见」是本批修的那个静默放行
+- 名词版本：v1
+
+## 变更记录
+
+| 日期 | 版本 | 改了哪条 |
+|---|---|---|
+| 2026-11-02 | v1 | 按文档骨架规范补齐头部与变更记录；§5 标题改为「观测点（日志键）」；补文末「附：实施记录」 |
 
 ## 1. 概念
 
@@ -121,7 +136,7 @@
 6. 不做完整的类作用域链（基类成员、using-declaration 引入名）——本实现只有
    "当前类的 typeAliases"一级近似。
 
-## 5. 日志键
+## 5. 观测点（日志键）
 
 | 事件点 | 键名 | 必打时机 |
 |---|---|---|
@@ -137,3 +152,35 @@
 | 1 | 走哪条路 | **阶段 1（可见性裁决下沉 Sema）→ 阶段 2（登记表退场）**，不做"Parser 自建作用域链表"（那是第二张表，踩红线 3） |
 | 2 | 红线 1 的措辞 | 改写成**目标式**："语义裁决权单一"（详见 docs/constraints/00-全局约束.md） |
 | 3 | 不可见时的文案 | 与 clang 逐字：`use of undeclared identifier 'X'`（minicc 走声明分支、clang 走表达式分支，语义结论相同） |
+
+---
+
+## 附：实施记录
+
+**拍板**见上方「拍板记录」；本节回填**实际怎么落的**与**验收数据**。
+
+| 项 | 实测值 | 出处 |
+|---|---|---|
+| 判据单点 | Sema 新增 `lookupVisibleType`（类作用域别名表 → 命名空间链逐级外层 → 全局）；`resolveType` 里原三处手写回退全部换成它一次调用 | §1.1、§2 步骤 2、docs/learn/48 |
+| AST 一槽 | `EmptyStmt` 增 `typeName` 槽携带裸名到语义期（`include/ast.h`） | §2.5 |
+| 裁决三支 | 可见的类型名 ⇒ 判为无声明符声明（[dcl.dcl]/1）；声明过但非类型 ⇒ 走表达式路径（局部变量遮蔽全局类 S，与 clang 同）；两不中 ⇒ `use of undeclared identifier` | §2 步骤 3 |
+| 红线 1 改写 | 「语法期零语义分层」→「**语义裁决权单一**」（约束文件里同时记明：原措辞把**现方案**写成了红线，顺带禁掉了 clang 的实际做法——红线该写目标不写现状） | 拍板 2、docs/constraints/00-全局约束.md §二.1 |
+| 登记表降级 | NameRegistry 定位改写为**过渡态的候选过滤器**（「值不值得让 Sema 查一下」），不得当可见性的答案 | §2 步骤 1、docs/learn/48 |
+| 新增集成用例 | `tests/lang/test_basics_25_bare_type_name_visibility.cpp`（正例）、`test_basics_26_bare_type_name_namespace_not_visible_error.cpp`、`test_basics_27_bare_type_name_class_alias_not_visible_error.cpp`（两个负例，文案与 clang **逐字同**，含列号 28:5 / 29:5） | docs/learn/48 |
+| 新增单测 | `tests/unit/test_name_visibility.cpp`（`NameVisibility.*` 7 例：全局 / 命名空间内 / 命名空间链外层 / 类作用域别名 / 全局不可见 / 类作用域别名全局不可见 / 局部变量遮蔽） | docs/learn/48 |
+| 突变验证 | **4 条**逐条实跑变红：①命名空间链只查一层 ②类作用域分支挪到命名空间链之后 ③去掉第二问 `isNameDeclared` ④Parser 不带名字 | docs/designs/visible-name-lookup.design.md §5 |
+| 回归 | 全量 **369/369** 全绿（362 ＋ 7）；有意漂移 4 处（basics_23 源注释位移 + 新增 `[sema:stmt]` 2 行 / tmpl_54 过时括注改写 / 新增 basics_25..27 三份 / 单测 +7） | docs/learn/48、BUGS.md B37 |
+| 学习产物 | `docs/learn/48-visible-name-lookup.md` | — |
+| 台账 | `docs/BUGS.md` **B37** | — |
+| 落库提交 | `4f1fb49`（2026-11-02，与 B38 同批） | git log |
+
+★ **本批查实、但未修的三处既有缺口**（已登记，见 docs/learn/48 §7 边界表）：
+命名空间变量在块作用域不可见（`namespace N { int g; }` 里裸用 `g` 不可见）／
+命名空间模板蓝图按**裸名**注册 ⇒ `N::B` 会绑到全局 B（**已在下一批 B38 修掉**）／
+嵌套类不支持。
+
+★ **单测曾被既有缺口绊住**：`NameVisibility.NamespaceChainOuterLevel` 里调用
+`A::B::f()` 报 `Undefined variable 'A::B::f'`——命名空间嵌套函数的**不限定调用**
+本身不支持，改成不调用函数（Sema Pass 3 照样走查函数体）。
+★ **这条坑在下一批被追平**：根因是 B38 的「嵌套命名空间丢外层」
+（注册名是 `B::f` 而使用名是 `A::B::f`）。

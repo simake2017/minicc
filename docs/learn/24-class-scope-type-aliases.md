@@ -8,6 +8,32 @@
 
 ---
 
+## §0 定位与能力清单
+
+别名**不是新类型**，只是一次"名字 → 类型"的替换（[dcl.typedef]/[temp.alias]）。
+它逼着编译器回答两个更根本的问题：**这个名字该在哪一层作用域里找**
+（[basic.lookup.unqual]/[basic.lookup.qual]），以及**实例化时替换发生在哪些位置**。
+因为别名目标里可以含模板形参，蓝图阶段的 `type` 指向的还是**未绑定的 `T`** ——
+不跟着替换就会拿到裸 `T`，进而**静默地按 `T` 自己的占位布局（size 0）继续编译**。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 类内 `using X = T;` / `typedef T X;` 声明 | 在类体成员循环里认这两种写法 | 已实现 |
+| 别名**不是新类型** | `using A = int; using B = int;` 是同一个函数签名 | 已实现 |
+| 使用点①：类外**非模板**限定名 `Plain::Int` | 查全局符号表里 `processClassDecl` 登记的 `Cls::alias` | 已实现 |
+| 使用点②：类外**模板实例**限定名 `Box<int>::type` | `resolveType` 的 nested-name 分支：先实例化限定者，再查实例类的别名表 | 已实现 |
+| 使用点③：类内**非限定**名 `type v;` | `resolveType` 的类作用域回退 | 已实现 |
+| 实例化时别名目标随形参替换 | `Box<int>::type` ⇒ `int` 而不是裸 `T`（复用 `substituteType`） | 已实现 |
+| 声明前瞻跳过 `::member` 链 | `Box<int>::type x;` 不被当成表达式语句 | 已实现 |
+| **别名模板** `template<typename T> using X = ...`（[temp.alias]） | 别名模板是"解糖"不是"实例化" | 已实现（learn/27 补齐） |
+| 依赖类型名 `typename T::type` | 模板里"依赖的限定名"要 `typename` 消歧 | 已实现（learn/25 补齐） |
+| `using Base::f;` 引入声明 | 把基类成员拉进本类作用域 | 未做 |
+| **嵌套类** `struct Outer { struct Inner {}; };` | 本实现的 `m_classDecls` 是**扁平**命名 | 未做 |
+| 作用域链（类体内嵌块 / 嵌套类体内用外层别名） | 本实现只有 `m_currentClassName` 一个"当前类" | 未做 |
+| 别名在**表达式位置**（NTTP）的解糖 | 类型位置的解糖已覆盖，表达式位置未验证 | 未做 |
+
+> ★ §6「边界：还没做的」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 理论背景
 
 ### 1.1 别名不是类型，是"名字 → 类型"的一次替换
@@ -241,3 +267,29 @@ ctest --test-dir build-linux                                    # 154/154
 | **嵌套类** `struct Outer { struct Inner {}; };` | 本实现的 `m_classDecls` 是**扁平**命名 | `Outer::Inner` 尚未支持；别名的限定者只能是"已知类" |
 | **别名参与重载/特化判别** | 本实现按解糖后的类型比较，方向是对的 | 但只覆盖了类型位置的解糖；表达式位置（NTTP）未验证 |
 | **作用域链** | 本实现只有 `m_currentClassName` 一个"当前类" | 类体内嵌 `if` 块里用别名可以，但在**嵌套类**体内用外层的别名不行 |
+
+## 7. 真实版多做了什么、为什么
+
+（把 §1.1 的 clang 对照表第三列与 §6 的边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Sema::ActOnAliasDeclaration` 统一处理别名声明 | 本项目在 `parseClassDecl` 的成员循环里直接认 `KwUsing`/`KwTypedef` 两个分支 —— 教学上更贴近"类体里多了一种成员"这个直观模型 |
+| `TypedefType::desugar()` / `getUnqualifiedDesugaredType` 走**完整的** DesugaredType 链 | 本项目只在 `resolveType` 一处做**单级**成员查表；既然别名不是新类型，一层解糖就够 |
+| 成员名查找走 `LookupQualifiedName` + `CXXRecordDecl::lookup`（有完整作用域链） | 本实现直接查 `m_classDecls[qual]->typeAliases` 这张 `unordered_map` —— 无作用域链、无 ADL、无 using 引入 |
+| `using Base::f;` 引入声明 | 属另一条独立的语法线，且依赖完整的成员查找与作用域链；未做 |
+| **嵌套类**（`Outer::Inner`） | 本实现的 `m_classDecls` 是**扁平**命名，别名的限定者只能是"已知类"；嵌套类是一条更大的线（CLAUDE.md 记为 B37 查实、至今未修的缺口） |
+| 帧大小与局部对象偏移出自**同一份** LLVM 分配器（`X86FrameLowering::determineFrameLayout` / `PEI::assignFrameObjects`） | 本项目原本"两处各算一份"（`estimateFrameSize` 只数局部变量、漏了帧基与形参 spill 槽）⇒ 最深局部落到 `%rsp` 之下 ⇒ 修法是让槽数算法与序言区的 spill 循环**逐条对应** |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-16 | 模板机制主线收官（commit 5d9b78d）：类内 `using`/`typedef` + 三个使用点的查找路径 + 实例化时别名目标替换 | 别名目标不替换 ⇒ `Box<int>::type` 拿到裸 `T`，会**静默按 `T` 的占位布局（size 0）继续编译** |
+| 2026-09-16 | 顺带修掉 codegen 帧大小 bug：`estimateFrameSize` 补上「帧基 + 形参 spill 槽」 | 帧浅 8~56 字节 ⇒ 最深局部落在 `%rsp` 之下，被 `pushq` 暂存与 `callq` 返回地址踩掉（症状：变量单独读对、参与二元表达式就错） |
+| 2026-09-16 | 新增白盒单测 `tests/unit/test_codegen_frame.cpp`（`CodegenFrame.*`） | 断言**不变量**「帧 N ≥ 最深 -X(%rbp)」，将来换分配策略也不会误报 |
+| 2026-09-16 | 同批补齐依赖类型名 `typename T::type`（learn/25）与别名模板（learn/27） | §6 边界表里的两行缺口被填上，`void_t<typename T::type>` 与 `std::enable_if_t` 由此可用 |
+| 2026-09-16 | 学习文档 18..29 一次性成文（commit 582887c） | — |
+| 2026-11-02 | 名字可见性裁决下沉 Sema（B37）+ 作用域即身份（B38，commit 4f1fb49） | 别名的三处使用点正是"可见性"问题；可见性裁决从 Parser 侧的解析期回退改成 Sema 符号表裁定，见 learn/48 / learn/49 |
+

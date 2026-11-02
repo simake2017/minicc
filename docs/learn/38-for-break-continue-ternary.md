@@ -6,6 +6,32 @@
 > clang 对照：`ParseForStatement`（ParseStmt.cpp）、`CodeGenFunction::EmitForStmt`
 > （clang/lib/CodeGen/CGStmt.cpp）、`ParseConditionalExpression`（ParseExpr.cpp）
 
+## §0 定位与能力清单
+
+结构化控制流在汇编层只剩两样东西：**条件跳转**与**无条件跳转**。
+for / break / continue / 三元的全部复杂度都来自同一件事 —— **控制流上下文**：
+我现在在循环里吗？continue 该落到哪一步？minicc 的做法是把这两个上下文
+各做成一个栈（语义层的 `m_loopDepth`、代码生成层的 `m_loopStack`），
+语法层则完全不判 break/continue 的合法性。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| for 的三种 init 形态 | 声明式 / 表达式式 / 空 init 都收 | 已实现 |
+| for 头两格局部放宽为"表达式或赋值" | 本语言赋值是语句，for 头是唯一例外 | 已实现 |
+| for-init 作用域贯穿 cond/incr/body | `enterScope("for-init")` 包全程 | 已实现 |
+| break 的合法性守卫 | 文案 `'break' statement not in loop or switch statement`（为 switch 提前留位） | 已实现 |
+| continue 的合法性守卫 | 文案 `'continue' statement not in loop statement` | 已实现 |
+| continue 落到**增量步**（for） | `for(;;)` 里若落条件式就是死循环 | 已实现 |
+| 嵌套循环只作用最近一层 | 循环上下文栈的栈顶语义，生成期解决 | 已实现 |
+| 三元 `?:` 的右结合 | `a?b:c?d:e` = `a?b:(c?d:e)` | 已实现 |
+| 三元的短路语义 | 落选支**整体跳过**，不是算完再选 | 已实现 |
+| 三元的两支类型规则 | 必须同型，不做 [expr.cond]/3 的合成类型规则 | 部分 |
+| 区间 for（range-based for） | 等 ministl 迭代器协议稳定 | 未做 |
+| switch / do-while / 逗号表达式 | 本批未做 | 未做（learn/41 已补 switch / do-while / 括号内逗号） |
+| 赋值表达式化（`a = b = c`、while 条件里赋值） | 语法级决定，暂不做 | 未做 |
+
+---
+
 ## 1. 理论背景：结构化控制 = goto 的糖
 
 高级语言的控制流在汇编层只有两样东西：**条件跳转**（je/jne）与**无条件跳转**（jmp）。
@@ -157,3 +183,30 @@ echo 'int main() { break; }' > /tmp/b.cpp
 - 逗号表达式（for 头第三格 `i++, j++` 的正规形态）
 - 区间 for（range-based for，等 ministl 迭代器协议稳定后再说）
 - 赋值表达式化（`a = b = c`、while 条件里赋值）——语法级决定，暂不做
+
+---
+
+## 9. 真实版多做了什么、为什么
+
+素材来自 §5 的「简化了什么」列与 §8 的边界清单。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| 范围 for（`for (auto x : range)`） | 依赖 ministl 迭代器协议稳定，§8 已登记为后续；区间 for 与控制流上下文无关 |
+| for-init 里的属性/对齐说明符（`[[maybe_unused]]` 等） | 教学编译器不实现属性语法 |
+| `EmitForStmt` 在 -O1+ 的循环旋转 / 规范化 / 向量化 | 教学版只发"结构正确的跳转"，不追求性能（项目定位：可讲解、可观测优先） |
+| `BreakContinueStack` 存的是 `BasicBlock*` 目标块 | 本实现存标签字符串；无 CFG 无 SSA，标签即目标 |
+| 三元的 glvalue / xvalue 合并规则 | 值类别只有 L/R 两态（learn/36 §1.2） |
+| 三元的 braced-init-list 第三支 | 语法面没有该形态 |
+| 三元的 [expr.cond]/3 合成类型规则（int / double 混排等） | 教学级简化：两支必须同型；混排与常量折叠的交互留到主线 D |
+| `Sema::ActOnBreak/ActOnContinue` 沿 `CurContext` 链检查"有没有循环 / switch" | 本实现用 `m_loopDepth` 计数器；continue 目标恒为最近循环，不检查目标类型 |
+| clang 的赋值**天生是表达式** | 本语言赋值是**语句**（早期设计决定），for 头局部放宽已覆盖最常见形态；链式赋值 `a = b = c` 仍不支持 |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-15 | 落地主线 C 首批：AST 四节点（ForStmt / BreakStmt / ContinueStmt / ConditionalExpr）+ `m_loopDepth` / `m_loopStack` 两个上下文栈 + for 头局部放宽 | break 的诊断文案提前为 switch 留位（"or switch"），将来做 switch 时基线不再漂（git fa68df7） |

@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "minicc 编译流水线",
+    "output": "docs/arch/compile-pipeline.html",
+    "viewBox": [
+      1200,
+      560
+    ],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "front-end",
+        "label": "前端三阶段",
+        "focus": [
+          "pp",
+          "lex",
+          "parse"
+        ],
+        "note": "预处理展开宏与头文件，词法切 Token，语法成 AST。"
+      },
+      {
+        "id": "template-engine",
+        "label": "模板引擎",
+        "focus": [
+          "sema",
+          "tmpl"
+        ],
+        "note": "语义分析定类型与布局，模板实例化把蓝图变成具体类与函数。"
+      },
+      {
+        "id": "back-end",
+        "label": "后端与链接",
+        "focus": [
+          "codegen",
+          "as",
+          "linker",
+          "exe"
+        ],
+        "note": "代码生成出 AT&T 汇编，系统 as 产 .o，自研链接器合成可执行文件。"
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "源码与预处理"
+    },
+    {
+      "label": "词法与语法"
+    },
+    {
+      "label": "语义与实例化"
+    },
+    {
+      "label": "代码生成与汇编"
+    },
+    {
+      "label": "链接与产物"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "src",
+      "type": "external",
+      "label": "源文件",
+      "sublabel": ".cpp",
+      "stage": 0,
+      "row": 0,
+      "tag": "tests/ demos/"
+    },
+    {
+      "id": "pp",
+      "type": "backend",
+      "label": "预处理",
+      "sublabel": "Phase 0",
+      "stage": 0,
+      "row": 2,
+      "tag": "宏展开"
+    },
+    {
+      "id": "lex",
+      "type": "backend",
+      "label": "词法分析",
+      "sublabel": "Phase 1",
+      "stage": 1,
+      "row": 0,
+      "tag": "Token 流"
+    },
+    {
+      "id": "parse",
+      "type": "backend",
+      "label": "语法分析",
+      "sublabel": "Phase 2",
+      "stage": 1,
+      "row": 2,
+      "tag": "AST"
+    },
+    {
+      "id": "sema",
+      "type": "backend",
+      "label": "语义分析",
+      "sublabel": "Phase 3",
+      "stage": 2,
+      "row": 0,
+      "tag": "类型与布局"
+    },
+    {
+      "id": "tmpl",
+      "type": "backend",
+      "label": "模板实例化",
+      "sublabel": "Phase 4",
+      "stage": 2,
+      "row": 2,
+      "tag": "推导与替换"
+    },
+    {
+      "id": "codegen",
+      "type": "backend",
+      "label": "代码生成",
+      "sublabel": "Phase 5",
+      "stage": 3,
+      "row": 0,
+      "tag": "AT&T 汇编"
+    },
+    {
+      "id": "as",
+      "type": "external",
+      "label": "系统汇编器",
+      "sublabel": "as",
+      "stage": 3,
+      "row": 2,
+      "tag": "产出 .o"
+    },
+    {
+      "id": "linker",
+      "type": "backend",
+      "label": "自研链接器",
+      "sublabel": "Phase 6",
+      "stage": 4,
+      "row": 0,
+      "tag": "符号决议"
+    },
+    {
+      "id": "exe",
+      "type": "external",
+      "label": "可执行文件",
+      "sublabel": "非 PIE",
+      "stage": 4,
+      "row": 2,
+      "tag": "内置 _start"
+    }
+  ],
+  "flows": [
+    {
+      "id": "f-src-pp",
+      "from": "src",
+      "to": "pp",
+      "label": "源码文本",
+      "classification": "源文件"
+    },
+    {
+      "id": "f-pp-lex",
+      "from": "pp",
+      "to": "lex",
+      "label": "展开后纯文本",
+      "classification": "无 # 无宏"
+    },
+    {
+      "id": "f-lex-parse",
+      "from": "lex",
+      "to": "parse",
+      "label": "Token 流",
+      "classification": "Eof 收尾"
+    },
+    {
+      "id": "f-parse-sema",
+      "from": "parse",
+      "to": "sema",
+      "label": "AST",
+      "classification": "TranslationUnit"
+    },
+    {
+      "id": "f-sema-tmpl",
+      "from": "sema",
+      "to": "tmpl",
+      "label": "类型标注 AST",
+      "classification": "含类布局"
+    },
+    {
+      "id": "f-tmpl-codegen",
+      "from": "tmpl",
+      "to": "codegen",
+      "label": "具体化的 AST",
+      "classification": "实例已落地"
+    },
+    {
+      "id": "f-codegen-as",
+      "from": "codegen",
+      "to": "as",
+      "label": "汇编 .s",
+      "classification": "AT&T 语法"
+    },
+    {
+      "id": "f-as-linker",
+      "from": "as",
+      "to": "linker",
+      "label": "目标文件 .o",
+      "classification": "ELF 重定位"
+    },
+    {
+      "id": "f-linker-exe",
+      "from": "linker",
+      "to": "exe",
+      "label": "可执行文件",
+      "classification": "非 PIE"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "阶段切分",
+      "items": [
+        "七个阶段各自有中文日志横幅与可观测产物",
+        "-E 只跑到预处理；-S 只出汇编不链接",
+        "任何阶段抛异常即终止，诊断带行列号"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "模板引擎",
+      "items": [
+        "函数模板走实参推导，算法是合一",
+        "类模板走形参替换，产出具体类型",
+        "实例名带作用域，符号按 Itanium 修饰"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "自研链接器",
+      "items": [
+        "合并节、决议符号、回填重定位",
+        "内置 _start 与 64KB bump 分配器",
+        "不依赖系统 ld / crt / libc"
+      ]
+    }
+  ]
+}

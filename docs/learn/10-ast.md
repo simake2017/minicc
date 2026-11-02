@@ -7,6 +7,30 @@
 
 ---
 
+## §0 定位与能力清单
+
+AST 是编译器的**中枢数据结构**：Parser 把线性的 Token 流"折叠"成一棵树，
+之后所有阶段（语义分析、模板实例化、代码生成）都只是在这棵树上做**遍历 + 变换**。
+理解 AST 就理解了"编译器到底在操作什么东西"。本文讲这棵树长什么样、
+怎么被各阶段接力加工。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| [gram] 三大节点族 | 表达式（有类型可求值）/ 语句（控制流程）/ 声明（引入名字） | 已实现 |
+| `NodeKind` 枚举 + 继承双轨 | 消费方 `switch` 分派；需要子节点字段时 `static_pointer_cast`（零 RTTI） | 已实现 |
+| Visitor 虚分派 | `ASTNode::accept` + 32 个 `visit` 重载，全项目零 `dynamic_pointer_cast` | 已实现（learn/29） |
+| 源码位置 | 每节点带 `SourceLocation`，报错定位（如 `3:7 期望 ';'`） | 已实现（只记起点） |
+| 模板蓝图节点 | `TemplateDecl` 双槽位（`classTemplate` / `funcTemplate` 互斥） | 已实现 |
+| 表达式类型槽 | `Expression::resolvedType`，Parser 阶段为空、语义期填充 | 已实现 |
+| 根节点 | `TranslationUnit { vector<DeclPtr> }`，一个源文件一棵树 | 已实现 |
+| 值类别细分 | lvalue / xvalue / prvalue 三态 | 部分（简化为语义阶段的布尔左值性） |
+| `DeclContext` 作用域嵌套链 | clang 的声明上下文链 | 未做（符号表用简单 map；作用域链由 learn/49 的前缀化补上，但仍是平表） |
+| `ASTContext` 内存池与类型唯一化 | clang 的 arena 分配 + 类型规范化 | 未做（`shared_ptr` + 类型字符串；类型字符串不单射的问题见 learn/23） |
+| `RecursiveASTVisitor` **泛型**遍历框架 | clang 的万能遍历器 | 未做（本项目后来手写了 Visitor 模式，但仍是**手写重载**，不是泛型框架） |
+| `ParenExpr` 节点 | clang 保留括号节点 | 未做（括号信息已被树形吸收） |
+| 赋值作为表达式 | clang 里 `a = b = c` 可链式 | 未做（本项目的赋值是**语句**） |
+| AST 打印 | `--dump-ast` 递归打印树形 | 已实现 |
+
 ## ① 理论背景
 
 **标准依据**：C++ 标准本身没有"AST"一词——标准描述的是语法（[gram]）与语义（[basic]/[expr]/[stmt]/[dcl]）。
@@ -228,3 +252,31 @@ clang++-18 -Xclang -ast-dump -fsyntax-only /tmp/ast_demo.cpp
 
 一句话总结：**Lexer 去噪、Parser 塑形、Sema 赋值、实例化分身、CodeGen 翻译——
 五个阶段接力传递的，始终是这棵树。**
+
+## ⑧ 真实版多做了什么、为什么
+
+★ 素材来源：本文 §⑥ clang 源码对照的「简化了什么」列 + learn/29 的分派判据
++ CLAUDE.md「AST 分派重构」条目。**未查证的写「（本项目未查证）」**。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `include/clang/AST/Stmt.h` 的 `Stmt` 虚函数分派表 + `ASTContext` 分配器 | 本项目用 `NodeKind` 枚举 + `static_pointer_cast`（零 RTTI）：kind 已确认，转换安全且零开销；clang 用 `dynamic_cast`/LLVM `cast<>` 的 `classof()` 查 `getKind()`，本项目是同一思路的手写版 |
+| `include/clang/AST/Expr.h` 里 Expr **必有类型** + 完整 value category（lvalue/xvalue/prvalue） | 本项目 `resolvedType` 在 Parser 阶段为空、语义期才填（职责分离）；value category 简化为**布尔左值性**——够用且可讲清，代价是 `*p` 与 `v[i]` 这类"左值但不是变量"的情形要单独补（B26 踩过） |
+| `include/clang/AST/Decl.h` 的 Decl 层次 + `DeclContext` **嵌套作用域链** | 本项目符号表是简单 map，作用域靠**名字前缀化**近似（learn/49）；不做链的好处是查找路径一眼看得见，代价是嵌套作用域/命名空间嵌套要逐个补丁（B36/B37/B38） |
+| `RecursiveASTVisitor` **泛型**遍历框架 | 本项目是各阶段**手写递归**（后来 learn/29 收口成 Visitor 虚分派，仍是 32 个手写重载）。不引入泛型框架 ⇒ 少一层模板元编程的阅读负担 |
+| `ASTContext`（内存池 + 类型唯一化 + 递归布局缓存） | 本项目用 `std::shared_ptr` + 字符串键的类型缓存；不建 arena ⇒ 教学可读优先。代价是类型标识不唯一（`const int*` 与 `int* const` 都印成 `const int*`），已在 learn/23 记录并单独修过一次 |
+| `SourceRange`（begin/end 两个 `SourceLocation`） | 本项目单个 `SourceLocation`，只记起点——够报错定位（`3:7`），不做范围高亮 |
+| `ParenExpr` 节点 | 括号不建节点，信息由树形吸收——AST 更干净（本文 §② 的取舍表） |
+| 赋值作为**表达式**（`a = b = c`） | 本项目的赋值是语句族节点 ⇒ 牺牲链式赋值，换取"表达式无副作用"的心智模型 |
+| `Decl` 的完整谱系（Function/Var/Field/Enum/Using/Typedef/Template…） | 本项目 `Declaration` 平铺一族 + `NodeKind` 区分；不追求与 clang 一一对应，只求每种声明在树上有位置 |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-08-27 | AST 理论文档 + 三大节点族 / `NodeKind` + 继承双轨落地 | AST 是管线中枢，先把数据结构钉死，后面的阶段才有共同的战场 |
+| 2026-09-16 | AST 分派重构（learn/29）：Visitor 模式 + 标签分派，全项目 `dynamic_pointer_cast` 147 → 0 | 把 4 条 `if-else + dynamic_pointer_cast` 分派链收进类型系统；**判据单点**写在 `include/semantic_analyzer.h` 的注释里 |
+| 2026-09-16 | 判据落定：handler 只要引用 → 访问者；还要 `shared_ptr` 所有权或返回值 → 标签分派 | 批次 3 曾因给**声明链**硬套访问者而编译失败（注册表存 `shared_ptr`，`visit` 只给引用）⇒ 回退催生了这条判据 |
+| 2026-10-29 | src 按 clang 分域搬移（`ast.h` → `include/ast.h`，`type.h` → `src/ast/type.h`），12 个配对头文件与实现同域 | 用户 2026-10-23 拍板"代码结构对齐 clang"；配对头文件同域修 CLion 导航 |
+| 2026-11-02 | 源码注释对齐「四段式」标准（learn/50） | 注释对语义零影响 ⇒ logdiff 零漂移是**标准保证**的，不是运气 |

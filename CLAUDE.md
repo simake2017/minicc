@@ -802,6 +802,43 @@ D **标准变成机器断言**：新增 `check-comment-style.sh`（判据①块�
 ★ 未做（有意）：`tests/` 与 `demos/` 下的注释不改（那是"用例说明"不是"实现注释"，
 且 logdiff 基线内嵌测试文件源码行，改它会强制重刷基线）。
 
+✅ **文档骨架标准一批已完成（主线 J，docs/constraints/05 + 06）** ——
+起点是用户要求"所有文档按新的文档标准重新生成，包括技术文档和开发文档，使用对应技能"，
+并追加"有冲突矛盾的地方理顺一下"。**口径由用户拍板：补齐骨架、保留内容资产**（正文不重写），
+BUGS.md 保留单文件、每条补 frontmatter 字段。
+★ **方法论：先裁决、再立规范、后建断言、最后才动文档** —— 断言建在动手之前，
+初始违规数（376）才是可测的基线；反过来做，"改好了没有"不可证伪。
+① **冲突裁决先行**：`docs/constraints/05-文档标准与冲突裁决.md`（三条原则 P1 项目级优先 /
+P2 一个族一个技能 / P3 保留资产 + 14 条裁决 C1..C14）。★ 真正冲突有两条：
+**tech-doc 明文"不拆 spec + design 两份"** ⟷ **biz-dev-pipeline 恰是两份**
+⇒ 裁决"tech-doc 不适用于 spec/design 族"（C1）；**wiki-postmortem 要 YAML frontmatter**
+⟷ **BUGS.md 是 38 条单文件** ⇒ 裁决"条目级行内元数据 severity/status/related"（C6）。
+② **骨架规范**：`docs/constraints/06-文档骨架规范.md`（8 个文档族各自的骨架 +
+头部三行「读者/审法/名词版本」+ 变更记录）。
+③ **根目录与重名归位**：`2.md` → `docs/00-项目章程.md`（需求原文）；
+`docs/learn.md` → `docs/upstream/clang-stdlib-and-header-search.md`
+—— ★ **消解了"文件与目录同名"**（`docs/learn.md` vs `docs/learn/`）；
+`docs/superpowers/specs/` → `docs/specs/legacy/`（归档 + 指针，不与现行 spec 并列当真相）。
+④ **各族补骨架**：技术（business 28 份 + 专题 7 份）/ 开发（constraints + specs + designs
++ 归档类两份）/ 学习（01..50 三段式：定位与能力清单 + 真实版多做了什么 + 演进记录）/
+复盘（BUGS 38 条 + PITFALLS + NOTES）。
+⑤ **新增两类产物**：`docs/lines/`（line 技能：一条线 = 一条跑出来的端到端子流程，首批 3 条）、
+`docs/arch/`（archify：编译流水线 HTML + **可复现的 JSON 源**）—— ★ archify 的
+**可复现源**是硬要求：图挂了能重生成，不是"手工画的图片"。
+⑥ **规范变机器断言**：`check-doc-standard.sh`（5 条判据：①头部 ②骨架节 ③元数据
+④占位符 ⑤资产）+ `verify-doc-mutations.sh`（每条判据**两次实测**：引入违规必须红 +
+放松判据必须绿）。★ 判据⑤ 专门防"重写时丢内容"（行数不得低于 git 基线）；
+★ 突变验证要**三层隔离**（探针目录只判探针 / 一次只放松一条判据 / 一个探针只缺一项），
+否则"红"分不清是谁造成的。
+⑦ **索引同步**：README（项目结构 + 文档索引 + 快照数字 376 单测 / 160 集成 / learn 01..50）、
+TODO（新增 G 组"内容侧欠账"）、ROADMAP（主线 J 六条）、本文件。
+★ **两套标准不互相套用**：注释按 `comment-standard.md`（`check-comment-style.sh`），
+文档按 `constraints/06`（`check-doc-standard.sh`）—— 混用会出现"文档里写四段式"这种无意义要求。
+★ **守卫脚本自身也会骗人**：恒真的判据能让脚本永远绿 ⇒ 突变验证是判据的**承重证明**，
+不是走过场（本批 22/22 项）。
+★ 未做（有意）：正文不重写（与 clang 逐字对齐的诊断文案、实测探针数据是资产）；
+`tests/` 与 `demos/` 下的 .md 不进守卫（那是用例说明）。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、
@@ -827,5 +864,8 @@ minicc 走比较链 ⇒ 报 "Undefined variable 'unknown'" —— 分水岭是"�
 （`namespace N { int g; }` 裸用 g 不可见）/ 嵌套类不支持。
 ⏭ 后续计划见 **docs/ROADMAP.md**（主线 C 控制流 → D 常量折叠 → E 数组/高级类型 → F 深水区选做，
 每条含理论点/clang 参照/任务分解/验收）。新会话接手：先读本文件与 ROADMAP，选定主线再开工。
+★ 文档**内容侧**欠账（骨架已齐、内容待补）：lines 扩到 10 条 / business「观测点」节
+与实际日志键对齐 / learn 的「真实版多做了什么」落到函数级 / arch 再加 2~3 张
+—— 见 TODO.md G 组。
 
 **完整提示词与子阶段定义：docs/prompt-template-deduction.md**——新会话接手时先读它。

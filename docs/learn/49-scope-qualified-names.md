@@ -4,6 +4,34 @@
 > 本节：把**种类**里剩下的最后一块——**作用域**——也交给 Sema 自己的事实。
 > 缺陷台账：docs/BUGS.md **B38**；规格/设计：docs/specs/…spec.md、docs/designs/…design.md
 
+## §0 定位与能力清单
+
+作用域是名字身份的一部分 —— `N::B` 与 `::B` 是两个不同的声明、两个不同的
+实体，就像 `int` 与 `double` 是两个不同的类型。minicc 修前把作用域当成
+"名字外面的一层包装"，于是 `N::B<int>` 绑到全局 B、两个命名空间的同名
+模板撞成同一个实例、嵌套命名空间丢外层。修法只有一句：
+**前缀化 = 完整命名空间路径**，其余（注册键 / 实例名 / 缓存键 / mangling /
+汇编符号）全是派生。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 命名空间内声明的**全名**注册 | `m_currentNamespace` + "::" + 裸名 | 已实现 |
+| 前缀化只写一遍 | 函数 / 类 / 全局变量 / 枚举 / 模板五类共用同一句 | 已实现 |
+| 派生四件套 | 注册键 / 实例名 / 缓存键 / mangling 全部由前缀化派生 | 已实现 |
+| 汇编符号前缀 | `N::B_int` → `N__B_int`（`symbolSafe` 净化） | 已实现 |
+| 嵌套命名空间的限定名调用 `A::B::f()` | 修前报 `Undefined variable 'A::B::f'` | 已实现 |
+| 同名模板跨命名空间不撞实例 | `N::B<int>` 与 `M::B<int>` 是两个实例 | 已实现 |
+| 限定名查不到 ⇒ 报错**不兜底** | `no template named 'B' in namespace 'N'`，与 clang 逐字 | 已实现 |
+| 名字登记表的 Sema 侧消费点退场 | 删 `m_names` / `setNameRegistry` 接线 | 已实现 |
+| `using namespace N;` | 语法不支持 ⇒ 没有"非限定名回退到命名空间"这一路 | 未做 |
+| 函数模板的作用域化 `N::f<int>(x)` | 仍不支持 | 未做 |
+| 嵌套类 | 未做 | 未做 |
+| 模板模板实参的跨作用域匹配 | 未做 | 未做 |
+| 名字登记表的 **value 位**（"这个名字声明过吗"） | 恒 false 占位 | 未做（Stage 3） |
+| Itanium ABI 的真 `<nested-name>` 编码（`_ZN1N1BIiE`） | 本项目用可读名 + 净化（`_Z4N__BIiE`） | 部分 |
+
+---
+
 ## 1. 理论背景
 
 ### 1.1 [basic.lookup.qual]：限定名查找沿 DeclContext 链
@@ -198,3 +226,27 @@ identifier 'x'"），而 minicc 走比较链 ⇒ 报 "Undefined variable 'unknow
       证明判据真的被测住了（而不是"看起来有测试"）。
 - [x] **基线会被过期二进制骗** —— 上一版基线里的 369 是没重建的 unit_tests
       留下的假象（learn/47 §6 的第三种失败面具，这回连基线也骗了）。
+
+---
+
+## 8. 真实版多做了什么、为什么
+
+素材来自 §3 对照表的「简化了什么」列与 §6 的边界清单。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Sema::QualifiedNameLookup` 沿 **DeclContext 链**逐级查找 | 本实现查表是 O(1) 的 map（名字已前缀化 ⇒ 键就是全名），没有真正的 DeclContext 链对象 |
+| `err_no_template_named` 附 **"did you mean simply 'B'?"** 建议 | 建议属诊断体系；先保证错误文案逐字对齐，建议留待诊断体系成型 |
+| Itanium ABI 的 `<nested-name>`（`N…E`）真嵌套名编码 | 本项目用可读名 + `symbolSafe` 净化（`_Z4N__BIiE`），教学上更易读；真编码只在"要求与 clang 逐字符相同"时才必要 |
+| `Sema::ActOnTagStartDefinition`（声明一进来就入作用域） | minicc 是三趟架构，声明不是"边解析边入作用域"；Stage 3 才谈得上 |
+| `Sema::getTemplateName` / `LookupTemplateName` 查**活符号表** | 本实现是"前缀化而非查表"：注册键即全名，改规则只改一处 |
+| clang 对**未声明**的名字按 C++20 规则当 template-id 解释（探针：`unknown<x>(y)` ⇒ 报 "use of undeclared identifier 'x'"） | 本项目走比较链 ⇒ 报 `Undefined variable 'unknown'`；分水岭是"这个名字**声明过**吗" —— 登记表至今没有 value 位（Stage 3） |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-11-02 | 落地 B38：`processNamespaceDecl` 的前缀化改用 `m_currentNamespace`（完整路径），函数 / 类 / 全局变量 / 枚举 / 模板共用同一句；限定名不再剥尾，查不到即报错；删掉 `SemanticAnalyzer::m_names` / `setNameRegistry` 接线 | 三个症状（限定名绑全局 / 同名模板撞实例 / 嵌套命名空间丢外层）同一个根因；旧行为"默默绑全局 B"看着安全、实则静默算错 —— 由宽改严（git 4f1fb49） |

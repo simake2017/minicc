@@ -8,6 +8,30 @@
 
 ---
 
+## §0 定位与能力清单
+
+[temp.class.spec]/1 规定：偏特化的实参表（`X<...>` 里的东西）**与普通模板实参同构** ——
+所以模式位可以是**非类型**的。`specPattern` 从「类型数组」升级为「实参数组」之后，
+`enable_if<true, T>` 这类「**用 NTTP 选中特化**」的惯用法才成立。
+对应编译原理：**受限合一（restricted unification）** —— 模式位是常量时不参与绑定，
+只做一致性校验；这是合一算法里「常量 vs 变量」这一最基本区分的直接体现。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 偏特化模式位可以是**值**（[temp.class.spec]/1） | `specPattern` 改型为 `vector<TemplateArg>` | 已实现 |
+| 值位参与偏特化**匹配** | 模式值与实参值同形态同值才命中 | 已实现 |
+| 值位**不参与绑定** | `P=1 A=1` ⇒ 值位相等 ✓，不产生绑定 | 已实现 |
+| 值位把 `false` 分支**筛掉** | `enable_if<true,T>` / `enable_if<false,T>` 一真一假 | 已实现 |
+| `enable_if` / `enable_if_t` 端到端 | 别名模板解糖 → 依赖类型名替换 → 值位偏特化三级贯通 | 已实现 |
+| 全特化的值位精确匹配 | `Flag<0>` 走 `equals` 逐位比 | 已实现 |
+| 值位在偏特化模式里带**形参名** | `template<int N, class T> struct X<T, N>` 的 `N` | 未做（Parser 在实参位遇 NTTP 名会建 `Class("N")`） |
+| **表达式型值位** | `X<T, N + 1>` | 未做（需实参位接受常量表达式 —— 后由主线 D 补上） |
+| **模板模板参数位** | `template <template<class> class C>` | 已实现（learn/33 补齐） |
+| 值位参与**偏序**去相关 | 两个偏特化值位不同时的裁决 | 不需要 —— 值位是常量，不与对方形参同名，天然无关 |
+| 「模式位的每个形参都必须可推导」静态检查 | clang 的 `CheckClassTemplatePartialSpecializationArgs` | 未做 |
+
+> ★ §5「边界」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 理论背景
 
 ### 1.1 模式位可以是任何模板实参
@@ -256,6 +280,20 @@ clang 侧实测符号（`nm` 原文）：
 | `Sema::CheckTemplateArgumentList` 的显式特化精确匹配 | `selectClassTemplate` ① 分支 | 用 `TemplateArg::equals` 线性比，无 clang 的 profile/缓存 |
 | `UniqueSynthesizedType`（偏序去相关） | `renameTemplateParams` + `$ord_` 前缀 | 值位不参与，直接搬运 |
 
+## 6 之补 真实版多做了什么、为什么
+
+（把 §6 对照表第三列与 §5 边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `TemplateArgument` 是**联合体**（Type / Integral / Template / Pointer / …） | 本项目 `TemplateArg` 扁平化成 `type` + `value` + `valueType` 三个字段，只支持 **Type / Integral** 两态；无 structural value 的深度比较 |
+| `CheckClassTemplatePartialSpecializationArgs` 做「**模式位的每个形参都必须可推导**」的静态检查 | 未做 —— 该检查是**诊断增强**，不是正确性缺口（匹配期发现不了就匹配不上） |
+| 非类型实参路径有 `TDK_NonDeducedType` 等**推导种类**分派 + 一套 `TemplateArgument` 规范化 | 本项目只做**同形态同值**判等，不做规范化 —— 值的"形态"（bool / int / long）由 `valueType` 承担（见 learn/35 §1.3） |
+| `CheckTemplateArgumentList` 的显式特化精确匹配带 **profile / 缓存** | 本项目用 `TemplateArg::equals` 线性比 —— 特化数量是**个位数** |
+| 偏序去相关用 `UniqueSynthesizedType` | 本项目用 `$ord_` 前缀改名；**值位不参与**，直接原样搬运 —— 值是常量，本就不与对方形参同名 |
+| 值位模式支持**形参名**（`X<T, N>`）与**表达式**（`X<T, N + 1>`） | 形参名一条卡在 Parser（实参位遇 NTTP 名会建 `Class("N")`）；表达式一条卡在实参位还不接受常量表达式 —— 后者由主线 D 接手 |
+
+
 ---
 
 ## 7. 关键日志片段（`test_tmpl_52` 实跑）
@@ -296,3 +334,17 @@ clang 侧实测符号（`nm` 原文）：
 
 `enable_if_t` 端到端（实验 ③）—— 别名模板解糖 → 依赖类型名替换 →
 值位偏特化选中，三级链路贯通，minicc 与 clang 同返 5。
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-22 | 语言基础补齐 + 模板三项收尾（commit e0ff653）：`specPattern` 由 `vector<TypePtr>` 改型为 `vector<TemplateArg>`，拆掉"实参含值位就跳过特化"的旧守卫 | ★ **值位必须真的比** —— 否则 `enable_if<true,T>` 与 `enable_if<false,T>` 会同时匹配 ⇒ 只能报歧义，整个 SFINAE 协议失效 |
+| 2026-09-22 | 配套把"值位不参与绑定"写进受限合一的语义 | 常量 vs 变量是合一算法里最基本的一组区分 |
+| 2026-09-22 | 模板模板参数位补齐（learn/33） | §5 边界表里"模板模板参数位"那条由"独立缺口"变成已实现 |
+| 2026-09-22 | 端到端用例 `tests/tmpl/test_tmpl_52_nttp_spec_pattern.cpp`（`enable_if` / `enable_if_t` / `Flag` 三条） | 把"值位 → 偏特化 → 分支选择"这条链钉成可回归的断言 |
+| 2026-09-22 | 学习文档 30..34 与本文成文（commit e0ff653） | — |
+| 2026-09-30 | NTTP 类型域扩展（learn/35，commit 815c6a8） | 值的"形态"成为实参的一部分 ⇒ `TemplateArg` 的 `valueType` 与 `equals` 都把形态纳入判断 |
+| 2026-10-15 | 常量折叠 + NTTP 常量表达式实参落地（主线 D，commit 5af6604） | §5 里"表达式型值位"那条的下游（归一 / 可表示性 / 缓存键 / mangling）**已全部就绪**；主线 D 只剩把"字面量分支"换成"完整常量表达式分支" |
+

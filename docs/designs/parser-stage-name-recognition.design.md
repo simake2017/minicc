@@ -2,11 +2,20 @@
 
 > 对应源码：`src/name_registry.cpp`（收集器+查询）＋ 4 处消费点
 > （`src/parser.cpp` 三处、`src/semantic_analyzer.cpp` 一处）＋ 接线
-> （`src/main.cpp`）。按项目约束（00-全局约束.md 头部拍板）：结构对齐
-> clang，不建 flow 聚合文件。
-> 来源：`docs/specs/parser-stage-name-recognition.spec.md`（已签字 2026-10-23）。
+> （`src/main.cpp`）。**本项目按 clang 目录组织，不采用 skill 的"1 设计 = 1 flow 文件"**
+> —— 用户 2026-10-23 拍板，见 `docs/constraints/00-全局约束.md` 头部。
+> 来源：`../specs/parser-stage-name-recognition.spec.md`
+> （= 仓库内 `docs/specs/parser-stage-name-recognition.spec.md`，已签字 2026-10-23）。
 > 标准：不看 spec 也能照本文实现。
 > 审法：每个消费点问一句——「查不到时走哪条支，会不会静默」。
+> 读者：改 `name_registry` 模块或那 4 处消费点的人。
+> 名词版本：v1
+
+## 变更记录
+
+| 日期 | 版本 | 改了哪条 |
+|---|---|---|
+| 2026-11-02 | v1 | 按文档骨架规范补齐头部与变更记录：对应源码补「不采用 1 设计 = 1 flow 文件」拍板注、来源改相对路径、补读者与名词版本 |
 
 ## 1. spec → 设计映射表
 

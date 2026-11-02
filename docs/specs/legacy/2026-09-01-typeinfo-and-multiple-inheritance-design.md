@@ -1,5 +1,7 @@
 # 设计：完整 typeinfo 结构演示 + minicc 非虚多继承全链路
 
+> **归档说明**：本文是 2026-09-01 的设计稿，正文已被 docs/learn/11 / 16 / 17 取代，仅作设计史留存。当前结论见 [docs/learn/16 RTTI 存放粒度与 dynamic_cast 运行时判定](../../learn/16-rtti-granularity-and-dynamic-cast-nonpolymorphic.md) 与 [docs/learn/17 多继承布局](../../learn/17-multiple-inheritance-layout.md)。
+
 日期：2026-09-01
 状态：已与用户确认（独立 demo / 非虚多继承全链路 / 新文档 13 号 / Itanium 主基类优化模型）
 

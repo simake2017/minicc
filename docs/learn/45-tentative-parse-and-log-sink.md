@@ -5,6 +5,30 @@
 > 试探期打的日志撤不回，成幽灵行；而基线曾把 14 行这样的幽灵
 > 固化进 5 个文件没人察觉。
 
+## §0 定位与能力清单
+
+试探解析（tentative parsing）是生产 parser 的基本功 —— 看后面才知道是什么的
+歧义点，全靠"存档 → 空跑 → 看结果 → 提交或回卷"。它的**难点不是回滚 token
+游标，是回滚所有派生状态**：本项目最先撞上的是**日志** —— 日志撤不回就成了
+"幽灵行"，而基线曾把 14 行这样的幽灵固化进 5 个文件没人察觉。于是本篇把
+试探升级成 **RAII 存档点 + 日志单一出口**，让"这次解析没发生过"成为
+**机制上不可能留痕**的事实。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| TokenCheckpoint 存档点 | 构造时快照 m_pos + m_stopAtGreater + 日志缓冲栈 | 已实现 |
+| `commit()` 冲刷 | 成功路径的输出逐字节不变 | 已实现 |
+| 析构时未 commit ⇒ 全维度回卷 | token 进度 + 布尔位 + 缓冲一并丢弃 | 已实现 |
+| 嵌套试探 | 缓冲栈天然支持：内层 commit 并入外层缓冲 | 已实现 |
+| 日志单一出口 `logParse` | parser.cpp 的 87 处 `std::cout` 散点收进一处 | 已实现 |
+| 链式多段日志 | 改为拼 `std::string` 后单点调用（整条摘要要么全进缓冲要么全出） | 已实现 |
+| `ParseError` 专用异常 | 试探处窄捕获，真 bug（越界 / logic_error）穿透到顶层响亮报错 | 已实现 |
+| `parseIntLiteral` 刻意不打日志的约定 | 不破 —— 它根本不调用 `logParse` | 已实现 |
+| 试探点的覆盖面 | 模板 id 消歧 / 语句层声明 / 顶层声明 / 类体成员判定四处全部过了 TokenCheckpoint | 已实现（B36 批次补齐最后两处） |
+| `m_pendingConstexpr` 等前缀状态进快照 | 不在试探快照内（当前文法下试探入口只能是表达式，parseType 走不到 constexpr 前缀） | 未做（理论缺口，已登记） |
+
+---
+
 ## 1. 理论背景：tentative parsing 是生产 parser 的基本功
 
 C++ 语法有大量"看后面才知道是什么"的歧义点（[stmt.ambig] 整节都在讲这个），
@@ -172,3 +196,27 @@ ctest --test-dir build-linux -j6 | tail -1
 | 嵌套试探 | 缓冲栈天然支持（内层 commit 并入外层缓冲），无额外代码 |
 | m_pendingConstexpr 等前缀状态 | 不在试探快照内：试探期 parseType 吃到 constexpr 会置位并泄漏——当前文法下试探入口只能是表达式，parseType 走不到 constexpr 前缀，属理论缺口；若将来试探范围扩大须并入快照 |
 | B31（消歧判据本身） | ⬜ 未修（主线 I 第 1 项）：`a<b>(c)` 全变量比较链仍被误判为模板调用，见 BUGS.md B31 |
+
+---
+
+## 7. 真实版多做了什么、为什么
+
+素材来自 §3 对照表的「简化」列与 §6 的边界表。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `TentativeParsingAction` 快照 **token 游标 + 注解栈 + 翻译单元状态** | 本实现只快照 m_pos + m_stopAtGreater + 日志缓冲；clang 的"新增状态维度编译期强制进快照"在本项目靠人工登记（这正是本篇自己的教训） |
+| 把 template-id **注解成专用 token**（`AnnotateTemplateIdToken`） | 本实现留在 AST 层（`Class("b")` 名字节点）；消歧缺口由 learn/46 的模板名登记表补 |
+| `RevertingTentativeParsingAction` 的**零异常**回卷 | 本实现靠抛 `ParseError` + 窄捕获；零异常要把试探点改成回调 / 结果返回式，改动面覆盖全部试探点 |
+| 诊断系统（`DiagnosticsEngine`）的 river 抑制机制 | 本项目只需"这次解析没发生过"这一个语义，日志缓冲精确对应它 |
+| clang 的 `Sema::isTemplateName` 反向查询（消歧不靠试探） | 本篇成文时 ⬜ 未做；后续 B31 批次以"模板名登记表"补上（learn/46） |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-23 | 落地 B32：试探-回滚升级为 TokenCheckpoint RAII 存档点 + 日志单一出口 `logParse` + `ParseError` 专用异常 | 幽灵行机制上不可能再产生；新增状态维度进快照是编译期强制（git 2ca75f5） |
+| 2026-10-27 | B36 批次把 `parseDeclaration` 与类体成员判定两处剩余手写试探也换成 TokenCheckpoint **纯试探**（永不 commit） | 试探日志"机制上不可能再留痕"的覆盖面从 1 处扩到 4 处；消掉 CLAUDE.md B32 批次登记的"[parse:type] 成对重复"（git 0dab1c9） |

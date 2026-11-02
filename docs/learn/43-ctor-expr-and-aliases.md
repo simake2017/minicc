@@ -6,6 +6,35 @@
 > `tests/lang/test_basics_11_ctor_expr.cpp`（+ 负例 `_12`）。
 > BUGS.md：B29（别名）、B30（构造表达式 + 平凡拷贝/类赋值）。
 
+## §0 定位与能力清单
+
+两处缺口，根子是同一个：**决议时机**。别名 `using IntBox = Box<int>;`
+的底层类型必须在**声明点**就决议成实例（而不是一个待查的名字节点）；
+表达式 `Box<int>(7)` 则要求语义层认得"类模板名 + 实参表 = 构造调用"
+这条腿。两条都在讲同一件事 —— **名字要在它被用之前就已经是成品**。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 全局 / 命名空间类型别名（`using` / `typedef`） | 声明点 `resolveType` 决议，注册名带命名空间前缀 | 已实现 |
+| 命名空间别名的使用点 `N::IntBox` | 前缀化后与普通类型同查符号表 | 已实现 |
+| 表达式级构造调用 `Box<int>(7)` | `inferCall` 新增构造分支，排在自由函数查找**之前** | 已实现 |
+| 表达式级 CTAD `Box(9)` | 与语句级共用 `deduceCtadCore` | 已实现 |
+| 拷贝省略升级 `Box<int> b = Box<int>(7);` | 构造调用升级为直接初始化（[class.copy.elision]） | 已实现 |
+| 类型一致性检查 | `Type mismatch in 'b': declared 'Box_int', got 'Box_double'` | 已实现 |
+| 平凡拷贝 `Box<int> b = a;` | `isTrivialCopy` + 按布局 `rep movsb` | 已实现 |
+| 类实例赋值 `b = a;` | `isClassAssign` + 按对象表示逐字节复制 | 已实现 |
+| 模板体内的构造实参 | `cloneStmt(VarDeclStmt)` 补搬 `ctorArgs` | 已实现 |
+| 临时对象的析构时机 | `m_suppressTempDtor`：赋值 RHS 抑制、memcpy 后补发（[class.dtor]/2） | 已实现 |
+| 构造符号回填 | `ctorSymbol` 由 Sema 选定（mangling 有状态，CodeGen 硬拼必错配） | 已实现 |
+| 用户自定义拷贝构造 / 拷贝赋值 | 判据只看"无用户拷贝构造"，写了就掉进旧路径 | 未做 |
+| 构造表达式做函数实参 `f(Box<int>(7))` | 类类型按值传递的调用约定还没定义 | 未做 |
+| 函数返回类对象 `Box<int> b = f();` | 平凡拷贝判据 init 限 Var / Member，Call 形态未接 | 未做 |
+| 别名指向**依赖类型**（`using X = T::type;` 在模板体内） | 未做 | 未做 |
+| 聚合初始化的 CTAD 推导 | 只做构造函数推导指引 | 未做 |
+| 多态类的"切片"语义 | 平凡拷贝按对象表示逐字节复制（含 vptr），切片语义未验证 | 未做 |
+
+---
+
 ## 1. 别名的声明点决议（B29）
 
 ### 1.1 理论背景：[dcl.typedef] —— 别名不是新类型
@@ -181,3 +210,27 @@ Sema 侧关键日志（e2 探针 `auto b = Box<int>(7);`）：
 - 多态类的平凡拷贝会连 vptr 一起复制（按对象表示逐字节）——
   这是正确的（合成拷贝构造就是 memcpy 语义），但没有自定义
   拷贝构造时"切片"语义未验证。
+
+---
+
+## 5. 真实版多做了什么、为什么
+
+素材来自 §2.4 对照表的「简化了什么」列与 §4 的边界清单。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Sema::DeduceClassTemplateFromInit` 的**聚合初始化**推导 + 推导指引的隐式生成全族 | 本项目只做构造函数推导指引；聚合推导要一整套"从初始化式元素列表反推形参"的规则 |
+| 两阶段查找与**依赖型别名**（`using X = T::type;` 在模板体内） | 别名解析复用 `resolveType`，依赖型别名要引入 dependent context 与推迟决议 |
+| `Sema::BuildCXXFunctionalCastExpr` 的**转换函数查找**（用户自定义转换） | 本项目没有用户定义转换运算符，函数式转换只有"类模板 + 实参表"这一条腿 |
+| `CodeGenFunction::EmitAggregateCopy` 走 copy ctor 调用语义 | 本实现只认平凡拷贝（按布局 `rep movsb`）；copy ctor 调用语义本身属"用户自定义拷贝构造"，未做 |
+| `CodeGenFunction::EmitDestroy` 的 **EH clean-up 栈** | 本项目无异常，临时对象的析构时机用 `m_suppressTempDtor` 计数器协作即可 |
+| `callq memcpy` | 自研链接器只内置 malloc / free，`memcpy` 只是原型 ⇒ 对象复制一律 `rep movsb` 内联展开 |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-22 | 落地 B29 / B30：全局与命名空间别名改为"注册即决议"（声明点 `resolveType` + 命名空间前缀化）；表达式级构造调用 / CTAD / 拷贝省略 / 平凡拷贝 / 类赋值 / 模板体内构造实参 / 临时对象析构时机一并修 | 起因是追问"`inferVar` 是不是解析不出 `x = Box<int>(7)`"，牵出主缺口（`Undefined variable 'Box'`）与三个伴随 bug（链接期符号错配 / 静默算错 / 克隆丢槽）（git 0f54443） |

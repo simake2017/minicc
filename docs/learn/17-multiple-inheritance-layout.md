@@ -5,6 +5,37 @@
 > （non-virtual base allocation）与 §2.9（RTTI/typeinfo）。
 > 参照源码：`clang/lib/AST/RecordLayoutBuilder.cpp`（ItaniumRecordLayoutBuilder）。
 
+## §0 定位与能力清单
+
+多继承下最容易踩的坑有三个：**① primary base 是谁**（是第一个**多态**基类，
+不是声明序第一个）；**② size 与 align 是两个独立维度**（拿 size 当 align 会算出
+非 2 幂的错位布局）；**③ vtable 槽里放的是符号名**，不是"函数本身"——
+次基类没覆写时，槽里该指的是**更上游**那个基类的实现，而不是"次基类名 + 裸名"
+拼出来的假符号。本文讲这三件事的判据，以及踩过的五个连环 bug。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| Itanium ABI 的 primary base | 第一个**多态**基类占 offset 0，与派生类共享主虚表 | 已实现 |
+| 全非多态时的"视作 primary" | 取声明序第一个基类 | 已实现 |
+| 非虚基类子对象摆放 | 其余子对象从 primary 尾部依次摆放 | 已实现 |
+| size 与 align **分离** | `alignOf()`：Class 递归取成员 max（封顶 8）、标量 `min(size,8)` | 已实现 |
+| [class.mem]/2 成员类型必须 complete | 字段注册前 `resolveType(field.type)`，占位类型换成注册版 | 已实现 |
+| 嵌套类字段 = 内联子对象 | `addr(o) + offset(f) + offset(a)` 的逐层地址折叠 | 已实现 |
+| vtable 槽放**符号名** + 判据单点 | `memberMethodSymbolName` 一处产出、定义点与槽位点两处使用 | 已实现 |
+| 次表条目**原样透传** | `VTableEntry secEntry = baseEntry;`——名字是**路径**不是位置 | 已实现 |
+| 槽位身份 = 裸名 + 形参类型链 | `VTableEntry::signature`（[class.virtual]/2 的覆写判据） | 已实现 |
+| 次表覆写项的 **thunk** 跳板 | `this` 归顶后再调本类实现（简化 mangling：`类名_函数名_thunk偏移`） | 已实现 |
+| 字段查找三级 | 全限定名 / 自身字段优先（隐藏）/ 继承 | 已实现 |
+| 歧义诊断 | `Member 'x' is ambiguous ...`（[class.member.lookup]/8） | 已实现 |
+| 虚继承 / 虚基类 | vbptr、vbtable、VTT | 未做 |
+| 空基类优化（EBO） | | 未做 |
+| 位域（bitfield） | | 未做 |
+| tail padding 复用 | | 未做 |
+| 16 字节 SSE 对齐 | | 未做（对齐封顶 8） |
+| 子对象按 **nvalign** 对齐 | clang 按 nvalign 对齐；本项目一律 8 字节 | 未做 |
+| `ASTRecordLayout` 的不可变缓存对象 | clang 的布局是**不可变**对象；本项目是两段式（工作清单 → 整体覆盖） | 未做 |
+| 递归按需构建布局 | clang 的 `ASTContext::getASTRecordLayout` 按需递归 + 缓存 | 未做（靠声明序：基类必须先定义） |
+
 ## 1. 理论背景
 
 ### 1.1 primary base：谁占 offset 0
@@ -234,3 +265,35 @@ o->f.a 的代码生成（逐层地址折叠）:
    leaq 4(%rax), %rax       # &o->f   ← 类类型字段：取地址不是取值
    movl 8(%rax), %eax       # f.a     ← Five 内 a 的偏移
 ```
+
+## 6. 真实版多做了什么、为什么
+
+★ 素材来源：本文 §3 clang 源码对照表的「简化了什么」列 + §2 的五个 bug
++ `docs/BUGS.md` B11~B15/B20/B22 + CLAUDE.md「未做」清单。**未查证的写「（本项目未查证）」**。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| **虚继承**：vbptr、vbtable、VTT（虚表构造器），共享子对象推到尾部靠 vbptr 间接寻址 | 未做：本项目无虚继承支持。代价是"菱形 + 虚基类"这套最复杂的布局完全缺席（learn/11 §4.6 只做了 clang 侧的实测对照） |
+| **空基类优化**（EBO）：空基类可与派生类同址 | 未做：多占几个字节，但换不来概念复杂度 |
+| **位域**（bitfield）的打包与跨单元分配 | 未做：位域的布局规则是 C++ 里最琐碎的一块，与"primary base 判定"这条主线正交 |
+| **tail padding 复用**：派生类可以复用基类尾部空隙放字段 | 未做：布局更松，但规则更少 |
+| **nvalign** 对齐（子对象按其自身的自然对齐而非一律 8） | 本项目一律 8 字节对齐：规则少一条，但布局与 clang 可能不同（体积略大） |
+| **16 字节 SSE 对齐**（`__m128` 等向量的对齐要求） | 未做：没有向量类型 |
+| `ASTRecordLayout` **不可变**的布局对象 + `ASTContext::getASTRecordLayout` 的**递归按需构建 + 缓存** | 本项目是两段式（`decl->fields` 工作清单 → 整体覆盖），且靠**声明序**保证基类先定义（不递归、不缓存）。代价：前向引用的基类排不出 |
+| `CGRecordLayoutBuilder` 的**链式访问 GEP 折叠**（一次寻址算完 `o->f.a`） | 本项目**保留每一跳**（逐层 `leaq`）——多两条指令，但"哪一跳算错了"一眼可见（这正是 Bug 3 能被当场抓住的原因） |
+| `CodeGenModule::EmitVTable` 填槽时拿到**刚发射过的函数句柄**（`GlobalDecl`） | 本项目没有句柄，槽里是**各自拼出来的字符串** ⇒ 判据必须收口到一处（`memberMethodSymbolName`），否则定义点与槽位点漂一点就是链接期 `undefined reference`（Bug 4 / B20） |
+| `ItaniumMangleContext::mangleName` 完整编码形参类型 | 本项目简化为 `类名_方法名[_<形参个数>]`，**只在"有兄弟"时**才再挂形参类型链——挂了就动了全部既有产物，logdiff 基线逐字节比对是硬约束（Bug 5 / B22） |
+| 派生类到基类的**引用绑定** `Base& b = d;` | 未做：CLAUDE.md 已把它列进"未做"清单——跨转型 `B*`→`A*` 也未做 |
+| 限定名调用成员函数 `d.Base::f(2)` | 未做：B21 只管**数据**成员（`obj.Base::v`），成员**函数**的限定调用未做 |
+| `using Base::f;` 把被隐藏的名字拉回来 | 未做 |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-09 | 主线 G 落地：primary base 判定 + 次表 + thunk（ROADMAP 主线 G 验收点） | 多继承布局是 `dynamic_cast`（learn/11）与名字修饰（learn/13）的共同地基 |
+| 2026-09-24 | 多继承成员/布局**五条连环 bug** 修复（B11~B15） | ① vptr 压字段是真 miscompile ② 继承来的成员方法查不到 ③~⑤ 同一根因：把**显示名当成了索引** |
+| 2026-09-24 | 修好 `tests/mi/test_mi_04_error.cpp`（原以为是菱形继承被拒，实际真因是次表假符号） | **又一次印证**：logdiff 基线会把**失败**也固化成契约——修完必须回头看 rc，不能只看"零差异" |
+| 2026-10-08 | vtable 槽里的符号名与定义点不同源（B20 缺陷 a/b/c） | 带参虚函数链接失败 + 次基类假符号 + 非虚 `f(int)` 认领虚 `f()` 的槽 |
+| 2026-10-09 | 成员方法身份收口为「名字 + 形参类型」（B22） | "这是哪个函数"总共写在四个地方（符号名 / 槽位 / 成员调用 / 构造函数选定）——同一判据不许写两份 |

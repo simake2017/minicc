@@ -5,6 +5,34 @@
 > 本文记：存储模型、三路径查找的判据单点、const 成员的编译期折叠、
 > 类外定义的四条校验，以及两个值得记住的坑（折叠时序、命名空间误伤）。
 
+## §0 定位与能力清单
+
+static 数据成员**不是对象的一部分** —— 它不进 `sizeof(A)`、不进对象布局，
+存储期是静态，只是**名字**挂在类作用域里。这一条性质决定了实现上的两处
+分叉：读取有三条写法（`A::count` / `a.count` / `a.A::count`），三条必须
+收口到同一判据；而类内初始化的 const 成员更进一步 —— **没有存储**，
+只能折成立即数。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 类内声明 `static int count;` | 修前整条特性缺失（Parser 硬性拒收） | 已实现 |
+| 类外定义 `int A::count = 3;` | 存储只能来自类外定义 | 已实现 |
+| 类外定义的四条校验 | 限定者是类 / 类里声明过 / 类型 equals / 只定义一次 | 已实现 |
+| 三条读取路径收口到同一判据 | `A::count` / `a.count` / `a.A::count` | 已实现 |
+| 实例字段先于 static 成员 | [class.member.lookup]/3 的隐藏顺序 | 已实现 |
+| 类内初始化 const 整型族（编译期常量） | 不发全局符号，读时折成立即数 | 已实现 |
+| const static 成员作 NTTP 实参 `Buf<A::twice>` | 编译期常量表登记全名 | 已实现 |
+| 模板类 static 成员克隆到实例类 | `instantiateClassTemplate` 步骤 5.7 | 已实现 |
+| 漏类外定义 ⇒ 链接期响亮报错 | `[LINK ERROR] undefined reference to 'A__count'` | 已实现 |
+| 非整型 static 成员（浮点 / 类类型 / 指针 / 数组） | 声明可解析；类类型成员的构造 / 析构不发射 | 部分 |
+| 类内初始化非整型 const | 按 [class.static.data]/3 字面拦下（C++ 其实允许且要类外定义） | 未做 |
+| 模板 static 成员的类外定义 `template<class T> int C<T>::tag = 1;` | Parser 响亮拒收 | 未做 |
+| 对常量成员的赋值 `a.A::limit = 9;` | 折叠槽只管读；写路径照常发 RIP 存储写 | 未做 |
+| odr-use 探测（取地址 / 引用绑定应要求类外定义） | 一律按编译期常量折掉 | 未做 |
+| `foldStaticConst` 的挂点 | 只在【变量声明初始化式】；表达式语句 / return 里的 `C<int>::cid` 会报 Undefined variable | 部分 |
+
+---
+
 ## 1. 理论背景
 
 ### 1.1 [class.static.data]/1 —— static 成员不是对象的一部分
@@ -224,3 +252,30 @@ CodeGen     emitExpr(a)                    # [expr.ref]：对象照常求值，�
 | `foldStaticConst` 的挂点 | 只在【变量声明初始化式】（processVarDeclStmt）；表达式语句 / return 里的 `C<int>::cid` 会报 Undefined variable（老设施边界，非本批引入） |
 | odr-use 探测 | 未做：常量成员的取地址 / 引用绑定应要求类外定义，现一律按编译期常量折掉 |
 | 多态类 + static 成员的组合 | vptr 布局与 static 无关（不进布局），无交互 |
+
+---
+
+## 7. 真实版多做了什么、为什么
+
+素材来自 §3 对照表的「简化」列与 §6 的边界表。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Sema::CheckStaticMemberInitialization` 还放行**字面量类类型**（C++17 inline variable 语境） | 本实现只放行 const 整型族（判据要剥 Const 再查家族）；字面量类类型需要 inline variable 语义与类型系统配套 |
+| `VarDecl::isStaticDataMember` + 独立的 `GlobalVariable` IR 实体 | 符号表 `"A::count"` + 既有全局变量发射路径，同构 |
+| `Expr::EvaluateAsInt` 的**通用常量求值器** | 本实现只查静态常量表（`lookupStaticConst` + 回填槽），只整型 |
+| clang 部分类外定义校验在**模板实例化后重做** | 本项目三趟架构，实例类走 `processClassDecl` ⇒ 校验一遍即可 |
+| Itanium mangling `_ZN1A5countE` | 本项目用自有净化方案 `A__count`，全项目统一（不追求与 clang 逐字符相同） |
+| **inline static** 成员（C++17）与 `constexpr` 隐式 inline | 未做 |
+| clang 对 **odr-use** 的精确判定（决定该成员是否需要类外定义） | 未做：一律按编译期常量折掉 ⇒ 代价是"漏类外定义"在 odr-use 场景下发现不了 |
+| clang 的 `Sema::ActOnCXXMemberDeclarator` 由**完整声明符**反推 Decl 种类 | 本项目按文法直接收 `static` + 类型 + 名 + 可选初始化式；文法简单，不需要反推 |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-23 | 落地 static 数据成员整条特性：类内声明 / 类外定义（四条校验）/ 三路径读取收口 / const 成员编译期折叠 / 模板类克隆（步骤 5.7） | 修复前类体内 `static int count;` 被 Parser 硬性拒收（"static data members are not implemented"），整条特性缺失（git 36a1fda） |
+| 2026-10-23 | BUGS.md 条目重编号 B31 → B33 | 与远端台账新占的 B31 / B32 撞号（git bd553fb） |

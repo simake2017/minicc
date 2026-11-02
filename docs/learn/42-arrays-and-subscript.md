@@ -3,6 +3,33 @@
 > 主线：ROADMAP 主线 E 首批。前接：39（常量折叠）、40（constexpr）、41（switch / do-while / 逗号）。
 > 测试：`tests/lang/test_basics_10_array.cpp`。
 
+## §0 定位与能力清单
+
+数组是 C++ 里第一个"**类型本身携带大小**"的类型 —— `T[N]` 的类型身份里
+含着 N。minicc 把它做成 `TypeKind::Array`，于是同一套类型系统能同时回答
+"占几格"、"布局里怎么放"、"模板实参里怎么匹配"。下标运算则是**寻址**
+而不是取值：结果必须是左值，否则 `v[i] = x` 写不进去。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 数组类型 `TypeKind::Array` | 持 elementType / arraySize / arraySizeExpr | 已实现 |
+| 元素与大小的精确比对（`equals`） | 逐项比对元素类型与数组大小 | 已实现 |
+| 内存尺寸 `sizeof(T[N]) == sizeof(T) * N` | `sizeInBytes()` 从元素尺寸递归求得 | 已实现 |
+| 声明符后缀 `[N]` 的提取 | 局部变量 / 全局变量 / 类成员字段三个声明点共用 | 已实现 |
+| 数组长度须为正整数常量表达式 | 经 `ConstantFolder::evaluateIntegral` 求值 | 已实现 |
+| 数组向指针的隐式退化 | 局部 `leaq -off(%rbp)`、全局 `leaq sym(%rip)`、成员 `leaq off(%rax)` | 已实现 |
+| 原生下标寻址 | `leaq (%rcx, %rax, scale), %rcx`，scale = 1 / 2 / 4 / 8 | 已实现 |
+| 下标结果是左值（可写） | `IndexExpr` 读 + `AssignStmt` 写两条路 | 已实现 |
+| 局部数组的栈分配与零初始化 | 栈上预留连续空间并清零 | 已实现 |
+| 全局数组的 `.data` 发射 | `.zero <size>` | 已实现 |
+| 容器类下标糖（`v[i]` → `v.at(i)` / `v.set(i,x)`） | 与原生数组**双轨制**判据，按 `isRaw` 分流 | 已实现 |
+| `T[N]` 作模板实参 / 偏特化模式 | 需在 `TypeKind::Array` 上做模板模式匹配 | 未做（属 ROADMAP 主线 E 整条） |
+| `sizeof` 运算符 | 折叠表与语法层都还没有 | 未做 |
+| 数组作函数形参（退化为指针） | 未做 | 未做 |
+| 运行时边界检查 | 教学版不做（sanitizer 范畴） | 未做 |
+
+---
+
 ## 1. 理论背景
 
 ### 1.1 数组类型模型（[dcl.array]）
@@ -126,3 +153,27 @@ grep -A 15 "raw array/pointer" /tmp/arr.s
     leaq (%rcx, %rax, 4), %rcx # 目标地址 = base + i * 4
     movl (%rcx), %eax       # 按 4 字节读出
 ```
+
+---
+
+## 4. 真实版多做了什么、为什么
+
+素材来自 §1.4 对照表的「简化与设计取舍」列。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `ASTContext::getConstantArrayType` 支持**未知大小数组**（`int a[] = {1,2,3};` 由初始化式反推大小） | 本实现要求声明处就带 `[N]`；推导大小要多一套"先建未知大小类型、后回填"的机制，与"类型自带大小"的模型相悖 |
+| `Sema::ActOnArrayDeclarator` 的**完整常量求值** | 本实现复用 `ConstantFolder` 求正整数；能求的形态已覆盖教学用例 |
+| `DefaultFunctionArrayLvalueConversion` 发射独立的 **ArrayToPointerDecay** AST 节点 | 本实现**零 AST 冗余节点**：CodeGen 在 `VarExpr` / `MemberExpr` 遇数组类型直接发 `leaq` 兑现退化语义 |
+| `CGBuilder::CreateGEP` 抽象出的 GetElementPtr 指令（可做向量化的地址计算） | 本实现直接用 x86-64 SIB 寻址模式 `leaq (%rcx,%rax,scale)`，少一层指针算术的 IR |
+| clang 支持**多维数组**与数组的**运行时边界检查** | 数组类型模型能递归求尺寸（§1.1），但多维形态**本项目未验证**；边界检查属 sanitizer 范畴，教学版不做 |
+| clang 的 `Type` 系统里有独立的 `ConstantArrayType` / `VariableArrayType` / `IncompleteArrayType` 三态 | minicc 只有一个 `Array`（大小必填），教学用得上"大小未知数组"的场合很少 |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-15 | 落地主线 E 首批：原生数组类型（`TypeKind::Array`）+ 声明符后缀提取 + 数组向指针退化 + SIB 下标寻址（读与写两条路） | 主线 E 首批（ROADMAP）；CodeGen 一行未改 —— 全程按元素宽度分派，新增标量类型的代码生成成本为 0（git 5af6604） |

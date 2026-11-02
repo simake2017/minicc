@@ -1,5 +1,23 @@
 # Clang C++ 标准库选择与头文件搜索机制
 
+> - 读者：排查"头文件找不到 / 链接到错版本的库 / 运行时找不到 .so"的人；想搞清
+>   "标准库到底是哪一份、谁说了算"的人
+> - 审法：本文的每个结论都配**可复现的实验命令**（`clang++ -v -E`、`ldd`、`readelf -d` 等）；
+>   路径与版本是**本机实测**（Debian clang 18.1.8 / boost 1.74），换机器需重跑实验
+> - 名词版本：v1（本文只讲**上游 clang / 系统工具链**的机制，
+>   **不涉及 minicc 自己的实现** —— minicc 的预处理与搜索路径见
+>   `docs/toolchain-search-paths.md` 与 `docs/business/01-预处理.md`）
+
+## 变更记录
+
+| 日期 | 版本 | 改了哪条 |
+|---|---|---|
+| 2026-11-02 | v1 | 自 `docs/learn.md` 归位至 `docs/upstream/`（消解与 `docs/learn/` 目录同名），补头部三行与变更记录；正文未改写 |
+
+---
+
+# 第一部分：标准库选择与安装布局（概要）
+
 ## 1. 背景
 
 在 Linux 下使用 clang++ 编译 C++ 程序时，经常会遇到：
@@ -766,3 +784,29 @@ dyld: Library not loaded: @rpath/libc++.1.0.dylib
 | 运行期 | NEEDED / LC_LOAD_DYLIB 字符串 → 实际路径 | ld.so / dyld 按固定顺序查 |
 
 "用了什么功能 → 该链哪个库"只存在于程序员的脑子里和构建系统的配置表里。版本也不是"选"出来的：链接时由符号链接和 SONAME 钉死，运行时只有查表，没有决策。
+
+
+---
+
+## 20. Out of Scope（本文不负责的事）
+
+| 不负责 | 原因 / 去哪看 |
+|---|---|
+| **minicc 自己怎么找头文件** | 那是本项目的实现（`-I` 目录 + 引号/尖括号两套搜索），见 `docs/toolchain-search-paths.md` 与 `docs/business/01-预处理.md`；本文讲的是 **clang driver** 的机制 |
+| **C++ 语言标准与标准库版本矩阵的规范条文** | 本文只讲"文件在哪、谁选"，不讲 `[cpp.predefined]` 之类条文 |
+| **各发行版的打包细节** | 本文以 Debian 为实测环境；Fedora / Arch / macOS 的差异只点到为止（§18 给了 macOS 的对照） |
+| **第三方库的构建系统（CMake / Bazel / Conan）怎么找依赖** | 那是构建系统的搜索路径，与编译器 driver 的搜索路径是**两层不同的东西**（前者找源码依赖，后者找系统库） |
+| **静态库、符号剥离、链接优化的调参** | 只与"找到哪一份 .so"有关的部分才在本文（§16），其余属链接器专题 |
+
+## 21. 观测点（怎么自己验一遍）
+
+★ 本文是**上游机制科普**，没有"日志键"可言；对应的观测手段是**命令行输出**：
+
+| 想看什么 | 命令 | 关注哪几行 |
+|---|---|---|
+| clang 的头文件搜索列表 | `clang++ -v -E -x c++ /dev/null` | `#include <...> search starts here:` 之后的**有序列表**；命中即停 ⇒ 顺序即优先级 |
+| `-stdlib=` 改了什么 | `clang++ -stdlib=libc++ -v -E -x c++ /dev/null` | 对比上面列表里的 **stdlib 组**与 **link 库**两处变化 |
+| 可执行文件依赖了哪些 .so | `readelf -d ./a.out`（或 `ldd ./a.out`） | `NEEDED` 那一串 —— 它是**字符串**，不是路径 |
+| .so 的 SONAME 与真实路径 | `readelf -d /usr/lib/x86_64-linux-gnu/libstdc++.so.6` | `SONAME` 决定别人 `NEEDED` 里写什么；`readlink -f` 决定真实文件在哪 |
+| 运行期按什么顺序找 | `ldconfig -p`（缓存表）+ `/etc/ld.so.conf.d/*` | `ld.so` 只查缓存表与默认目录，**不查**当前目录 |
+| resource dir 在哪 | `clang++ -print-resource-dir` | builtin 头文件（`stddef.h` / intrinsics）跟着它走，与 `-stdlib` 无关 |

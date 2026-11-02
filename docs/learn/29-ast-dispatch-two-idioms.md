@@ -4,6 +4,30 @@
 > `accept` 虚分派（访问者模式），有的地方用 `switch (node->kind)`（标签分派）**。
 > 结论不是"哪个更好"，而是**判据是什么** —— 判据错了，代码会又慢又难读。
 
+## §0 定位与能力清单
+
+编译器前端把源码变成一棵**节点类型繁多、消费者不断新增**的树，每次处理一个节点，
+第一件事都是"这是哪种节点？"—— 这就是**类型分派**。本篇给出一个**工程判断**：
+同一棵 AST、同一个项目里，为什么有的地方用 `accept` 虚分派、有的地方用
+`switch (node->kind)`。结论不是"哪个更好"，而是**判据是什么** —— 判据错了，
+代码会又慢又难读。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| `ASTNode::accept` 纯虚挂钩（`include/ast.h`） | 每个节点把自己的 `visit` 转发出去 | 已实现 |
+| `AstVisitor` 访问者基类（`include/ast_visitor.h`） | 手写 32 个 `visit` 重载，默认空体 | 已实现 |
+| `NodeKind` 节点种类枚举（32 种） | 标签分派的基础 | 已实现 |
+| 零 RTTI 的**类型测试** | `isa<X>` 的等价物：`node->kind == NodeKind::X` | 已实现 |
+| 零 RTTI 的**向下转换** | `static_pointer_cast` + `kind` 不变量（`kind` 由构造函数设定、恒等于自身类型） | 已实现 |
+| **取值型递归**走标签分派 | `inferType` / `cloneExpr` / `estimateBlockSize` | 已实现 |
+| **声明链**走标签分派 | 注册表存 `shared_ptr` ⇒ 访问者的"只给引用"套不上 | 已实现 |
+| **语句链**走访问者 | `processStmt` / `emitStmt` / `emitExpr` 的 handler 是 `void f(X&)` | 已实现 |
+| 全项目**零 RTTI 转型** | `dynamic_pointer_cast` 147 → 0 | 已实现 |
+| "标签不变式"白盒断言 | `AstVisitorDispatch.*` 5 例用 RTTI 作 oracle 钉住 `kind ≡ 实际类型` | 已实现 |
+| 访问者携带**外部状态** | 需要状态的遍历（`collectBases` / `emitGlobalVars`）保留标签分派 | 有意不做（§六） |
+| **自动生成** 32 个重载 | clang 用 TableGen 生成 `RecursiveASTVisitor` | 未做（手写；项目取向是零外部依赖） |
+| `visit` 返回 `bool`（继续 / 停止遍历） | clang 的 `Traverse*` 可提前中止 | 未做（本项目 `visit` 返回 `void`） |
+
 ## 一、理论背景：把"类型"变成"控制流"
 
 编译器前端把源码变成一棵**节点类型繁多、消费者不断新增**的树。每次处理一个节点，
@@ -148,6 +172,21 @@ ctest --test-dir build-linux        # → 159/159
 
 ★ 一句话记法：**"把节点类型路由到处理函数"用访问者；"问对象一个具体问题"用标签。**
 
+## 六之补 真实版多做了什么、为什么
+
+（把 §二 的 clang 对照、§四 的量化结果与 §六 的边界合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `RecursiveASTVisitor` 的 32 个重载由 **TableGen 自动生成** | 本项目**手写** —— 项目取向是"零外部依赖"，不引入生成器；手写还换来每个重载旁边都能写注释（`accept` 键函数坑的说明就写在那里） |
+| `RecursiveASTVisitor` 的 `Traverse*` 返回 `bool`（可提前中止遍历） | 本项目 `visit` 返回 `void` —— 取值与所有权两类需求本来就该走标签分派（§三 判据①②） |
+| `RecursiveASTVisitor` 支持**自定义遍历钩子**（`DEF_TRAVERSE_DECL` 宏逐节点定义）与**数据递归**（`DataRecursionQueue`） | 本项目的遍历需求只有"走一遍子树"这一种；需要状态或外部累积的那几处（`collectBases` / `emitGlobalVars`）**刻意保留标签分派**（§六） |
+| `StmtVisitor` / `DeclVisitor` 是**两个独立**的访问者基类 | 本项目统一成一个 `AstVisitor`（32 个 `visit`，默认空体）—— 教学上只需要"一套"接口形状 |
+| `dyn_cast<X>` 失败时返回 `null`（可判失败） | 本项目用 `static_pointer_cast`，由 **`kind` 不变量**保证安全（`kind` 由节点构造函数设定、恒等于自身类型）—— 零 RTTI 的代价是不再需要"失败"这个状态 |
+| `RecursiveASTVisitor` 内部走 `switch (S->getStmtClass())`（**标签**） | clang 自己那条路在本项目由 `NodeKind` 承担 —— 两边都证明"标签分派"是零 RTTI 的可行解 |
+| clang 的 AST 节点种类远多于 32 种 | 本项目只做已有节点种类；节点表随特性增长 —— 本篇不是"节点表"的主场 |
+| clang 的访问者与遍历器都带**上下文对象**（可承载遍历状态） | 本项目刻意让访问者**无状态** —— 状态机化会掩盖"这条链是纯递归"的事实 |
+
 ## 七、相关文件
 
 - `include/ast_visitor.h` —— 访问者基类（32 个 `visit` 重载，默认空体）
@@ -155,3 +194,18 @@ ctest --test-dir build-linux        # → 159/159
 - `docs/REFACTOR-ast-visitor.md` —— 本次重构的完整记录：病根、边界、护栏、代价
 - `include/semantic_analyzer.h` —— 分派判据的正文注释（本项目唯一权威表述）
 - `logdiff.sh` —— "日志逐字节不变"的护栏脚本
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-16 | AST 分派重构五批次落地（commit 5d9b78d）：Visitor 模式 + 标签分派收进类型系统 | 把 4 条 `if-else + dynamic_pointer_cast` 分派链收进类型系统；全项目 `dynamic_pointer_cast` 147 → 0 |
+| 2026-09-16 | `accept` 必须**类内 inline 定义** | 否则成为 Itanium ABI 的**键函数**、vtable 只在定义它的 TU 发射 ⇒ 链接期满屏 `undefined reference to vtable` |
+| 2026-09-16 | 批次 3 曾因给**声明链**硬套访问者而编译失败（注册表存 `shared_ptr`，`visit` 只给引用），回退后催生本文第三节那条判据 | **先看 handler 形状，再选分派手法** —— handler 只要引用 ⇒ 访问者；还要所有权或返回值 ⇒ 标签 |
+| 2026-09-16 | 配套安全网 `logdiff.sh`（`save` 存基线 / `diff` 逐字节比对） | 本项目**日志即契约** —— 重构的铁律是日志与生成的汇编逐字节不变；基线含 84 个集成测试的编译日志 + 退出码 + 程序输出 + 汇编全文 |
+| 2026-09-16 | 新增单测 `tests/unit/test_ast_visitor.cpp`（`AstVisitorDispatch.*` 5 例） | 用 RTTI 作 oracle 钉住"标签不变式 kind ≡ 实际类型"（零 RTTI 转换的安全前提） |
+| 2026-09-16 | 顺手把三处结构相同的重复代码提取为 `forEachFunctionDecl` | "把 if-else 链换成声明式分派"顺手暴露出来的副产品 |
+| 2026-09-16 | 本篇与 `docs/REFACTOR-ast-visitor.md` 同期成文（commit 582887c） | — |
+| 2026-10-29 | `src/` 按 clang 分域搬移（`src/sema` / `src/parse` / `src/codegen` / `src/driver` …，commit 1d7551e） | ★ 本篇正文里写的 `src/semantic_analyzer.cpp` / `src/codegen.cpp` / `src/main.cpp` 是**成文时的路径**，现分别位于 `src/sema/` / `src/codegen/` / `src/driver/` 下 |
+

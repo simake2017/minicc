@@ -5,6 +5,32 @@
 > `tests/flow/test_flow_06_do_while_and_comma.cpp`、
 > `tests/flow/test_flow_07_error_case_outside_switch.cpp`（负向）。
 
+## §0 定位与能力清单
+
+switch 在汇编层是"一串比较 + 跳转"，do-while 是"标签次序换个摆法"，
+逗号表达式是"括号里的第一个操作数被丢掉"。三者的共同点是**语义都依赖
+上下文**：break 能不能用取决于外层有没有循环或 switch，case 标号能不能写
+取决于外层是不是 switch，逗号要不要当运算符取决于当前是不是括号分组。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| switch 的比较链降级 | 条件压栈，逐条 cmp-je，无匹配落 default 或出口 | 已实现 |
+| case 标号的常量性 | 非常量值报错（文案与 clang 逐字同） | 已实现 |
+| case 值重复拒绝 | `m_caseValueSets` 栈保证，同值报 duplicate | 已实现 |
+| default 分支 | 无匹配落 default 或出口 | 已实现 |
+| fall-through 是默认语义 | 不穿 break 的 case 自然贯穿到下一条 | 已实现 |
+| break 在 switch 内合法 | `m_switchDepth` 与 `m_loopDepth` 任一成立即可 | 已实现 |
+| continue 仍须在循环内 | switch 内写 continue 报 `'continue' statement not in loop statement` | 已实现 |
+| do-while（体先于条件） | 与 while 的唯一差别是标签次序 | 已实现 |
+| 逗号表达式 | 只在 `parsePrimaryExpr` 的括号分组分支开放 | 已实现 |
+| 逗号表达式左操作数为纯字面量时消除 | `[fold] (1, 2) → 2`，与恒定三元同款死分支消除 | 已实现 |
+| 跳表（jump table）下沉 | 教学实现恒用比较链 | 未做 |
+| 嵌套块内的 case 穿透分发 | 未做 | 未做 |
+| 全语言逗号运算符 | 仅括号内开放（其余位置的 `,` 仍是分隔符） | 部分 |
+| 区间 for | 未做 | 未做 |
+
+---
+
 ## 1. 理论背景
 
 ### 1.1 switch 的本质与 C++ 规则
@@ -113,3 +139,28 @@ continue 落点两者**相同**（都落 condLabel，与 for 的 incrLabel 不�
   `switch-depth=0`（如实反映新守卫，已重刷基线）。
 - **未做**：跳表（jump table）下沉（密集标号优化）、嵌套块内的 case
   穿透分发、区间 for（主线 C 余量，依赖主线 E 数组）。
+
+---
+
+## 5. 真实版多做了什么、为什么
+
+素材来自 §1.2 对照表的「简化了什么」列与 §4 的边界清单。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `SelectionDAG` / `LowerSwitch` 的**密值跳表**下沉 | 跳表需要常量池与重定位，minicc 的自研链接器没有重定位池；恒用比较链，行为正确即可 |
+| `ActOnCaseStmt` 的完整合法性检查（case 是否在 switch 作用域内等） | 本实现用 `m_caseValueSets` 栈做"常量性 + 重复"两条；作用域检查靠进出 switch 的压栈 / 弹栈隐含完成 |
+| clang 的 case 值接受**任意整型常量表达式** | 本实现只接受可常量求值的字面量族；完整常量表达式求值是主线 D 的范围（learn/39 / learn/40） |
+| `BinaryOperator(BO_Comma)` 是**全语言**逗号运算符 | 全局开放要每处 `,` 做语法上下文消歧（实参表分隔符 / 声明符分隔符）；只在括号分组开放是"够用且不引歧义" |
+| clang 的 `,` 在 for 头第三格天然可用（`i++, j++`） | 本语言 for 头第三格收的是"表达式或赋值"，逗号表达式仍需括号 |
+| clang 的 switch 条件是**整型提升后**的表达式 | 本实现直接比较条件压栈的值；提升规则属类型系统范围 |
+| clang 的 `case` 值在同一个 switch 内按**声明顺序**做区间分析 | 本实现逐条 cmp-je，无区间归并 |
+
+---
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-10-15 | 落地主线 C 二批：AST 五节点（SwitchStmt / CaseStmt / DefaultStmt / DoWhileStmt / CommaExpr）+ `m_switchDepth` + `m_caseValueSets` 栈 | learn/38 预留的 break 文案"or switch"至此名副其实；case 值必须常量、不得重复是 [stmt.switch] 的强制义务（git 5af6604） |

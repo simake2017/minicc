@@ -10,6 +10,35 @@
 
 ---
 
+## §0 定位与能力清单
+
+NTTP 的形参位要的是**类型**，而类型有一整个家族。本批**不新增语法**，只把
+[temp.param]/6 允许的**形参类型**从 `int` 一个点扩到整型家族 + 字符 + `auto`，
+并把实参侧的**字面量形态**与**转换规则**补齐。三个判据在本文归位：
+① **形态由形参表裁定**（实参写成 `4L` 还是 `4` 不重要，重要的是形参要什么）；
+② **合法性的判据是"可表示性"而不是"形态相等"**；
+③ **缓存键与实例名必须单射**，而"给人看的字符串"从来不是。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| 形参写法：`unsigned long` / `long unsigned` / `short` / `char` / `long long int` | `parseBuiltinTypeSpecifierSeq` 先收集六组计数器再一次归一 | 已实现 |
+| **非法组合**各自报错 | `long long long` / `signed unsigned` / `char int` | 已实现 |
+| 实参字面量：进制前缀 `0x` / `0b` / 前导 `0` + 后缀 `u/U/l/L` 任意组合 + `'` 分隔符 | Lexer 只切片、Parser 才解释成 `(value, type)` | 已实现 |
+| 字面量的**形态**是实参的一部分 | `Buf<1>`（int）与 `Flag<true>`（bool）不是同一个实参 | 已实现（`TemplateArg::valueType`） |
+| **可表示性**判据（[temp.arg.nontype]/1 → [expr.const]/10 → [dcl.init]/7） | `Type::canRepresentValue` 判据**单点**，Sema 与演示路径共用 | 已实现（修 B17） |
+| 转换后**形态归一** | `a.valueType = p.nonType` ⇒ `Buf<4L>` 与 `Buf<4>` 同实例 | 已实现 |
+| `template<auto V>`（[temp.param]/6 推导型非类型形参） | 形态即类型 ⇒ `K<4>`(int) 与 `K<4L>`(long) 是两个实例 | 已实现 |
+| 字符字面量与转义翻译 | `'a'` / `'\n'` / `'ab'` 折叠成 24930 | 已实现（simple-escape-sequence） |
+| **字面量溢出自动升格** | [lex.icon]/2 规定十进制无后缀 `3000000000` 的类型是 `long` | 未做（按 `stoull` 直读，只报 `out_of_range`） |
+| `\x41` / `\101` 转义 | 十六进制 / 八进制转义 | 未做 |
+| 通用字符名 `é` / `U'x'` / `u8'x'` | UTF 码点支持 | 未做 |
+| 非整型 NTTP（指针 / 引用 / 枚举 / 字面量类） | — | 未做（③ 那道检查明确拒绝） |
+| `template<auto V>` 的 **NTTP 特化模式** | 偏特化模式 `K<V>` 里的 `V` 参与模式匹配 | 部分（全特化 `K<4>` 可用；偏特化尚不支持） |
+| 函数模板的 `auto` NTTP + `TnDa` 编码 | — | 未做（函数模板的显式 NTTP 实参一律报 `not supported yet`） |
+| 形参 `wchar_t` / `char16_t` / `char32_t` / `char8_t` | 需要对应的关键字与 TypeKind | 未做 |
+
+> ★ §5「边界」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 1. 理论背景
 
 ### 1.1 一句话：形参位要的是「类型」，类型有一整个家族
@@ -420,6 +449,23 @@ ctest --test-dir build-linux -j6
 | `clang/lib/AST/ItaniumMangle.cpp: mangleTemplateArg` / `mangleType` | `<expr-primary>` 与 `<builtin-type>` | `NameMangler::encodeType` / `encodeValueArg` | 无替换表（B8）；不发射函数模板的 `TnDa` |
 | `clang/lib/Sema/SemaTemplateInstantiate.cpp` + `ASTContext` 的 specialization 缓存 | 实例的唯一化 | `getOrInstantiateClass` + `losslessArgumentsKey` | 用字符串键而非 `TemplateArgument` 的等价类 |
 
+## 6 之补 真实版多做了什么、为什么
+
+（把 §6 对照表第四列与 §5 边界表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Lexer::LexNumericConstant` 做**最大 munch**（PPMinWidth 细节） | 本项目的 Lexer **只切原文**，形态解释推迟到 Parser —— 与 clang 的 `Lexer` vs `NumericLiteralParser` 分工同构 |
+| `NumericLiteralParser` 有一张**溢出升格候选表**（int → long → long long） | 本项目用 `stoull` + 异常，只报 `out_of_range`；[lex.icon]/2 的自动升格未做 |
+| `ParseCharLiteral` 处理**多字符折叠**与完整转义集 | 本项目只认 simple-escape-sequence（`\n \t \r \0 \\ \' \"`）；`\x` / `\u` 未做 |
+| `ParseTemplateArgument` 解析**完整表达式**实参 | 本项目只认字面量 + 一元负号，不解析表达式 —— 常量表达式实参是主线 D 的活 |
+| `SetTypeSpecType` / `TypeSpecifierType` 用**四组位掩码**收集 type-specifier-seq | 本项目用**六个计数器**先收集再归一（对照 clang 的四组位掩码），不支持 `_Complex` 等 |
+| `CheckTemplateArgument` 覆盖**用户定义转换**与 `constexpr` 求值 | 本项目只覆盖整型家族 —— 可表示性之外的那一层留给主线 D |
+| `CheckConvertedConstantExpression` / `EvaluateAsInt` **真的求值** | ★ **不做到这里** —— 本实现只做"读字面量 + 可表示性"两件事；中间那层（求值）就是主线 D，它要在 `parseIntLiteral` 与 `canRepresentValue` **之间**插一层求值器，两端接口都已稳定 |
+| `mangleTemplateArg` / `mangleType` 有**完整替换表**（B8） | 本项目无替换表；另不发射函数模板的 `TnDa`（`<template-param-decl>`）—— 那条编码只出现在函数模板的 `auto` NTTP 上，而函数模板的显式 NTTP 实参目前直接报 `not supported yet` |
+| 实例唯一化用 `ASTContext` 的 specialization 缓存 + `TemplateArgument` **等价类** | 本项目用**字符串键**（`losslessArgumentsKey`）—— 代价是键必须自己保证单射，收益是键可读、可打印 |
+| clang 的 `char` / `signed char` / `unsigned char` 是**三个不同**类型 | 本实现同样区分（mangling 12/12 与 clang 逐字符相同：`c` / `a` / `h`） |
+
 ★ 最关键的一条对照：clang 的 converted constant expression 检查
 **会真的求值**（`Buf<2+2>` 走 `ExprConstant` 求成 4），本实现只做"读字面量 + 可表示性"
 两件事 —— **中间那一层（求值）就是主线 D**。清楚了这一点，主线 D 的边界也就清楚了：
@@ -493,3 +539,18 @@ test_tmpl_65_error_nttp_bool_narrowing.cpp:37:7: error: non-type template argume
    这一条只能靠**正向用例**撞出来，负向全绿说明不了任何事；
 3. **缓存键与实例名必须是单射**，而"给人看的字符串"从来不是 ——
    这个坑本项目已经踩过三次（[23](23-cv-position-and-type-identity.md) / B13~B15 / 本批的 auto 位）。
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-30 | NTTP 类型域扩展落地（commit 815c6a8）：形参写法扩到整型家族 + 字符 + `auto`；字面量形态与后缀 / 进制 / 分隔符；字符字面量 | 三段各自独立的知识点此前全缺：形参写法（[dcl.type.simple]）/ 字面量形态（[lex.icon]/2）/ `auto` 形参（[temp.param]/6） |
+| 2026-09-30 | ★ **判据归位**（BUGS.md **B17**，拒收合法程序）：合法性的判据从"形态精确相等"改为 `Type::canRepresentValue`（可表示性） | 旧判据把 `Flag<1>`(bool←int 1) / `A<4L>`(int←long 4) / `A<true>`(int←bool 提升) 三条 clang 认可的合法程序全拒 —— 而**负向全绿掩盖了它**（真该拒的旧版也拒） |
+| 2026-09-30 | 通过可表示性后新增**形态归一**（`a.valueType = p.nonType`） | 不是修饰而是语义必需：归一后 `Buf<4L>` 与 `Buf<4>` 的可读串 / 缓存键 / mangling 才一致（clang 亦认同一实例） |
+| 2026-09-30 | ★ 修掉一个**静默撞键**：`template<auto V>` 下 `K<4>` 与 `K<4L>` 复用同一实例 | 键与实例名此前用 `TemplateArg::toString()`（对两者都产 `"4"`）⇒ 第二个**静默复用**第一个，不报错、不算错、连症状都没有；修法是键与实例名同源于 `losslessArgumentsKey` / `renderArgLossless` |
+| 2026-09-30 | `sanitizeSymbolChars` 补 `:` → `C` | 第一版忘了，汇编期会吐非法符号（实例名 `K_4Cint` / `K_4Clong`） |
+| 2026-09-30 | 新增单测 `tests/unit/test_nttp_type_domain.cpp`（`NttpTypeDomain.*` 10 例）+ 集成 `test_tmpl_61..68` | 四条判据分支逐条做了**突变负向验证** |
+| 2026-09-30 | **CodeGen 一行未改** | codegen 全程按宽度（1 / ≤4 / 8 字节）分派、零 `TypeKind` 引用 ⇒ 新标量类型的代码生成成本为 0 |
+| 2026-10-15 | 常量折叠 + NTTP 常量表达式实参落地（主线 D，commit 5af6604） | §6 那句"中间那一层（求值）就是主线 D"被兑现：`Buf<2+2>` / `Buf<k>` 端到端可用 |
+

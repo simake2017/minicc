@@ -1,3 +1,14 @@
+---
+title: minicc 缺陷台账（BUGS）
+date: 2026-11-02
+category: compiler
+tags: [bug-ledger, postmortem, compiler, minicc, defect-tracking]
+type: index
+severity: high
+status: maintained
+related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritance-layout]]", "[[docs/learn/36-argument-binding-and-name-visibility]]", "[[docs/learn/47-parser-stage-name-recognition]]", "[[docs/learn/49-scope-qualified-names]]", "[[docs/constraints/05-文档标准与冲突裁决]]", "[[docs/constraints/06-文档骨架规范]]", "[[docs/PITFALLS]]"]
+---
+
 # bug 台账（BUGS）
 
 > 与 [PITFALLS.md](PITFALLS.md) 的分工：
@@ -56,7 +67,9 @@
 
 ## B1. auto 占位符被壳包住
 
-**复现**（六形态，只有裸 `auto` 活）
+- severity: medium ｜ status: fixed ｜ related: docs/learn/31, tests/tmpl/test_tmpl_55_auto_cv_forms.cpp
+
+**现象**（六形态，只有裸 `auto` 活）
 
 ```cpp
 int main() {
@@ -103,7 +116,7 @@ int main() {
 
 **改动点**：`src/semantic_analyzer.cpp:2537` 与 `:2570` 的 `type->isAuto()` 两处入口。
 
-**修复** ✅
+**修法（已落地）** ✅
 
 新增两个成员方法：
 
@@ -119,7 +132,7 @@ int main() {
 实现与 `TemplateDeducer::deducePair` 同源，只是模式侧的"待绑定变量"是 `Auto`
 而非 `TemplateParam`。
 
-**回归用例**：
+**回归**：
 - `tests/tmpl/test_tmpl_55_auto_cv_forms.cpp` —— 六形态编译 + 求值，
   `main` 返回 32（与 clang++-18 同值）。求值式里六个变量都被读到，
   于是"某个形态被静默当成别的类型"也会让返回值改变。
@@ -127,11 +140,17 @@ int main() {
   见 [B6](#b6-引用变量没有别名语义)）：靠 `logdiff` 基里那几行
   `[auto] ★ v4 : auto& ⟹ int&` 逐字节钉住。
 
+**教训**
+
+（无）
+
 ---
 
 ## B2. 函数模板 mangling 漏了参数签名
 
-**复现**（同名模板的两个 arity 重载，T 都推导成 int）
+- severity: high ｜ status: fixed ｜ related: docs/learn/13, docs/learn/11, tests/unit/test_template_deduction.cpp
+
+**现象**（同名模板的两个 arity 重载，T 都推导成 int）
 
 ```cpp
 template <class T> int f(T x)       { return 1; }
@@ -143,7 +162,7 @@ int main() { return f(1) + f(1, 2); }   // clang=3，修复前 minicc=2
 同一个名字，撞上缓存里已有的实例被当成"已实例化"直接返回 ⇒ 两次调用都落到单参函数体，
 得 `1+1=2`。
 
-**根因（两处，缺一不可）**
+**根因**（两处，缺一不可）
 
 | # | 位置 | 症状 |
 |---|---|---|
@@ -166,7 +185,7 @@ int main() { return f(1) + f(1, 2); }   // clang=3，修复前 minicc=2
 故 `encodeType` 多收一个 `typeParams` 形参，**带默认空表** ⇒ 类模板路径不传，
 符号逐字节不变。
 
-**修复** ✅
+**修法（已落地）** ✅
 
 | 改动 | 位置 |
 |---|---|
@@ -175,7 +194,7 @@ int main() { return f(1) + f(1, 2); }   // clang=3，修复前 minicc=2
 | 实例化端改用新函数 | `src/template_instantiation.cpp:430` |
 | ★ 缓存键改用新函数（与上一条同源） | `src/semantic_analyzer.cpp:3963` |
 
-**回归用例**：`tests/unit/test_template_deduction.cpp` 新增
+**回归**：`tests/unit/test_template_deduction.cpp` 新增
 `Instantiate.MangledNameCarriesSignature`（同名模板不同 arity、同 `T=int`，断言两符号
 互不相同且分别为 `_Z1fIiEiT_` / `_Z1fIiEiT_i`）；同文件 `Instantiate.FunctionTemplate`、
 `Instantiate.DifferentArgsDifferentSymbols` 的期望值同步更新为含签名的新名。
@@ -189,9 +208,15 @@ int main() { return f(1) + f(1, 2); }   // clang=3，修复前 minicc=2
 
 **现役案发现场**：`demos/tmpl/04_partial_order.cpp` 的「⚠ 已知边界」注释。
 
+**教训**
+
+（无）
+
 ---
 
 ## B3. 字段写入路径 3 硬编码 movl
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/31, docs/PITFALLS.md#c4-字段写入硬编码-movl, tests/unit/test_codegen_field_write.cpp
 
 **位置**：`src/codegen.cpp:1123`（`emitAssign` 的 `NodeKind::Var` 分支 —— 裸字段名赋值）
 
@@ -199,7 +224,7 @@ int main() { return f(1) + f(1, 2); }   // clang=3，修复前 minicc=2
 emit(std::format("movl %eax, {}(%rcx)    # .{} = ...（偏移 {}，4 字节写入）", ...));
 ```
 
-**复现**（`ptr` 是 8 字节指针，写入被截掉高 32 位）
+**现象**（`ptr` 是 8 字节指针，写入被截掉高 32 位）
 
 ```cpp
 struct MyPtr {
@@ -208,6 +233,8 @@ struct MyPtr {
     void set(int* x) { ptr = x; } // ← 路径 3，写死 movl ⇒ 高 32 位丢
 };
 ```
+
+**根因**
 
 **三条写字段的路**（读路径已按宽度分派，写路径只修了两条）
 
@@ -227,7 +254,7 @@ struct MyPtr {
 
 **现役案发现场**：`demos/tmpl/07_alias_and_ctad.cpp` 的「⚠ 已知边界」注释。
 
-**修复** ✅
+**修法（已落地）** ✅
 
 `emitAssign` 的 `NodeKind::Var` 分支改按 `field->size` 分派
 （与读路径、初始化列表路径同构）：
@@ -241,7 +268,7 @@ struct MyPtr {
 `<= 4` 分支保持原样，是为了让既有汇编零漂移 —— 修复只影响此前**写错**的 8B 路径。
 重刷基线时的差异恰好是 3 处 `movl %eax, 0(%rcx) # .ptr = ...` → `movq %rax, ...`。
 
-**回归用例**：`tests/unit/test_codegen_field_write.cpp`（`CodegenFieldWrite.*`，3 例）
+**回归**：`tests/unit/test_codegen_field_write.cpp`（`CodegenFieldWrite.*`，3 例）
 —— 断言的是**不变量**「每条字段写入指令的宽度 == 该偏移上字段声明的宽度」，
 而不是症状文案；三条写路径（成员表达式 / 初始化列表 / 裸字段名）各覆盖一遍，
 否则"某条路径整体消失"会让测试静默变弱。
@@ -249,13 +276,19 @@ struct MyPtr {
 **负向已验证**：把 codegen 退回硬编码 `movl`，该用例立刻报
 `偏移 8 的字段应为 q 宽度指令，实际用了 movl —— 指令：movl %eax, 8(%rcx)`。
 
+**教训**
+
+（无）
+
 ---
 
 ## B6. 引用变量没有别名语义
 
+- severity: high ｜ status: open ｜ related: docs/learn/12, docs/learn/31, tests/tmpl/test_tmpl_55_auto_cv_forms.cpp
+
 **位置**：`src/codegen.cpp`（局部变量声明的槽分配 + `visit(VarDeclStmt&)` 发射路径）
 
-**复现**（不需要 auto，裸引用一样）
+**现象**（不需要 auto，裸引用一样）
 
 ```cpp
 int main() {
@@ -274,6 +307,8 @@ int main() {
 `r = 30` 要翻译成"对 `r` 绑定的地址做间接写"，而不是"写 `r` 的槽"。
 对照 clang：`CodeGenFunction::EmitDeclRefLValue` 对引用声明返回
 `EmitLValueForReference`（拿到被绑定的地址），**从不给引用分配 alloca**。
+
+**教训**
 
 **为什么一直没被发现**：现有用例里引用只出现在两处恰好都正确的位置 ——
 ① **函数形参**（`void f(T& x)`，走调用方传地址，天生正确）；
@@ -297,11 +332,21 @@ int main() {
 栈对象析构取址（`leaq off(%rbp),%rdi`）走的是**对象自身地址**，
 引用别名不能影响它 —— 即"引用是别名，被引用对象仍在原槽"。
 
+**回归**
+
+（无）
+
+**教训**
+
+（无）
+
 ---
 
 ## B7. 自由函数重载根本不做 mangling
 
-**复现**
+- severity: medium ｜ status: open ｜ related: docs/learn/13, docs/learn/36
+
+**现象**
 
 ```cpp
 struct S { int v; };
@@ -327,10 +372,12 @@ if (decl->ownerClassName.empty()) {
 上游还有一处**同一个病**：`m_functionMap[decl->name] = decl;` 也以裸名作键 ⇒
 后注册的重载**覆盖**先注册的，调用点决议阶段连"存在两个候选"都看不见。
 
+**教训**
+
 **为什么 `mangleFunction` 没救**：它**写好了却零调用点**（全仓只有定义与声明）——
 `_Z4picki` / `_Z4pick1S` 的编码逻辑现成，只是从来没人调它。
 
-**修法（草案）**
+**修法**（草案）
 
 1. `registerFunction` 的自由函数分支改填
    `NameMangler::mangleFunction(decl->name, "", decl->parameters)`；
@@ -347,9 +394,19 @@ if (decl->ownerClassName.empty()) {
 **现状**：⬜ 未修 —— 与 B2 同源（都是 NameMangler 没被善用），但改动波及**决议**与
 **CodeGen**，风险高于 B2，宜单独立项。
 
+**回归**
+
+（无）
+
+**教训**
+
+（无）
+
 ---
 
 ## B8. mangling 没有替换表 ⇒ 符号与 clang 不逐字符等同
+
+- severity: low ｜ status: open ｜ related: docs/learn/13, docs/learn/35
 
 **现象**（B2 修复后的残留差异）
 
@@ -366,18 +423,28 @@ if (decl->ownerClassName.empty()) {
 链接、决议、执行都不受影响。记在这里是因为它影响"与 clang 逐字符核对"这个
 教学惯例（NTTP 那批就是逐字符对过的）。
 
-**要修的话**：`encodeType` 需带一张 substitution 表（引用或成员），并确定哪些节点入表
+**修法（要修的话）**：`encodeType` 需带一张 substitution 表（引用或成员），并确定哪些节点入表
 （Itanium 规则里复合类型入表，内建类型的行为需实测确认）。
 **注意**：minicc 的类模板实例类型是**改名后的扁平 Type**（`MyPtr_int`），
 没有可压缩的嵌套结构，故替换表只对**函数模板签名的参数表**有意义 —— 收益有限。
 
 **现状**：⬜ 未修（教学差异，非缺陷）。
 
+**回归**
+
+（无）
+
+**教训**
+
+（无）
+
 ---
 
 ## B9. `struct` 的默认继承级别被当成 private 处理
 
-**复现**
+- severity: medium ｜ status: fixed ｜ related: docs/learn/31, tests/lang/test_basics_01.cpp
+
+**现象**
 
 ```cpp
 struct Base { int v; };
@@ -394,7 +461,7 @@ minicc：`[Parse Error] 2:18 at 'Base': 仅支持 public 继承（每个基类�
 `class` ⇒ private），而 `parseClassDecl` 只看"有没有写 public"、没看关键字 ——
 `isStruct` 本来就在手上，却被 `(void)isStruct;` 丢弃了。
 
-**修复** ✅
+**修法** ✅
 
 | 写法 | 修复前 | 修复后 |
 |---|---|---|
@@ -404,16 +471,20 @@ minicc：`[Parse Error] 2:18 at 'Base': 仅支持 public 继承（每个基类�
 | `class D : Base` | ❌ 文案不准 | ❌ 说清"默认 private，未实现" |
 | `struct D : private Base` | ❌ 文案不准 | ❌ 说清"private 未实现" |
 
+**教训**
+
 **设计决策**：private/protected 继承的**语义**（基类子对象的访问控制）本项目不做，
 故仍报错；但文案从"语法不允许"改成"语义未实现" —— **报错理由必须准确**。
 
-**回归用例**：`tests/lang/test_basics_01.cpp` 第 ① 项；文档 `docs/learn/31` §1。
+**回归**：`tests/lang/test_basics_01.cpp` 第 ① 项；文档 `docs/learn/31` §1。
 
 ---
 
 ## B10. 带参成员方法的调用符号拼不出来
 
-**复现**（不需要下标糖 —— 普通方法调用就够了）
+- severity: medium ｜ status: fixed ｜ related: docs/learn/13, docs/learn/36, tests/stl/test_stl_02..05
+
+**现象**（不需要下标糖 —— 普通方法调用就够了）
 
 ```cpp
 class C { public: int f(int x) { return x; } };
@@ -441,7 +512,7 @@ minicc：`[LINK ERROR] undefined reference to 'C_f'`
 四个长期 rc=1；因为 logdiff 基线把 rc=1 当成了契约，**坏了很久没人发现**
 （这本身就是教训：*基线固化失败 ⇒ 缺陷变成"预期行为"*）。
 
-**修复** ✅ —— 沿用项目既有的"符号回填"套路
+**修法** ✅ —— 沿用项目既有的"符号回填"套路
 
 `MemberExpr::resolvedCalleeSymbol` 早已存在（成员模板 `Acc_add_int` 靠它绕开硬拼），
 本次把**普通成员方法**也接上同一根线：
@@ -458,17 +529,23 @@ minicc：`[LINK ERROR] undefined reference to 'C_f'`
 修复后的基线差异**恰好只有那 4 个 stl 文件**，其余 90 个集成测试逐字节不变，
 即是此判断的实证。
 
-**回归用例**：`tests/stl/test_stl_02..05`（四个文件头都写明了本回归点）。
+**回归**：`tests/stl/test_stl_02..05`（四个文件头都写明了本回归点）。
 
 **顺带暴露（未处理）**：`inferIndex` 只校验 `at()`、从不校验 `set()` ——
 类里没写 `set()` 时，错误同样一路推到链接期。本次按"只回填不强制"保持既有行为，
 补校验是另一件事。
 
+**教训**
+
+（无）
+
 ---
 
 ## B4. 带 return 的函数里局部对象析构是死代码
 
-**复现**（析构里写全局变量，看有没有跑）
+- severity: high ｜ status: fixed ｜ related: docs/learn/08, docs/learn/12, tests/ctor/test_ctor_03_raii_return.cpp
+
+**现象**（析构里写全局变量，看有没有跑）
 
 ```cpp
 int g = 0;
@@ -513,7 +590,7 @@ int main() { f(); return g; }    // clang=5，minicc=0
 **影响面（中）**：这是 **RAII 语义**问题，不是指令细节 —— 目前所有「有 return 的函数里
 放局部对象」的代码都在静默泄漏/不析构。修完需要补回归用例。
 
-**修复** ✅
+**修法（已落地）** ✅
 
 采用**方案①「就近发射」**（`CodeGen::emitDtorsOnReturn`，`src/codegen.cpp`）：
 `visit(ReturnStmt)` 在 `leave; ret` **之前**把栈上所有活跃作用域层的对象
@@ -538,18 +615,24 @@ int main() { f(); return g; }    // clang=5，minicc=0
 
 代价：return 之后那段"块尾/函数尾析构"仍会发射（已不可达，无害的冗余）。
 
-**回归用例**：`tests/ctor/test_ctor_03_raii_return.cpp`（集成测试）
+**回归**：`tests/ctor/test_ctor_03_raii_return.cpp`（集成测试）
 —— 返回值 121 同时钉住"跨层"与"LIFO"两件事：
 `f()` 析构 a(1) ⇒ g=1；`h()` 先 b(2) 再 a(1) ⇒ g=1*10+2=12 → 12*10+1=121。
 只析构最外层 / 顺序反了 / 漏了内层，都会得到别的数。
+
+**教训**
+
+（无）
 
 ---
 
 ## B5. 块注释不跨行
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/07, tests/unit/test_preprocessor.cpp
+
 **位置**：`src/preprocessor.cpp:88`（`Preprocessor::stripComment`）
 
-**复现**（`/*` 独占一行、内容在后续行 —— 最普通的注释写法）
+**现象**（`/*` 独占一行、内容在后续行 —— 最普通的注释写法）
 
 ```cpp
 /*
@@ -593,7 +676,7 @@ i = (end == std::string::npos) ? line.size() : end + 1;   // ← 跨行状态在
 **修法**：给 `stripComment` 加**跨行状态**参数 `bool& inBlockComment`，
 由 `processText` 的逐行循环按文件保管（`#include` 递归时各层独立，不串味）。
 
-**修复** ✅
+**修法（已落地）** ✅
 
 | 改动 | 位置 |
 |---|---|
@@ -601,8 +684,10 @@ i = (end == std::string::npos) ? line.size() : end + 1;   // ← 跨行状态在
 | 注释内逐字符换空格、见 `*/` 复位 | `src/preprocessor.cpp` |
 | `processText` 循环外持有状态 | `src/preprocessor.cpp:178` |
 
-**回归用例**：`tests/unit/test_preprocessor.cpp` 的 `LexUtils.StripCommentAcrossLines`
+**回归**：`tests/unit/test_preprocessor.cpp` 的 `LexUtils.StripCommentAcrossLines`
 —— 断言 ① 两行后仍在注释内 ② 见 `*/` 复位 ③ 同行闭合不留残状态。
+
+**教训**
 
 > 工程教训：这个 bug 能潜伏这么久，是因为**既有测试里的块注释恰好都写在同一行**，
 > 而多行块注释（`/*` 换行正文再 `*/`）才是最普通的写法 —— 测试覆盖的是"能过"的形态。
@@ -611,9 +696,11 @@ i = (end == std::string::npos) ? line.size() : end + 1;   // ← 跨行状态在
 
 ## B11. 本类自身多态而基类全非多态时 _vptr 与首基类字段压在同一 offset
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/learn/50, tests/mi/test_mi_08_self_poly_no_poly_base.cpp, tests/unit/test_layout_lookup.cpp
+
 **位置**：`src/semantic_analyzer.cpp` 的 `[relocate]` 子对象摆放阶段（`processClassDecl` 内）
 
-**复现**（最朴素的单继承 + 一个虚函数）
+**现象**（最朴素的单继承 + 一个虚函数）
 
 ```cpp
 struct B { int name; };
@@ -650,7 +737,7 @@ Itanium 的主基类优化：**primary base 只在动态（多态）基类里选
 **影响面（大）**：单继承最朴素的写法就会中招，且**编译期全程绿灯**。
 不崩只是因为恰好没人读那个被踩烂的 vptr —— 本 bug 的第一版用例返回 6"看着对"，正是如此。
 
-**修复** ✅：判据补上第三态。
+**修法** ✅：判据补上第三态。
 
 | 改动 | 内容 |
 |---|---|
@@ -660,10 +747,13 @@ Itanium 的主基类优化：**primary base 只在动态（多态）基类里选
 
 ★ `selfPoly` 只需看 `virtual` 关键字：无多态基类 ⇒ 没有可覆写的虚函数，
 "覆写"这条来源不可能成立（与下方 override 检测同源，不重复实现）。
+
+**教训**
+
 ★ 既有分支的日志**逐字节不变**（`primary='X' 占 0` 原文保留）——
 94 个集成测试零漂移，是"只影响此前算错的那一支"的实证。
 
-**回归用例**：
+**回归**：
 - `tests/mi/test_mi_08_self_poly_no_poly_base.cpp` —— 两场景合一，返回 `111`
   （`5+3` 单非多态基类、`100+1+2` 双非多态基类）。
 - `tests/unit/test_layout_lookup.cpp` 的 `LayoutLookup.VptrNeverOverlapsFields`
@@ -677,9 +767,11 @@ Itanium 的主基类优化：**primary base 只在动态（多态）基类里选
 
 ## B12. 继承来的成员方法查不到
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/13, docs/learn/17, tests/mi/test_mi_09_inherited_member.cpp
+
 **位置**：`src/semantic_analyzer.cpp` 的 `inferMember`（查方法那一段）
 
-**复现**
+**现象**
 
 ```cpp
 struct A { int g() { return 5; } };
@@ -701,7 +793,7 @@ minicc：`[ERROR] [Semantic Error] 3:27: No member 'g' in class 'D'` —— **�
 `d.g()` 永远走不到那条 BFS。**同一条查找规则写在两处，只有一处带基类链**，
 与 [B10](#b10-带参成员方法的调用符号拼不出来) 的"双份判据"同型。
 
-**修复** ✅：把判据收口成两个原语，两条通路共用。
+**修法** ✅：把判据收口成两个原语，两条通路共用。
 
 | 原语 | 作用 | 调用者 |
 |---|---|---|
@@ -713,16 +805,22 @@ minicc：`[ERROR] [Semantic Error] 3:27: No member 'g' in class 'D'` —— **�
 ★ 隐藏规则由此自动成立：本类先于基类 ⇒ `D::g` 胜过 `A::g`。
 ★ 日志保持原文，命中基类时追加 `via 'A'`（本类命中不加 ⇒ 既有输出逐字节不变）。
 
-**回归用例**：`tests/mi/test_mi_09_inherited_member.cpp`（多级链 `C:B:A`、指针形态、
+**回归**：`tests/mi/test_mi_09_inherited_member.cpp`（多级链 `C:B:A`、指针形态、
 同名隐藏三件事合一，返回 8）；单测 `LayoutLookup.InheritedMethodIsFound`。
 **负向已验证**：`findMethodInHierarchy` 换回 `findMethodInClass` ⇒ 单测红；
 重编 minicc ⇒ `test_mi_09` 编译 `rc=1`。
+
+**教训**
+
+（无）
 
 ---
 
 ## B13. 两个次基类各有一个同名字段时显示名塌陷且第二条偏移算成 0
 
-**复现**
+- severity: medium ｜ status: fixed ｜ related: docs/learn/17, docs/learn/49, tests/mi/test_mi_11_ambiguous_member.cpp
+
+**现象**
 
 ```cpp
 struct B { int name; };
@@ -744,7 +842,7 @@ struct D : A { int tag; };
 ⇒ [class.member.lookup]/8 歧义，`d.name` 必须报错）—— 不是 miscompile，
 而是"静默接受非法程序 + 布局打印错"。但它与 B14/B15 同根，故一并根治。
 
-**根因（两处叠加）**
+**根因**（两处叠加）
 
 | # | 位置 | 症状 |
 |---|---|---|
@@ -769,6 +867,9 @@ field.offset = 子对象偏移(viaBase) + 基类布局[baseFieldIndex].offset
 
 主基类子对象偏移恒为 0 ⇒ 该式自动退化成"直接复用基类偏移"，与旧实现同值；
 两条分支合一后，`currentPrimaryBase` 变量连同"先挑主基类再分派"的逻辑一并删除。
+
+**教训**
+
 **对照 clang**：成员是 `FieldDecl*` + `getFieldIndex()`，`RecordLayoutBuilder` 从不做字符串匹配。
 
 **配套：歧义诊断**（[class.member.lookup]/8）
@@ -782,7 +883,7 @@ field.offset = 子对象偏移(viaBase) + 基类布局[baseFieldIndex].offset
   found in 2 base-class subobjects (经 'A' 的 'A.name'、经 'A' 的 'A.name')
 ```
 
-**回归用例**：`tests/mi/test_mi_11_ambiguous_member.cpp` —— **预期编译失败 rc=1**，
+**回归**：`tests/mi/test_mi_11_ambiguous_member.cpp` —— **预期编译失败 rc=1**，
 基线固化其报错原文（rc 若变 0，即说明歧义检测退化）；
 单测 `LayoutLookup.LookupIsPrefixIndependentAndAmbiguityIsVisible` 的后半段断言必须抛错。
 **负向已验证**：关掉歧义检测 ⇒ 单测红；重编 minicc ⇒ `test_mi_11` 变成 `rc=0`
@@ -792,9 +893,11 @@ field.offset = 子对象偏移(viaBase) + 基类布局[baseFieldIndex].offset
 
 ## B14. 派生类同名字段的隐藏方向做反了
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/17, docs/learn/49, tests/mi/test_mi_10_field_hiding.cpp
+
 **位置**：`include/type.h` 的 `ClassLayout::findField`
 
-**复现**
+**现象**
 
 ```cpp
 class A { public: int x; void setA(int v) { x = v; } int getA() { return x; } };
@@ -817,7 +920,7 @@ minicc（修复前）= **55** —— `d.x` 落到了 `A::x`（`d.getA()` 也读�
 方向就这样反了：为了让字符串不撞，动的是自身字段；而"精确匹配先到先得"
 又让 `d.x` 指到了基类成员 —— **显示层的改动泄漏进了索引层**。
 
-**修复** ✅：`findField` 改三级，键换成 `declaredName`
+**修法** ✅：`findField` 改三级，键换成 `declaredName`
 
 | 顺序 | 命中条件 | 依据 |
 |---|---|---|
@@ -825,9 +928,11 @@ minicc（修复前）= **55** —— `d.x` 落到了 `A::x`（`d.getA()` 也读�
 | ② | **自身字段**（`sourceClass` 空或 == 本类名）且 `declaredName == name` | [class.member.lookup]/3 隐藏 |
 | ③ | 继承字段且 `declaredName == name` | 兜底 |
 
+**教训**
+
 ★ 显示名（`D.x` / `A.x`）仍照旧生成 —— 它只用于打印，不再参与判定。
 
-**回归用例**：`tests/mi/test_mi_10_field_hiding.cpp`（返回 75）；
+**回归**：`tests/mi/test_mi_10_field_hiding.cpp`（返回 75）；
 单测 `LayoutLookup.OwnFieldHidesInheritedOne`（断言**不变量**：`d.x` 命中的那条
 必须 `viaBase` 为空 = 本类自身）。
 **负向已验证**：把 ② 的条件改回"只认 `sourceClass` 为空"（= 旧行为）⇒ 单测红；
@@ -837,9 +942,11 @@ minicc（修复前）= **55** —— `d.x` 落到了 `A::x`（`d.getA()` 也读�
 
 ## B15. 祖辈前缀与直接基类撞名时偏移算到错的子对象
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/17, docs/learn/49, tests/unit/test_layout_lookup.cpp
+
 **位置**：扁平化循环 + `computeClassLayout`（与 B13 同一段代码）
 
-**复现**
+**现象**
 
 ```cpp
 struct Q { virtual int g() { return 0; } };
@@ -865,12 +972,15 @@ struct X : P, B { int tag; };
 主基类分支是**原样拷贝**（`FieldInfo fi = baseField;`），祖辈留下的 `sourceClass="B"`
 一路带到 X —— 而 X 恰好真有一个直接基类叫 `B`。
 
-**修复** ✅：`viaBase` 在扁平化时**覆盖**为本层的直接基类、`baseFieldIndex` 记录下标；
+**修法** ✅：`viaBase` 在扁平化时**覆盖**为本层的直接基类、`baseFieldIndex` 记录下标；
 `computeClassLayout` 按 `(viaBase, 下标)` 定位，不再看 `sourceClass`、也不再按名字匹配。
+
+**教训**
+
 祖辈前缀从此只是显示标签，去多少代都不影响查找；它与"源自 B"这件事各由
 `declaredName` / `sourceClass` 独立承载。
 
-**回归用例**：单测 `LayoutLookup.LookupIsPrefixIndependentAndAmbiguityIsVisible`
+**回归**：单测 `LayoutLookup.LookupIsPrefixIndependentAndAmbiguityIsVisible`
 —— 断言两条同名记录**偏移必须不同**、且各自的 `viaBase` 必须是**本类的直接基类**。
 **负向已验证**：把派发改回 `sourceClass` + 按名字查内部偏移（**忠实复刻旧代码**）⇒
 该单测报 `Expected: (hits[0]->offset) != (hits[1]->offset), actual: 24 vs 24` —— 正是旧 bug 的形态。
@@ -879,7 +989,9 @@ struct X : P, B { int tag; };
 
 ## B16. 无声明符的声明被拒收（`A<int*, int**>;` 报 Parse Error）
 
-**复现**
+- severity: medium ｜ status: fixed ｜ related: docs/learn/46, docs/learn/47, tests/unit/test_declaratorless_decl.cpp, tests/lang/test_basics_02_declaratorless.cpp
+
+**现象**
 
 ```cpp
 template<class a, class b> struct A { };
@@ -918,6 +1030,8 @@ clang++-18：接受，只给 `warning: declaration does not declare anything [-W
    之后停在 `;`，`check(Identifier)` 不成立 ⇒ 回滚到 `src/parser.cpp:1990` 走表达式分支
    ⇒ `parseExprOrAssignStmt` 把 `A` 当标识符表达式，再撞死在第 2 个实参的 `int` 上。
 
+**教训**
+
 ★ 第 2 条的**诊断质量**尤其差：报错位置指向实参中间的 `int`，用户完全看不出
 真正的问题是"这条声明没有声明符"。根因在语句层，症状在表达式层 —— 中间隔着一次回滚。
 
@@ -934,7 +1048,7 @@ clang++-18：接受，只给 `warning: declaration does not declare anything [-W
 空语句是**纯叶子**（只有位置、无子节点、无类型），于是 Sema 根本无从 `resolveType`，
 "不实例化任何模板"由**结构**保证，而不是靠约定。
 
-**修复** ✅
+**修法（已落地）** ✅
 
 | 改动点 | 文件 | 内容 |
 |---|---|---|
@@ -974,7 +1088,7 @@ clang++-18：接受，只给 `warning: declaration does not declare anything [-W
 | `src/main.cpp` `AstDumper::visit` | `--dump-ast` 对该节点无输出 |
 | `tests/unit/test_ast_visitor.cpp` `auditStmt` | 该测试的 `default:` 分支报"未覆盖的语句 kind" |
 
-**回归用例**：
+**回归**：
 
 - `tests/unit/test_declaratorless_decl.cpp`（`DeclaratorlessDecl.*` 8 例）——
   含三条**不变量**断言，而非具体实现细节：
@@ -1015,7 +1129,9 @@ clang++-18：接受，只给 `warning: declaration does not declare anything [-W
 
 ## B17. 值位实参要求「形态精确相等」⇒ 拒收合法程序
 
-**复现**（三形态，只有"形态恰好等于形参类型"的那一种活）
+- severity: high ｜ status: fixed ｜ related: docs/learn/23, docs/learn/35, tests/tmpl/test_tmpl_64_nttp_integral_conversion.cpp, tests/tmpl/test_tmpl_68_nttp_auto_param.cpp, tests/unit/test_nttp_type_domain.cpp
+
+**现象**（三形态，只有"形态恰好等于形参类型"的那一种活）
 
 ```cpp
 template<bool B> struct Flag { int v; };
@@ -1092,6 +1208,9 @@ else if (!a.valueType->equals(p.nonType)) {
 **连"看起来不对"的症状都没有**。修法：键与实例名同源于
 `NameMangler::losslessArgumentsKey` / `renderArgLossless`，形态只在 `auto` 形参位写入
 ⇒ `K_4Cint` / `K_4Clong`（`C` 是 `:` 的安全转义，`sanitizeSymbolChars` 同批补的）。
+
+**教训**
+
 ★ 这与 [B13~B15](#小结-字符串兼任-id-与路径) 和 docs/learn/23 的坑**同源**：
 **拿"给人看的字符串"当"机器用的键"，早晚出事。**
 
@@ -1104,7 +1223,7 @@ else if (!a.valueType->equals(p.nonType)) {
 `NameMangler::losslessArgumentsKey` / `renderArgLossless` 新增于
 `include/template_instantiation.h` + `src/template_instantiation.cpp`。
 
-**回归用例**：
+**回归**：
 · 集成 `tests/tmpl/test_tmpl_64_nttp_integral_conversion.cpp`（三条正向，文件头注明回归 B17）
 · 集成 `tests/tmpl/test_tmpl_65/66/67_error_nttp_*`（三条负向，文案与 clang 逐字同）
 · 集成 `tests/tmpl/test_tmpl_68_nttp_auto_param.cpp`（`K<4>` / `K<4L>` 各自成实例 + 全特化只吃 int 形态）
@@ -1125,7 +1244,9 @@ else if (!a.valueType->equals(p.nonType)) {
 
 ## B18. 类模板里的成员模板在实例类里丢失
 
-**复现**
+- severity: medium ｜ status: fixed ｜ related: docs/learn/34, tests/tmpl/test_tmpl_69_member_template_in_class_template.cpp, tests/unit/test_member_template_in_class_template.cpp
+
+**现象**
 
 ```cpp
 template <class T>
@@ -1199,6 +1320,8 @@ for (auto& mt : templateDecl->classTemplate->memberTemplates) {
 | 搬了、但替换**就地改蓝图** | 第二个实例串到第一个的绑定（`Box<long>` 的 `convert` 也返回 `int`） | **静默算错** |
 | 把内层 `U` 也替换掉 | 调用点无可推导 ⇒ 每个调用都推不出来 | 错误拒绝 |
 
+**教训**
+
 **影响面**：小-中。原先拒收合法程序；修复后既有 **111 个集成用例逐字节零漂移**
 （只有新增用例进基线）—— 反过来证明**此前没有任何既有用例覆盖"类模板 × 成员模板"
 这个组合**：一个真缺口可以长时间藏在"特性各自都有测试"的缝里。
@@ -1206,7 +1329,7 @@ for (auto& mt : templateDecl->classTemplate->memberTemplates) {
 **修复记录**：`src/template_instantiation.cpp` instantiateClassTemplate 步骤 5.6
 （+ 日志 `║ ── Member Template Substitution ──`，仅在该表非空时打印 ⇒ 既有用例零漂移）。
 
-**回归用例**：
+**回归**：
 · 集成 `tests/tmpl/test_tmpl_69_member_template_in_class_template.cpp`
   （外层 T 兑现 / 两实例不串味 / 内层 U 两实例两符号 / 偏特化蓝图同样生效）
 · 单测 `tests/unit/test_member_template_in_class_template.cpp`（`MemberTemplateInClassTemplate.*` 5 例）
@@ -1223,7 +1346,9 @@ for (auto& mt : templateDecl->classTemplate->memberTemplates) {
 
 ## B19. static / virtual 的识别位置写反：标准写法被拒、非法写法被收
 
-**复现**（两种顺序，判据正好与语言相反）
+- severity: medium ｜ status: fixed ｜ related: docs/learn/34, tests/tmpl/test_tmpl_70_member_template_static.cpp, tests/tmpl/test_tmpl_71_error_virtual_member_template.cpp
+
+**现象**（两种顺序，判据正好与语言相反）
 
 ```cpp
 struct O {
@@ -1248,6 +1373,8 @@ struct O {
 标准写法在 1666 的分支进门时 `static` 还没出现，吃完 `template <…>` 后代码
 **不再前瞻**，直接 `parseMethodDecl`（`parseFunctionDecl` 的第一步是 `parseType()`）
 ⇒ 撞在 `static` 上 ⇒ `Expected type name`。
+
+**教训**
 
 ★ 原注释的理由（"`isStatic`/`isVirtual` 必须先于任何使用它们的成员分支声明"）
 说的是**变量声明顺序**，但实现把它与**语法位置**绑在了一起 ——
@@ -1282,7 +1409,7 @@ if (check(TokenType::KwVirtual) || isVirtual) {
 同批在该分支补了"**本项目只做成员函数模板**"的代码位置标注（成员类模板 /
 成员别名模板 / 静态数据成员模板一律响亮拒收，文案与现状见 docs/learn/34 §3.5）。
 
-**回归用例**：
+**回归**：
 · 集成 `tests/tmpl/test_tmpl_70_member_template_static.cpp`
   （普通类 + 类模板（B18 × B19 交叉点）+ 非 static 对照，三者都返回 0）
 · 集成 `tests/tmpl/test_tmpl_71_error_virtual_member_template.cpp`
@@ -1302,11 +1429,13 @@ if (check(TokenType::KwVirtual) || isVirtual) {
 
 ## B20. vtable 槽里的符号名与定义点不同源（带参虚函数链接失败 / 次基类假符号）
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/13, docs/learn/17, docs/learn/23, tests/unit/test_vtable_symbols.cpp, tests/mi/test_mi_12_secondary_inherited_slot.cpp, tests/lang/test_basics_03_virtual_with_params.cpp
+
 一句话：**vtable 槽里的名字是"拼"出来的，定义点的名字也是"拼"出来的，两处各拼一遍。**
 
 ### 缺陷 a：带参虚函数的槽少了 `_<形参个数>` 后缀
 
-**复现**
+**现象**
 
 ```cpp
 struct A { virtual int f(int x) { return x; } };
@@ -1335,7 +1464,7 @@ _ZTV1A:
 
 ### 缺陷 b：次基类里【未覆写】的槽被重造出一个假符号
 
-**复现**
+**现象**
 
 ```cpp
 struct A { virtual int f() { return 1; } };
@@ -1383,11 +1512,14 @@ minicc 编译 rc=0 但**运行返回 255**（静默算错）。
 `paramTypeChain`）。判据从"裸名"变成"裸名 + 形参类型" —— 即 `[class.virtual]/2` 的覆写判据
 （裸名只是查找入口，不是身份的全体）。同轮的 [B22](#b22-同名同个数的成员重载sema-静默取第一个汇编期撞符号)
 把同一条判据推进到了另外三处（符号定名 / 调用点选择 / 构造函数选定），详见该条。
+
+**教训**
+
 **这个缺陷证明了"对称不变量"不够用**：认错槽位后"谁在槽里、谁被直接调"整体互换，
 `|槽位| + |直接调用| == |定义|` 这类计数照样配平 —— 有判别力的那条是
 "经基类指针的虚调用必须退化成 `callq *%rax` 的**间接**调用"（详见 B22 的回归用例 ⑤）。
 
-### 影响面与验证
+### 回归与影响面
 
 | 项 | 结果 |
 |---|---|
@@ -1396,7 +1528,7 @@ minicc 编译 rc=0 但**运行返回 255**（静默算错）。
 | 集成 | 114 → 116（新增 `tests/mi/test_mi_12_secondary_inherited_slot.cpp`、`tests/lang/test_basics_03_virtual_with_params.cpp`） |
 | 有意日志漂移 | 无（命名结果对无参虚函数逐字未变） |
 
-**回归用例**：
+**回归**：
 
 - 单测 `tests/unit/test_vtable_symbols.cpp`（`VTableSymbols.*` 4 例，断言**不变量**：
   每条 `.quad <sym>`（`.L*`/纯数字除外）都必须有 `.globl <sym>` 定义 ——
@@ -1417,7 +1549,9 @@ minicc 编译 rc=0 但**运行返回 255**（静默算错）。
 
 ## B21. 限定名 `S::v` 访问成员数据被拒收
 
-**复现**（同一个类里两种限定名，一个通一个不通）
+- severity: medium ｜ status: fixed ｜ related: docs/learn/36, tests/lang/test_basics_09_qualified_member.cpp
+
+**现象**（同一个类里两种限定名，一个通一个不通）
 
 ```cpp
 struct S {
@@ -1459,7 +1593,7 @@ inferVar 只认裸字段名（外加"当前类"的类作用域回退），查 `"
 折叠静态常量）—— 而它在 clang 里是 **DeclRefExpr**，不是成员表达式。也就是说
 "clang 里是 MemberExpr 的形态我们收不到，我们造 MemberExpr 的形态 clang 不是"。
 
-**要修的话**：inferVar 里先把 `A::B` 按 `::` 切开，若限定者是**当前类**（或落在其基类链上）
+**修法（要修的话）**：inferVar 里先把 `A::B` 按 `::` 切开，若限定者是**当前类**（或落在其基类链上）
 则退化为"字段查找 + 隐式 this"，与 `b`（裸名走 m_currentClassName 回退）汇成同一条路；
 `self()` 那条 `this->b` 已经能跑，收口点是现成的。
 判据要按 [expr.prim.id.general]/3 写：**限定者是不是一个类型** 决定这是不是隐式成员访问
@@ -1468,14 +1602,14 @@ inferVar 只认裸字段名（外加"当前类"的类作用域回退），查 `"
 **影响面**：小（写法少见，且只是**多写**了一个限定者；去掉 `S::` 就恢复正常）。
 但属"拒收合法程序"，与 B12 同族 —— 记在这里是因为**推导分支表的边界**值得留痕。
 
-**回归用例**：暂**不加**钉住现状的用例 —— 那会把失败固化成契约
+**回归**：暂**不加**钉住现状的用例 —— 那会把失败固化成契约
 （正是 logdiff 教训：基线会把 rc=1 也固化成"契约"）。修完再补正例。
 
 **状态**：✅ 已修（2026-10 那一轮，与 B24/B25/B26/B27 同批）
 
 ---
 
-### B21 修复
+### B21 修法
 
 **改动面**（两半，缺一不可）
 
@@ -1488,6 +1622,9 @@ inferVar 只认裸字段名（外加"当前类"的类作用域回退），查 `"
 c 是本次修复的**核心判据**：写限定名的唯一用途就是绕过名字隐藏，
 而 `findField` 的三级顺序里"自身字段优先"（[class.member.lookup]/3）恰好会
 挑中派生类那一条 —— 不改这一处，程序能编译、能运行、**结果错**。
+
+**教训**
+
 同 B10 的符号回填、B13~B15 的 `declaredName`/`viaBase`：**名字是给人看的，位置才是机器要的**。
 
 `resolveQualifiedField(ownerClass, qualifier, member)` 的"归不归 Q 管"三个条件：
@@ -1510,7 +1647,7 @@ c 是本次修复的**核心判据**：写限定名的唯一用途就是绕过�
     movl 8(%rax), %eax    # 读取字段 .v（偏移 +8 字节）
 ```
 
-**回归用例**：`tests/lang/test_basics_09_qualified_member.cpp`（正例，类内 / 类外 /
+**回归**：`tests/lang/test_basics_09_qualified_member.cpp`（正例，类内 / 类外 /
 写目标三种形态 + 隐藏场景，运行 rc=0）+ 单测 `ArgBinding.QualifiedMemberPicksTheBaseSubobject`
 （断言"两条偏移必须不同且基类在前"，**突变验证**：去掉回填 ⇒ 该例当场变红）。
 文档：docs/learn/36 §4（clang 的 AST 对照见 §4.2）。
@@ -1522,7 +1659,9 @@ c 是本次修复的**核心判据**：写限定名的唯一用途就是绕过�
 
 ## B22. 同名同个数的成员重载：Sema 静默取第一个、汇编期撞符号
 
-**复现**（一个类里两个同名、同个数、不同类型的成员方法）
+- severity: high ｜ status: fixed ｜ related: docs/learn/13, docs/learn/36, tests/unit/test_member_identity.cpp, tests/lang/test_basics_04_member_overload_same_arity.cpp, tests/mi/test_mi_13_virtual_overload_slots.cpp
+
+**现象**（一个类里两个同名、同个数、不同类型的成员方法）
 
 ```cpp
 struct S { public: int v; };
@@ -1560,7 +1699,7 @@ int main() { C c; S s; s.v = 0; return c.f(1) + c.f(s) - 3; }   // clang: rc=0
 | **成员方法** | **名字 + 个数** | 粗（本条，已修） |
 | vtable 槽认领 | **只有裸名** | 最粗（[B20](#b20-vtable-槽里的符号名与定义点不同源带参虚函数链接失败--次基类假符号) 缺陷 c，**已是静默算错**，已修） |
 
-### 修复：一条判据，四处落点
+### 修法：一条判据，四处落点
 
 "身份 = 名字 + 形参类型"这条判据在这份实现里有**四个落点**，本轮把它们全部收口：
 
@@ -1582,7 +1721,7 @@ int main() { C c; S s; s.v = 0; return c.f(1) + c.f(s) - 3; }   // clang: rc=0
 且声明是 `Decl*` 句柄（查找/匹配/发射天然同一个东西）。minicc 没有句柄，
 只能用"字符串做键"，所以必须靠**收口到同一个函数**来达到同等效果。
 
-### 影响面与验证
+### 回归与影响面
 
 | 项 | 结果 |
 |---|---|
@@ -1591,7 +1730,7 @@ int main() { C c; S s; s.v = 0; return c.f(1) + c.f(s) - 3; }   // clang: rc=0
 | 集成 | 116 → 118（新增 `tests/lang/test_basics_04_member_overload_same_arity.cpp`、`tests/mi/test_mi_13_virtual_overload_slots.cpp`） |
 | 有意日志漂移 | 无 |
 
-**回归用例**：
+**回归**：
 
 - 集成 `tests/lang/test_basics_04_member_overload_same_arity.cpp`
   （`f(int)`/`f(S)`、三元混排 `g(int,int)`/`g(int,S)`/`g(S,int)`、构造函数 `D(int)`/`D(S)`；运行 rc=0）
@@ -1607,6 +1746,8 @@ int main() { C c; S s; s.v = 0; return c.f(1) + c.f(s) - 3; }   // clang: rc=0
 | ② 槽位匹配回退到裸名（删 `entry.signature == selfSignature`） | 2 / 6 红（`NonVirtualOverloadDoesNotOccupyVTableSlot`、`VirtualCallOnPointerStaysVirtual`）集成侧：`test_mi_13` 编译 rc=0 但**运行 rc=4** |
 | ④ 构造函数选定回退到按个数（`ctors.front()`） | 2 / 6 红 |
 
+**教训**
+
 ★ **② 的教训（值得单独记）**：第一版单测只断言了"槽里只有一个符号"和"派生类槽数不变"，
 **突变验证时全绿** —— 因为认错槽位后"谁在槽里、谁被直接调"会**整体互换**，计数照样配平。
 真正有判别力的是**不对称**的那条：经基类指针的虚调用必须是 `callq *%rax` 间接调用
@@ -1619,7 +1760,9 @@ int main() { C c; S s; s.v = 0; return c.f(1) + c.f(s) - 3; }   // clang: rc=0
 
 ## B23. 浮点：字面量缺失 + 运算按整数发射
 
-**复现**
+- severity: high ｜ status: open ｜ related: docs/learn/23, docs/learn/35, docs/learn/39
+
+**现象**
 
 ```cpp
 int main() { double d = 1.5; return 0; }                            // 缺陷 a
@@ -1651,11 +1794,19 @@ int main() { double a = 1; double b = 2; double c = a / b;
 **类型**是通的 —— `double g(double x) { return x + 1; }` + `double d = 1;`（int → double
 走 [conv.fpint]）编译运行 rc=0。**缺的是字面量与运算**，不是类型。
 
-**要修的话**：a 在 Lexer 认小数点/指数/`f` 后缀，Parser 给出 `double`（要不要连 `float`
+**修法（要修的话）**：a 在 Lexer 认小数点/指数/`f` 后缀，Parser 给出 `double`（要不要连 `float`
 一起补需先定 CodeGen 的浮点宽度分派）；b 要引入 SSE 寄存器与指令（`movsd`/`addsd`/`divsd`、
 调用约定里 xmm0 传参）—— 是**一条独立主线**，不是顺手项。
 
 **状态**：⬜ 未修（a、b 都未修）
+
+**回归**
+
+（无）
+
+**教训**
+
+（无）
 
 ---
 
@@ -1692,6 +1843,10 @@ clang 那边这两种东西从设计上就是分开的：成员是 `FieldDecl*`�
 
 ## B24. 成员方法的**名字隐藏**：派生类一声明同名方法，基类整族应被隐藏
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/36, tests/lang/test_basics_07_member_call_arity_error.cpp, tests/mi/test_mi_13_virtual_overload_slots.cpp
+
+**现象**
+
 **来源**：本轮写 `tests/mi/test_mi_13_virtual_overload_slots.cpp` 时被 clang oracle 当场抓住 ——
 用例里原本有一句 `d.f(2)`（`d` 是 `Derived`，`f(int)` 只在 `Base` 里），clang 直接拒收：
 
@@ -1711,21 +1866,21 @@ error: too many arguments to function call, expected 0, have 1; did you mean 'Ba
 于是它把被隐藏的那一族也捞了出来 —— 又是"身份比裸名宽"的老毛病，
 只是这次宽的方向是**该藏没藏**（B20 缺陷 c / B22 是**该分没分**）。
 
-**修法（未做）**：隐藏判据要按名字的**作用域**判，而不是按签名 ——
+**修法**（未做）：隐藏判据要按名字的**作用域**判，而不是按签名 ——
 先查派生类里这个名字有没有**任何**声明（`decl->methods` 里 `name` 相等即算），
 有 ⇒ 基类整族不参与候选；没有 ⇒ 才往基类走。
 注意这与 B22 的"候选集 + 择优"是**两个正交的筛选**：
 隐藏先砍掉一整族（按名字），重载决议再从中择优（按类型）。
 
 **影响面**：小（接受非法程序；不产生错误代码，但把 clang 会拒收的程序放行了）。
-**回归用例**：本轮**不加**（不把失败固化成契约，同 B21/B22 的处理）。
+**回归**：本轮**不加**（不把失败固化成契约，同 B21/B22 的处理）。
 `tests/mi/test_mi_13_*.cpp` 的文件头已记下这条边界与"为什么用例绕开了它"。
 
 **状态**：✅ 已修（2026-10 那一轮，与 B21/B25/B26/B27 同批）
 
 ---
 
-### B24 修复
+### B24 修法
 
 **修法**：不改 `findMethodInHierarchy`（它服务的是字段/方法**访问**那条通路，不看实参），
 而是在 `inferCall` 的成员查找 BFS 里补上"**查到名字就下结论**"：
@@ -1749,7 +1904,7 @@ error: too many arguments to function call, expected 0, have 1; did you mean 'Ba
 **与 B25 的关系**：本条与 B25 的 ① 是**同一处代码**（同一个 BFS 里"落空之后去哪儿"），
 方向相反（该藏没藏 / 该报没报），故**同一批修**。B25 的修复见下。
 
-**回归用例**：`tests/lang/test_basics_07_member_call_arity_error.cpp`（rc=1）
+**回归**：`tests/lang/test_basics_07_member_call_arity_error.cpp`（rc=1）
 + 单测 `ArgBinding.NameHidingStopsBaseLookup`（含"不声明同名成员时基类的 f 照常可见"的对照组）。
 **突变验证**：把"查到名字就下结论"整块停掉 ⇒ 该例与 `NoViableOverloadIsAnError` 两条齐红。
 
@@ -1757,6 +1912,9 @@ error: too many arguments to function call, expected 0, have 1; did you mean 'Ba
 `tests/unit/test_member_identity.cpp` 的 `DerivedOverrideKeepsSlotCount` **当场变红** ——
 那个用例里写着 `d.f(2)`（`f(int)` 只在基类），clang 同样 rc=1，minicc 此前 rc=0 所以"通过"。
 已改成经基类指针的 `p->f(2)`，并在文件里写下缘由。
+
+**教训**
+
 ★ 这是本项目**第三次**踩"基线把失败固化成契约"（前两次：`tests/mi/test_mi_04_error.cpp`、
 `tests/pp/test_pp_01_include.cpp`）。**写用例前先用 clang 过一遍"这程序真的合法吗"。**
 
@@ -1764,10 +1922,12 @@ error: too many arguments to function call, expected 0, have 1; did you mean 'Ba
 
 ## B25. 成员调用实参个数不匹配无人认领：一条静默接受、一条只剩链接器
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/36, tests/lang/test_basics_07_member_call_arity_error.cpp
+
 **来源**：读 `inferCall` 的成员分支时问"3562 那一行到底报不报错"。不报 —— 而且
 **这条错全项目没有任何一处报**（本条的四个形态全部实测）。
 
-**复现**
+**现象**
 
 ```cpp
 // a：少传
@@ -1818,18 +1978,18 @@ struct C { int f(int x) { return x; } };   int main() { C c; return c.nope(1); }
 没当**判据**用 —— 筛空了也推不出"无可行候选"这个结论。对照 clang：
 `Sema::CheckFunctionCall` 在 BuildResolvedCallExpr 之前就把 too few / too many 报在**调用点**。
 
-**要修的话**：② 落空且 `objType` 确为类时收口报错，文案对齐 clang
+**修法（要修的话）**：② 落空且 `objType` 确为类时收口报错，文案对齐 clang
 （`too few/too many arguments`），个数判据与 `memberMethodSymbolName` 同源；
 ③ 那条 `keep searching` 在候选耗尽时也应有个收尾。
 
 **影响面**：中（b 为**静默接受非法程序**；a/c 的报错点落在链接器，指向不到根因）。
-**回归用例**：暂不加（同 [B21](#b21-限定名-sv-访问成员数据被拒收)，不把失败固化成契约）。
+**回归**：暂不加（同 [B21](#b21-限定名-sv-访问成员数据被拒收)，不把失败固化成契约）。
 
 **状态**：✅ 已修（2026-10 那一轮，与 B21/B24/B26/B27 同批）
 
 ---
 
-### B25 修复
+### B25 修法
 
 **修法**：把"个数"从**筛选器**提升为**判据** —— 与 B24 同一处代码（`inferCall` 成员查找 BFS
 的"查到名字就下结论"分支），按"本类为这个名字声明过哪些参数个数"的区间 `[lo, hi]` 决定文案：
@@ -1841,6 +2001,8 @@ struct C { int f(int x) { return x; } };   int main() { C c; return c.nope(1); }
 | `have > hi`，`hi == 1` | `too many arguments to function call, expected single argument 'x', have {n} arguments` | 同上 |
 | `have > hi` | `too many arguments to function call, expected {hi}, have {have}` | 同上 |
 | `lo ≤ have ≤ hi` | `no matching member function for call to 'f' in class 'C' (…)` | [overload.match]/1 |
+
+**教训**
 
 ★ **两种句式不是装饰**：个数不符与类型不符是两类诊断（clang 的 `CheckFunctionCall`
 就分开报），而"个数落在区间内"恰恰说明**个数过滤这一层拦不住**、淘汰它的是类型 ——
@@ -1858,7 +2020,7 @@ e2.cpp:2:30: error: too many arguments to function call, expected 0, have 2
 
 d 形态（名字不存在）仍报原有的 `No member 'nope' in class 'C'`（未受影响）。
 
-**回归用例**：`tests/lang/test_basics_07_member_call_arity_error.cpp`（个数区外，rc=1，
+**回归**：`tests/lang/test_basics_07_member_call_arity_error.cpp`（个数区外，rc=1，
 文件头记下"为什么不是笼统的 no matching"）；单测 `ArgBinding.NoViableOverloadIsAnError`
 （个数**在**区内、类型不可行那一支）。
 
@@ -1868,10 +2030,12 @@ d 形态（名字不存在）仍报原有的 `No member 'nope' in class 'C'`（�
 
 ## B26. 引用绑定判据只写了模板那一半
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/23, docs/learn/36, tests/lang/test_basics_05_reference_binding.cpp, tests/lang/test_basics_06_rvalue_ref_binds_lvalue_error.cpp, tests/tmpl/test_tmpl_72_concrete_ref_param.cpp
+
 **来源**：查 `src/template_deduction.cpp:123` 的"参数匹配"分支时反查了一个问题 ——
 "非模板调用在哪里做同样的事？"答案：**哪里都没有**。
 
-**复现**（两条方向相反，都是同一个判据缺一半的后果）
+**现象**（两条方向相反，都是同一个判据缺一半的后果）
 
 ```cpp
 // a：const T& 拒右值 —— 拒收合法程序
@@ -1910,6 +2074,9 @@ docs/learn/23 之后：const T& 建成 LRef(Const(T))     → 剥 const 的分�
 
 `deducePair` 里那句注释（"本项目 parseType 把 `const T&` 建成 `Const(LRef(T))`"）
 在 cv 位置修正之后就**已经过时**了 —— 判据没跟着改。
+
+**教训**
+
 **cv 位置一改，所有"按旧形态看类型"的地方都要跟着看一遍**：这正是 B17
 （值位实参要求形态精确相等）同一轮埋下的第二颗雷。修法是让判据去问
 `referencedType->isConst()`，而不是假设 const 在外面。
@@ -1932,7 +2099,7 @@ docs/learn/23 之后：const T& 建成 LRef(Const(T))     → 剥 const 的分�
 第一版只写了"变量 / 成员访问"，会让 `void g(int&); g(*p);` 被误拒 ——
 **半份判据会造出反方向的缺陷**。
 
-**回归用例**：`tests/lang/test_basics_05_reference_binding.cpp`（正例，运行 rc=0）+
+**回归**：`tests/lang/test_basics_05_reference_binding.cpp`（正例，运行 rc=0）+
 `tests/lang/test_basics_06_rvalue_ref_binds_lvalue_error.cpp`（rc=1，文案含标准推导链）
 + 单测 `ArgBinding.ReferenceBindingFollowsValueCategory`（六条：三种引用形态 × 左右值，
 外加 `f(*p)` 与 `f(5)` 两条边界）。**突变验证**：把 `referenceBindsValueCategory`
@@ -1948,7 +2115,7 @@ docs/learn/23 之后：const T& 建成 LRef(Const(T))     → 剥 const 的分�
 实参也是 `<int&>` 的是不是匹配不上"。实测——**能**（模板形参位），但【具体 P】
 **不能**。又是"侥幸活着"掩盖缺陷的现场。
 
-**复现**
+**现象**
 
 ```cpp
 // P = int&（具体类型，不含模板形参），实参是 int& 变量
@@ -1984,7 +2151,7 @@ clang 同款 `T := int`）。`structuralMatch` 守卫与 T&& 分支跳过万能�
 **同一个守卫、同一个理由**。`deducePair` 的 A 形参因此从 `const TypePtr&`
 改为**按值** `TypePtr`（入口要改绑，const& 改不了）。
 
-**回归用例**：`tests/tmpl/test_tmpl_72_concrete_ref_param.cpp`（①具体 P=int& +
+**回归**：`tests/tmpl/test_tmpl_72_concrete_ref_param.cpp`（①具体 P=int& +
 ②T&/T 共享 T + ③右值引用变量作左值实参，运行 rc=0，clang 同 rc=0）。
 **突变验证**：整块删掉剥壳 ⇒ 72 当场 rc=1（logdiff 红出 rc 差异）。
 ★ 突变验证时**必须 `./build.sh` 重编 minicc** —— `cmake --build unit_tests`
@@ -1997,11 +2164,13 @@ clang 同款 `T := int`）。`structuralMatch` 守卫与 T&& 分支跳过万能�
 
 ## B27. 无可行候选时静默退回候选集首个
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/36, tests/lang/test_basics_08_member_overload_no_viable_error.cpp
+
 **来源**：B22 那一轮写的 `pickBestByArgs`（候选集 → 最优）里，第③档是
 "退回声明序首个"。当时只是为了不让既有调用点崩（`candidates.front()`），
 但它把"**判不了**"与"**判出来没人行**"混成了同一件事。
 
-**复现**
+**现象**
 
 ```cpp
 struct S { public: int v; };
@@ -2035,21 +2204,25 @@ int main() { C c; int a = 1; int* p = &a; return c.f(p); }
 ② 候选只有一个时**不打日志**（绝大多数调用无重载，打出来会把日志淹掉 ——
 与 B22"符号名的类型链只在有同名同个数兄弟时才挂"同一条零漂移策略）。
 
-**回归用例**：`tests/lang/test_basics_08_member_overload_no_viable_error.cpp`（rc=1）
+**回归**：`tests/lang/test_basics_08_member_overload_no_viable_error.cpp`（rc=1）
 + 单测 `ArgBinding.NoViableOverloadIsAnError`。**突变验证**：把 ③ 改回
 `return candidates.front();` ⇒ 该例当场变红。
 
 **文档**：docs/learn/36 §2.2。
 
+**教训**
 
+（无）
 ## B28. 偏特化匹配误用调用推导的剥壳规则（structuralMatch 的另一半）
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/19, docs/learn/21, tests/tmpl/test_tmpl_73_partial_spec_ref_args.cpp
 
 **来源**：排查 B26 追补时顺带核对 `matchPattern` 的 structuralMatch 路径，
 发现**调用推导的两条"剥壳"规则没有随 structuralMatch 一起关**：
 `deducePair` 的引用分支递归时把 A（模板实参，**可以**是引用类型）原样传下去、
 裸形参位的"值传递调整"无条件剥顶层引用/const。
 
-**复现**（两个文件，四种错法）
+**现象**（两个文件，四种错法）
 
 | 程序 | minicc（修前） | clang++-18 `-std=c++20` |
 |---|---|---|
@@ -2073,7 +2246,7 @@ int main() { C c; int a = 1; int* p = &a; return c.f(p); }
 ③ 裸形参位：值传递调整整段收进 `if (!structuralMatch)` ⇒ 绑定原样实参类型
    （`Same<T,T>` 配 `<int&,int&>` ⇒ T := int&；配 `<int&,int>` ⇒ 冲突拒候选）。
 
-**回归用例**：`tests/tmpl/test_tmpl_73_partial_spec_ref_args.cpp`
+**回归**：`tests/tmpl/test_tmpl_73_partial_spec_ref_args.cpp`
 （5 实例组合，返回 0；与 clang 逐一核对）。**突变验证 2 条**：
 MUT-1 对称剥壳回退 ⇒ 运行 235（红）；MUT-2 调整恢复无条件 ⇒ 运行 64（红）。
 
@@ -2083,13 +2256,18 @@ MUT-1 对称剥壳回退 ⇒ 运行 235（红）；MUT-2 调整恢复无条件 �
 
 **文档**：tests/tmpl/test_tmpl_73 文件头（理论点全列）。
 
+**教训**
+
+（无）
 ## B29. 全局/命名空间内的类型别名存了未实例化模板 id + 裸名（两处都是"没做完"）
+
+- severity: medium ｜ status: fixed ｜ related: docs/learn/24, docs/learn/43, tests/decl/test_decl_03_global_alias.cpp
 
 **来源**：排查"`using IntBox = Box<int>;` 能不能用"时发现的旧缺口 ——
 此前唯一被测过的别名形态是**类内**别名（learn/24 的三条查找路径全在类作用域），
 全局与命名空间形态从没进过用例。
 
-**复现**（修复前）
+**现象**（修复前）
 
 | 程序 | minicc（修前） | clang++-18 |
 |---|---|---|
@@ -2112,8 +2290,11 @@ MUT-1 对称剥壳回退 ⇒ 运行 235（红）；MUT-2 调整恢复无条件 �
 别名模板在此**解糖**（复用既有路径，一行新机制都没造），之后所有使用点
 拿到的都是成品类型；注册名加命名空间前缀，与类/函数同约定。
 
-**回归用例**：`tests/decl/test_decl_03_global_alias.cpp`
+**回归**：`tests/decl/test_decl_03_global_alias.cpp`
 （using/typedef/命名空间前缀三个形态，运行钉 0）。
+
+**教训**
+
 修复前该类组合**没有任何用例覆盖**（别名全测在类内）——修复后
 既有用例逐字节零漂移。
 
@@ -2121,13 +2302,15 @@ MUT-1 对称剥壳回退 ⇒ 运行 235（红）；MUT-2 调整恢复无条件 �
 
 ## B30. 表达式级构造调用 `Box<int>(7)` 无路可走 + 平凡拷贝/类赋值静默算错
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/43, tests/lang/test_basics_11_ctor_expr.cpp, tests/lang/test_basics_12_ctor_expr_error.cpp
+
 **来源**：追问"inferVar 能不能支持 `x = Box<int>;` 这种"时确认的两组缺口：
 Parser 一直能建出 `CallExpr(VarExpr(Box)+显式模板实参)`，但语义层
 inferCall 四路（成员/自由函数/函数模板/回退）全不接类模板构造 ⇒
 落到回退 `inferType(VarExpr(Box))` ⇒ `Undefined variable 'Box'`；
 继续探下去发现**相邻的三个伴随 bug**。
 
-**复现**（修复前）
+**现象**（修复前）
 
 | 程序 | minicc（修前） | clang++-18 |
 |---|---|---|
@@ -2157,6 +2340,8 @@ inferCall 四路（成员/自由函数/函数模板/回退）全不接类模板�
 ④ 伴随三（**克隆丢槽**）：cloneStmt(VarDeclStmt) 漏搬 `ctorArgs` ——
    顶层 `Box<int> b(7);` 正常，模板体内同名写法构造实参**整体丢失**。
 
+**修法**
+
 **★ 实现期踩的两个坑**（写进判据）：
 - **析构时机**：visit(CallExpr) 若对构造临时对象无条件发析构，
   `b = Box<int>(9);` 会 memcpy **已析构**的源 —— 用 `m_suppressTempDtor`
@@ -2166,7 +2351,7 @@ inferCall 四路（成员/自由函数/函数模板/回退）全不接类模板�
   memcpy 只是**原型** —— 对象复制一律 `rep movsb` 内联展开，没有
   `callq memcpy` 可绑。
 
-**回归用例**：`tests/lang/test_basics_11_ctor_expr.cpp`（6 检查点：
+**回归**：`tests/lang/test_basics_11_ctor_expr.cpp`（6 检查点：
 拷贝省略升级 / auto+构造表达式 / 类赋值 RHS 临时 / CTAD / 平凡拷贝 /
 合成拷贝赋值，运行钉 0）+ `tests/lang/test_basics_12_ctor_expr_error.cpp`
 （负例：`Box<int> b = Box<double>(7);` ⇒ rc=1
@@ -2177,16 +2362,22 @@ inferCall 四路（成员/自由函数/函数模板/回退）全不接类模板�
 
 **文档**：docs/learn/43 §2。
 
+**教训**
+
+（无）
+
 <<<<<<< HEAD
 ---
 
 ## B31. 模板-id 试探把 `a<b>(c)` 误判为模板调用（拒收合法程序）
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/45, docs/learn/46, tests/lang/test_basics_20_template_id_disambiguation.cpp
+
 **来源**：复查 `parsePrimaryExpr` 的 template-id 歧义消解（parser.cpp:2989 起
 "试探法三步曲"）时确认。这轮代码审查顺带核对出三个**无问题**项（`>>` 不切 token、
 `m_stopAtGreater` 有 save/restore、表达式分支异常即回滚）—— 但判据本身有方向性分歧。
 
-**复现**
+**现象**
 
 ```cpp
 int main() {
@@ -2209,11 +2400,13 @@ int main() {
 只能看紧跟的 token 下注。`x<y>(z)` 全变量的写法现实中罕见
 （需要三个短名字恰好凑成这个形状），所以一直没炸。
 
-**要修的话**：Parser 持一份**只读的"模板名登记表"**（类模板/别名模板/函数模板名，
+**修法（要修的话）**：Parser 持一份**只读的"模板名登记表"**（类模板/别名模板/函数模板名，
 Pass 1 前向收集或 Lexer 期建），消歧时先查表：名字在表中 ⇒ template-id；
 不在 ⇒ 比较运算。不动 Sema 分层（登记表只是语法期的消歧 hint，不做决议）。
 注意与 docs/learn/39 §"刻意不收 Less/Greater"的判据协同，别把 `>` 收进
 `isExprContinuation`（tmpl 21..26 会全线漂移）。
+
+**教训**
 
 **正确的写法**（clang 的做法，也是生产方式）：
 
@@ -2245,6 +2438,9 @@ Sema 内建的 `std::declval` 以种子名单收入 —— 它不经 token 流�
 test_tmpl_35..39 的 `decltype(std::declval<T>()...)` 当场被消歧成比较链），
 消歧第一层闸 = `check(Less) && isKnownTemplateName(name)`；不在表 ⇒ 不试探
 直接按比较解析。在表仍走 B32 的试探-回滚（变量可遮蔽模板名，方向保守）。
+
+**回归**
+
 回归红线：`a<b>(c)` rc=0 与 clang 一致（tests/lang/test_basics_20），
 既有 150 份日志基线零漂移（`>` 未进 `isExprContinuation`，与 learn/39 判据协同）。
 突变验证：摘掉闸 ⇒ 新测试退回链接期 `undefined reference to 'a'`（rc=1），
@@ -2256,10 +2452,12 @@ test_tmpl_35..39 的 `decltype(std::declval<T>()...)` 当场被消歧成比较�
 
 ## B32. 模板-id 试探回滚只撤 `m_pos`，不撤日志（幽灵 `[parse:targ]` 行）✅ 已修
 
+- severity: low ｜ status: fixed ｜ related: docs/learn/45, docs/learn/39, tests/lang/test_basics_19_tentative_rollback.cpp
+
 **来源**：与 B31 同轮代码审查。B31 是判据错，本条是**机制漏**：试探-回滚的
 清理只做了一半。
 
-**复现**
+**现象**
 
 ```cpp
 class Box { public: int v; };
@@ -2286,11 +2484,13 @@ int main() {
 内部到处 `std::cout` 直接打点（698~807 行共 5+ 处），没有"静默模式"概念；
 试探期间产生的输出没有任何缓冲/抑制机制。
 
-**要修的话**：给 Parser 加一个**静默深度计数器**（`m_quietDepth`）：
+**修法（要修的话）**：给 Parser 加一个**静默深度计数器**（`m_quietDepth`）：
 试探三步曲入口 `++m_quietDepth`、出口 `--m_quietDepth`；
 所有 `[parse:targ]` / `[parse]` 打点处包一层 `if (m_quietDepth == 0)`。
 （把日志收口成一个小宏/辅助函数，避免 5 处散落判断日后漏改。）
 不改 `parseIntLiteral` 的刻意不打日志约定（learn/39）。
+
+**教训**
 
 **正确的写法**（两条生产惯例，缺一不可）：
 
@@ -2350,7 +2550,7 @@ public:
   （"'a' does not name a template but is followed by template arguments"）——
   minicc 宽松放行；等 B31 的模板名登记表落地后再裁这条分歧。
 
-**回归用例**：`tests/lang/test_basics_19_tentative_rollback.cpp`（合法形态：
+**回归**：`tests/lang/test_basics_19_tentative_rollback.cpp`（合法形态：
   循环条件 NTTP 试探 + 连续比较链；断言在日志——基线不得出现 [parse:targ]/
   [parse:type] 试探残留；运行钉 0，clang 对拍一致）。
 
@@ -2368,12 +2568,14 @@ public:
 
 ## B33. static 数据成员整体缺失：Parser 硬性拒收 + 无存储模型
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/44, tests/lang/test_basics_13_static_member.cpp
+
 **来源**：追问"`Other::s` 这种静态字段怎么访问"时确认 ——
 类体内 `static int count;` 直接在 Parser 报
 "static data members are not implemented (only static member functions are)"
 （**拒收合法程序**），整条 [class.static.data] 没有实现。
 
-**复现**（修复前）
+**现象**（修复前）
 
 | 程序 | minicc（修前） | clang++-18 |
 |---|---|---|
@@ -2382,7 +2584,11 @@ public:
 | 成员函数内裸名 `return count + limit;` | ❌ 同上 | ✅ rc=0 |
 | 模板类 `C<int>::cid` | ❌ 同上 | ✅ rc=0 |
 
-**设计**（不是 bug 修复而是特性落地，但按本仓惯例记此）：
+**根因**
+
+（无）
+
+**修法（设计）**（不是 bug 修复而是特性落地，但按本仓惯例记此）：
 ① **存储模型**：static 成员不属于对象（sizeof 不含它）= "挂在类名上的
    全局变量"。类内只是【声明】；非 const 成员的存储只能来自类外定义
    （`int A::count = 3;` ⇒ 全局符号 `A::count`，asmSymbol 净化为
@@ -2419,7 +2625,7 @@ public:
    cloneExpr）替换后挂到实例类 —— 实例经 processClassDecl 自然完成
    常量表/符号注册，与 C++ 语义一致（蓝图不过 processClassDecl）。
 
-**回归用例**：`tests/lang/test_basics_13_static_member.cpp`（正例 13
+**回归**：`tests/lang/test_basics_13_static_member.cpp`（正例 13
 检查点：三入口同存储读写 / 成员函数裸名 / const 三路径折叠 / 继承 +
 实例字段隐藏 / 命名空间类多级限定 / 模板类 / NTTP 实参，运行钉 0，
 clang 对拍一致）+ 5 个负例（basics_14..18：out of line 初始化 /
@@ -2431,13 +2637,21 @@ no member named / redefinition / not a class / different type，
 
 **文档**：docs/learn/44。
 
+**教训**
+
+（无）
+
 ---
 
 ## B34. const 类对象端到端缺失：成员访问误报 + 掉标量路径 SIGSEGV + 拷贝静默退化 ✅ 已修
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/31, tests/lang/test_basics_21_const_class_object.cpp
+
 **来源**：追问"`const int` / `const ClassA` 语句声明走 parser.cpp 哪个分支"时
 顺藤摸到的**一族**缺陷 —— `const Box_int b;` 的声明类型是 Const(Box_int)，
 Sema/CodeGen 的类性判定（查类表 / `isClass()`）全部不看穿这层 Const 包壳。
+
+**现象**
 
 **三种错法三种症状**（同一句 `const ClassA a = tmp; return a.v;`）：
 
@@ -2446,6 +2660,8 @@ Sema/CodeGen 的类性判定（查类表 / `isClass()`）全部不看穿这层 C
 | ① | Sema `inferMember`（semantic_analyzer.cpp:5660 一带） | 只剥引用不剥 const ⇒ `Cannot access member 'v' on non-class type 'const ClassA'`，rc=1 | **拒收合法程序**（clang rc=0） |
 | ② | CodeGen `visit(VarDeclStmt)`（codegen.cpp:1279 一带） | `m_classTypes->find("const Box_int")` 落空 ⇒ const 类对象掉标量路径：无 RAII 构造/析构，读成员被当"变量存指针再解引用" | **miscompile，实测 SIGSEGV（rc=139）** |
 | ③ | Sema 平凡拷贝判据 `type->equals(initType)`（semantic_analyzer.cpp:3259 一带） | const 目标与裸源类型 equals 不成立 ⇒ 拷贝初始化静默退化成默认构造，`a.v` 读出 0 | **静默算错**（返回 251 而非 0） |
+
+**根因**
 
 ★ ②的 segv 现场被 ①的报错**挡住**了——修掉 ① 才暴露 ②，再修掉 ② 才暴露 ③。
 一层 const 包壳，三层各自独立写错的判据。
@@ -2458,12 +2674,15 @@ Sema/CodeGen 的类性判定（查类表 / `isClass()`）全部不看穿这层 C
 - Sema 加 `bareForClass` 同型 lambda，应用于构造调用升级（拷贝省略）、
   平凡拷贝、直接初始化选构造三处；
 - `inferMember` 引用剥除后补 const 剥除。
+
+**教训**
+
 ★ 只服务类性判定：标量宽度分派、日志、符号表存的原 type 全部不动 —
 — 非 const 程序汇编逐字节不变。const 只管写检查（minicc 未做，ROADMAP
 ⑥ 已列），故剥壳无语义损失；成员【查找】本就不受对象 cv 影响
 （[class.mfct.non-static]）。
 
-**回归用例**：`tests/lang/test_basics_21_const_class_object.cpp`（const int
+**回归**：`tests/lang/test_basics_21_const_class_object.cpp`（const int
 语句声明 / const 默认构造 + const 成员函数 / const 源→const 目标平凡拷贝 /
 const 带参构造 / const 模板类，运行钉 0，clang 对拍）。
 **突变验证**：摘 VarDeclStmt 剥壳 ⇒ rc=139（segv 现场复现），恢复 ⇒ rc=0。
@@ -2483,12 +2702,14 @@ movl 路径；rc/运行输出逐字节不变，基线已重刷。这也回答了
 
 ## B35. 语句层前瞻只认固定 token 顺序：限定名模板 id 与全变量比较链双双被拒收
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/22, docs/learn/47, tests/lang/test_basics_22_stmt_ambig_tentative_parsetype.cpp
+
 **来源**：复盘 parseStatement 2245 前瞻分支（B31/B34 两次会话都路过它）时
 确认。该分支是 [stmt.ambig] 的语句层实现：标识符开头既可能是 `MyClass obj;`
 （声明）也可能是 `foo(x);` / `a = 3;`（表达式），LL(1) 判不了，用"跳过
 `名 [<...>] [::]* [*&]*` 后看下一个是不是标识符"的启发式下注。
 
-**复现**
+**现象**
 
 ```cpp
 namespace N { template<class T> struct B { T v; }; }
@@ -2516,7 +2737,7 @@ token 顺序（`名 <...> :: ...`——`名 :: ... <...>` 就漏）。token.h:23
 RAII + 日志缓冲，B31 落地了模板名登记表——改写所需的机制都已就位，
 缺的只是动手。
 
-**要修的话**（对照 clang TryAnnotateTypeToken + tentative parse）：
+**修法（要修的话）**（对照 clang TryAnnotateTypeToken + tentative parse）：
 
 1. **试探 parseType 取代手写跳过人**：TokenCheckpoint 存档 → parseType()
    通用解析（限定名/模板 id/嵌套/typename/const 全收）→ 成功且后跟
@@ -2554,7 +2775,7 @@ RAII + 日志缓冲，B31 落地了模板名登记表——改写所需的机制
    `N::B<int>` 与 `B<int>` 归一到同一实例 B_int，缓存键不变）。
    ★ 宽方向：`N::B` 真不存在而全局有 B 时会误绑，记边界。
 
-**回归用例**：`tests/lang/test_basics_22_stmt_ambig_tentative_parsetype.cpp`
+**回归**：`tests/lang/test_basics_22_stmt_ambig_tentative_parsetype.cpp`
 （N::B<Box> y; 语句层声明 + a<b>c 比较链 + 普通类/模板 id/引用/平凡拷贝
 回归，rc=0 与 clang 对拍）。**突变验证 2 条**：摘语句层登记表闸 ⇒
 `a<b>c` 退回误判声明（原文案复现）；摘 Sema 限定名归一 ⇒ `N::B` unknown
@@ -2568,14 +2789,19 @@ ctest 346 全绿，build 0 警告。
 parseDeclaration（~890）两处试探仍各自手写（CLAUDE.md B32 批次登记的
 "[parse:type] 成对重复"），单独成批再收。
 
+**教训**
+
+（无）
 ## B36. 限定模板名 `N::B<...>` 误绑全局模板 B（Sema 尾剥无作用域裁决）
+
+- severity: high ｜ status: fixed ｜ related: docs/learn/47, tests/lang/test_basics_24_name_registry_negative.cpp, tests/unit/test_name_registry.cpp
 
 **来源**：「parser 阶段实现类似 clang 的语义识别」需求的缺口盘点
 （docs/specs / docs/designs/parser-stage-name-recognition，2026-10-23 签字）。
 B35 修语句层时给 resolveType 补的限定名归一是**裸尾剥**：取 `::` 末段
 查【全局】蓝图表——N::B 真存在时语义正确，真不存在时有洞。
 
-**复现**
+**现象**
 
 ```cpp
 template<class T> struct B { T w; };   // 全局模板 B（陷阱）
@@ -2611,7 +2837,7 @@ src/name_registry.cpp：`NameClassification` 对齐 clang NameClassification
 （spec 拍板 2：判据单点，红线 3）。单测路径 setNameRegistry 未注入时
 维持 B35 近似（兼容缺省）。
 
-**回归用例**：
+**回归**：
 - `tests/lang/test_basics_23_name_registry.cpp`（正例：裸 S; 判声明 +
   同名跨类声明优先 + typedef 名 + M::B<int> 归一，rc=0 与 clang 对拍）
 - `tests/lang/test_basics_24_name_registry_negative.cpp`（本条的复现，
@@ -2627,6 +2853,8 @@ src/name_registry.cpp：`NameClassification` 对齐 clang NameClassification
   自 B35 起因过时误导排查）。
 - 新增 basics_23/24 两份日志入列。
 
+**教训**
+
 **附带修复**：test_expr_parser 的 ExprParserTemplateId 套件自 B31 起
 其实**一直未真正通过**——B31 加了登记表第一层闸，而该套件的 snippet
 （`return foo<int>(x);`）从未声明过 foo；当时 ctest 跑的是**陈旧
@@ -2639,11 +2867,13 @@ unit_tests 二进制**，绿色是假象（与 logdiff「基线会把失败固�
 
 ## B37. 裸类型名声明的可见性无人裁决：非法程序静默通过（判据答错了问题）
 
+- severity: medium ｜ status: fixed ｜ related: docs/learn/48, tests/lang/test_basics_26_bare_type_name_namespace_not_visible_error.cpp, tests/unit/test_name_visibility.cpp
+
 **来源**：用户提问「对于嵌套类呢，感觉有问题，比如 A 里面有个 B，外面在有一个 B」
 引出的实测（docs/learn/48 §1）。起点是"嵌套类在 minicc 里压根不支持"，
 但顺着查下去发现同一族的问题**今天就能触发**。
 
-**复现**
+**现象**
 
 ```cpp
 namespace N { struct S { int x; }; }   // S 只在 N 内可见
@@ -2695,7 +2925,7 @@ int main() {
 `S;` 从"声明"改判为"**表达式**"（clang: warning expression result unused）——
 变量因此第一次被登记进符号表。旧行为是 minicc 独有的偏差。
 
-**回归用例**：
+**回归**：
 - `tests/lang/test_basics_25_bare_type_name_visibility.cpp`（正例：全局 / 命名空间内 /
   类作用域别名三处可见 + 遮蔽走表达式，rc=0 与 clang 对拍）
 - `tests/lang/test_basics_26_bare_type_name_namespace_not_visible_error.cpp`
@@ -2714,6 +2944,8 @@ int main() {
   消歧"，B37 后由语义期裁决）；
 - basics_25/26/27 三份新日志入列。
 
+**教训**
+
 **元命题（本次一并改写的东西）**：`docs/constraints/00-全局约束.md` 红线 1
 由**手段式**改写为**目标式**——"语义裁决权单一：名字的种类与可见性只由 Sema 的
 符号表裁定；Parser 可以通过窄的只读查询接口向 Sema 提问并服从其答复
@@ -2725,11 +2957,13 @@ clang 的实际做法（`Parser.h:639` 的 `Sema &Actions;`）。详见 docs/lea
 
 ## B38. 作用域不是名字身份的一部分：限定名模板绑错、同名模板撞实例、嵌套命名空间丢外层
 
+- severity: high ｜ status: fixed ｜ related: docs/learn/49, docs/learn/48, tests/lang/test_basics_28_namespace_template_scope.cpp, tests/unit/test_scope_qualified_names.cpp
+
 **来源**：Stage 1（B37）收尾后的既定路线 —— 红线 1 改写后的三阶段里的
 **Stage 2「登记表退场」**。起点是 B37 查实时记下的三处既有缺口之一
 （"命名空间模板按裸名注册 ⇒ `N::B` 绑到全局 B"），本批把它连同它的兄弟一起修掉。
 
-**复现**
+**现象**
 
 ```cpp
 template<class T> struct B { T v; };                    // 全局模板
@@ -2758,7 +2992,7 @@ int main() { return A::B::f(); }   // ★ 修前：注册成 "B::f" ⇒ "Undefin
 **性质**：**静默算错**（前两条：字段错位 / 实例被合并）与**拒收合法程序**（第三条）
 并存；第四条是**静默接受非法程序**。
 
-**根因（同一个）**：**作用域没有进到名字的身份里**。minicc 的三处实现各自漏了它：
+**根因**（同一个）：**作用域没有进到名字的身份里**。minicc 的三处实现各自漏了它：
 
 | 落点 | 修前 | 后果 |
 |---|---|---|
@@ -2766,11 +3000,13 @@ int main() { return A::B::f(); }   // ★ 修前：注册成 "B::f" ⇒ "Undefin
 | 模板注册 | 模板走 `default:` 分支，**不参与前缀化** ⇒ 按裸名注册 | 同名模板撞实例 |
 | 限定名模板 id 绑定 | 「剥 :: 末段查全局蓝图」 | 绑错模板 |
 
+**教训**
+
 而 clang 的模型一句话：**作用域是名字身份的一部分** —— 模板声明属于 DeclContext，
 `LookupName` 按上下文查；mangling 带上下文（`_ZN1N1BIiE` vs `_Z1BIiE`）；
 实例缓存键带上下文。
 
-**修复**（spec：docs/specs/scope-qualified-names.spec.md）
+**修法**（spec：docs/specs/scope-qualified-names.spec.md）
 1. **前缀化单点**：`processNamespaceDecl` 改用 `m_currentNamespace`（完整路径），
    命名空间成员（函数 / 类 / 全局变量 / 枚举 / **模板**）共用同一句 —— 判据单点。
 2. **模板按作用域注册**：类模板 / 别名模板的蓝图名带 `M::` ⇒ 注册键、实例名
@@ -2787,7 +3023,7 @@ int main() { return A::B::f(); }   // ★ 修前：注册成 "B::f" ⇒ "Undefin
 改成**响亮报错** —— 收窄方向（红线 2「宁宽勿窄」的反面：这次是**由宽改严**，
 因为旧行为会静默算错，属方向性错）。
 
-**回归用例**
+**回归**
 - `tests/lang/test_basics_28_namespace_template_scope.cpp`（正例：全局 B /
   `N::B` / `M::B` 三个实例并存且字段各自正确，rc=0 与 clang 对拍）
 - `tests/lang/test_basics_29_nested_namespace_qualified_call.cpp`

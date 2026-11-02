@@ -3,6 +3,27 @@
 > 子阶段 S1：让 Parser 认识 `template<typename T> T twice(T x) {...}`，
 > 把函数模板与类模板一样"冻结"成蓝图，并建立同名候选集，为 S2 实参推导铺路。
 
+## §0 定位与能力清单
+
+同一个 `twice` 写法，`twice(21)` 与 `twice(2.5)` 是两个**毫不相干**的函数——
+C++ 用"一份语法骨架造出无数个函数"实现这件事，而那份骨架就是**蓝图**。
+本文讲的是这条流水线的**第一段**：把 `template<typename T> T twice(T x)` 识别成蓝图、
+登记起来，**而不是**一个此刻就能调用的函数。蓝图本身不产生任何符号，
+真正的函数要等调用点推出实参后才被造出来（见 05 号文档）。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| [temp.fct] 函数模板蓝图 | `template<...>` 后的声明冻结成 `TemplateDecl`，登记但不产生可调用符号 | 已实现 |
+| [temp.decl] 模板形参表 | `typename T` / `class T` 收进形参表（`typeParams`），两种拼写等价 | 已实现 |
+| [temp.deduct] 形参类型模式 | `T&` / `const T*` 解析成可参与 P/A 配对的类型**模式**（不是具体类型） | 已实现 |
+| [temp.dep] 两阶段查找第一阶段 | 蓝图期只注册、**不分析函数体**，依赖名推迟到实例化时才解析 | 已实现 |
+| 同名候选集 | 函数模板进 `m_functionTemplateCandidates`，供 S6 重载决议遍历 | 已实现 |
+| [temp.arg.explicit] 裸模板名诊断 | 裸写 `Box` 不带实参时响亮报错，提示补实参 | 已实现 |
+| 显式实例化与链接语义 | `extern template`、重复声明检查、`friend`/`export` | 未做 |
+| 模板模板形参 / 模板形参默认实参 | `template<template<class> class C, class T = int>` | 部分（模板模板形参见 learn/33；形参默认实参未做） |
+| requires 子句与概念（concepts） | `template<class T> requires ...` / `concept` 关键字 | 未做 |
+| 可变参数模板与包展开 | `template<class... Ts> void f(Ts...)` | 未做 |
+
 ## ① 理论背景
 
 **标准依据**：C++ [temp.fct]（函数模板）、[temp.decl]（模板声明总则）。
@@ -112,3 +133,27 @@ S1 落地时函数模板拿到了名字→候选集（`m_functionTemplateCandida
 # 注册日志：Sema Phase 3 可见 "↳ class template 'Box' registered"
 ./build-linux/minicc tests/tmpl/test_tmpl_01_basic.cpp | grep registered
 ```
+
+## ⑦ 真实版多做了什么、为什么
+
+★ 素材来源：本文 §③ 对照表的「简化了什么」列 + `docs/BUGS.md` B31/B32/B35/B36/B37/B38
++ CLAUDE.md「名字可见性三阶段」与「未做」清单。**凡是本项目未查证的写「（本项目未查证）」**。
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Parser::ParseDeclarationStartingWithTemplate` 按后续 token 分派到类模板 / 函数模板 / 概念 / 变参模板 / 别名模板等 6 种 | 本项目只留**类模板与函数模板**两条分支——这是"蓝图冻结"这条主线的全部；别名模板与模板模板参数后来单独补（learn/27 / learn/33），概念与变参模板至今未做 |
+| `TemplateDecl` 继承体系（`FunctionTemplateDecl` / `ClassTemplateDecl`）＋独立的 `TemplateParameterList` 对象 | 本项目 AST **扁平无继承**，用双槽位 + `isClassTemplate()/isFunctionTemplate()` 判别法代替；形参名存 `vector<string>`，没有独立形参对象 ⇒ 无法承载"形参有默认值/有种类"（后来 NTTP 批次才补上 kind） |
+| `Sema::CheckFunctionTemplate` 的重复声明检查、链接语义、`friend`/`export` | 教学编译器不做 ODR 判定；这三项会牵出整套可见性与链接语义机制，**理论增量远大于实现量** |
+| `Sema::ActOnFinishFunctionBody` 对模板体做**非依赖名**检查（依赖名才推迟） | 本项目**完全不检查**模板体（更极端的简化）：S5 实例化后才走完整分析。代价是模板体里的语法错误要等到有实例才报出来 |
+| 模板形参默认值 / 变参形参 / 模板模板形参的完整解析 | 形参表只承载"名字 + 可选非类型类型"两个槽位；默认值与包展开未做，变参模板未做 |
+| 模板实参的**语境消解**（clang 走 `Actions::ClassifyName` 问符号表） | Parser 不持 Sema 活句柄，用**结构判据**近似（名字 `<` 类型列表 `>` 后紧跟 `(`）。这条路后来被 B31/B32/B35/B36 追打了四轮才收敛（learn/45 / learn/46 / learn/48 / learn/49）——**"结构判据"能起步，但撑不住模板名当变量名的场景** |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-08-10 | S1 落地：Parser 认识函数模板、冻结成蓝图、建立同名候选集 | 为 S2 实参推导铺路（本文成文时的状态） |
+| 2026-09-10 | 补注：类模板注册表对称化（`m_classTemplates` 名字→蓝图映射 + 裸名提前诊断） | 类模板名查找从 O(n) 线性扫描改成查表 |
+| 2026-10-23 | 模板名登记表上线（learn/46，B31）：消歧从"纯后缀启发式"升级为"只读查表 + 试探" | `a<b>(c)` 这种全变量比较链被旧判据误判成模板调用（**拒收合法程序**） |
+| 2026-11-02 | 名字可见性与作用域下沉 Sema（B37/B38，learn/48 / learn/49） | 模板按**裸名**注册 ⇒ `N::B` 绑到全局 `B`、同名模板跨命名空间撞成同一个实例——作用域是名字身份的一部分 |

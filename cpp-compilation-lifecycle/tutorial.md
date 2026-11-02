@@ -4,6 +4,19 @@
 >
 > 从源码到可执行文件：预处理 → 编译 → 汇编 → 链接，四阶段逐层拆解。
 
+> - 读者：想知道"一次 `clang++ hello.cpp` 内部到底发生了什么"的人；
+>   需要照着敲一遍复现每个阶段产物的人
+> - 审法：每个阶段都配**可复现的命令**与**真实产物片段**（`-E` / `-S` / `-c` / `file` / `otool`）；
+>   本文是**上游 clang 的实测记录**，不是 minicc 的实现说明 ——
+>   minicc 的七阶段见 `docs/business/00-总览.md`
+> - 名词版本：v1（环境为 macOS arm64 + LLVM 21；Linux 环境的差异见 §8 跨平台对照）
+
+## 变更记录
+
+| 日期 | 版本 | 改了哪条 |
+|---|---|---|
+| 2026-11-02 | v1 | 补头部三行与变更记录（按 `docs/constraints/06` 技术文档骨架）；补 §8 Out of Scope 与 §9 观测点；正文未改写 |
+
 ---
 
 ## 0. 实验环境 & 测试源码
@@ -1029,3 +1042,32 @@ entry:
   ret i32 %add
 }
 ```
+
+
+---
+
+## 8. Out of Scope（本文不负责的事）
+
+| 不负责 | 原因 / 去哪看 |
+|---|---|
+| **minicc 自己的实现** | 本项目是另一台编译器（七阶段：预处理器 → Lexer → Parser → Sema → 模板实例化 → CodeGen → 自研链接器），见 `docs/business/00-总览.md`；本文拆的是 **clang 的四阶段** |
+| **clang 的内部源码实现**（`CompilerInstance` / `Preprocessor::` / `Sema::ActOn*` 怎么组织） | 本文只拆**可观测行为**；要看 clang 内部实现，见 `docs/upstream/clang-stdlib-and-header-search.md` 与本地 clang 语料 |
+| **优化器的内部算法** | §7 只给 IR 的**读法**与一份优化前后的对比；具体 pass（PassManager / GVN / LICM…）不在本篇 |
+| **链接器内部实现** | §4 只讲"链接器被喂了什么、产出了什么"；ELF/Mach-O 的节合并与符号决议算法见 `docs/learn/15-linker-elf-and-mini-ld.md` |
+| **Windows / MSVC 工具链** | 本文只实测 macOS + Linux（§8 给了差异对照）；MSVC 的命令行与产物格式自成一套 |
+| **debug 信息（DWARF）与插桩（sanitizer）** | 属 `-g` / `-fsanitize` 专题，见 `TODO.md` F 组 |
+
+## 9. 观测点（怎么自己验一遍）
+
+★ 本文是**上游工具链实测**，没有"日志键"；观测手段全是命令行：
+
+| 想看什么 | 命令 | 关注什么 |
+|---|---|---|
+| 预处理后的文本 | `clang++ -E hello.cpp -o hello.i` | 头文件是否已展开、宏是否就地替换、有没有残留 `#` |
+| 汇编 | `clang++ -S hello.cpp -o hello.s` | 目标架构（`x86_64` / `arm64`）、是否带 `.section` / `.globl` |
+| 目标文件 | `clang++ -c hello.cpp -o hello.o` | `file hello.o` → "Mach-O object" / "ELF 64-bit relocatable" |
+| 可执行文件 | `clang++ hello.cpp -o hello` | `file hello` → "Mach-O executable" / "ELF 64-bit executable"；是否 PIE |
+| 依赖了哪些库 | `otool -L hello`（mac）/ `ldd hello`（Linux） | 每一行的**第一列**是 install name / SONAME，**不是**真实路径 |
+| 链接器实际收到了什么 | `clang++ hello.cpp -o hello -### ` | 打印出真实的 `ld` 调用行（`-l` / `-L` / `-framework` 全部可见） |
+| 符号表与重定位 | `nm -m hello.o`（mac）/ `nm -C hello.o`（Linux） | 未定义符号（`U`）与本地符号（`t`/`T`） |
+| 段/节布局 | `size hello.o` / `otool -l hello.o` | 各段大小 ⇒ 看出"编译器把什么放进了哪个段" |

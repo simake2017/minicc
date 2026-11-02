@@ -6,6 +6,29 @@
 
 ---
 
+## §0 定位与能力清单
+
+本批四项有一个共同点：它们都**不是模板机制**，却挡在模板考点前面 ——
+外部 25 个模板用例剥掉 I/O 后，暴露出的第一层全是这类基础缺口。
+本批按「**错误拒绝合法程序 → 基础缺失 → 次要缺失**」排序处理：先修那条
+"按标准本该合法、却被判非法"的（`struct X : Base` 的默认继承级别），
+再补三项纯缺失，最后把**顺带发现、本批未修**的清单交出去。
+
+| 能力 | 一句话 | 状态 |
+|---|---|---|
+| `struct X : Base` 默认 **public** 继承（[class.derived]/2） | 此前按 private 处理 —— 是**拒收合法程序**的 bug | 已实现 |
+| 一元 `*p` **解引用**（[expr.unary.op]/1） | 结果按 pointee 宽度分派读 / 写 | 已实现 |
+| `*p` 与 `v[i]` 的**值类别** | 二者都是**左值** | 已实现（后由 learn/36 的值类别模型收口） |
+| **后置 const** 成员函数（[dcl.fct]/7） | `int f() const { }` | 已实现（**只记标志**） |
+| 类内 **static** 成员函数（[class.static]/2） | 无 `this` ⇒ 参数寄存器从 rdi 起 | 已实现 |
+| static **数据**成员（[class.static.data]） | 类内声明 / 类外定义 / 常量折叠 | 已实现（learn/44 后来补齐） |
+| `f()` / `f() const` **重载区分** | 两个不同签名应发两个符号 | 未做（共用一个符号） |
+| **const 正确性检查** | 往 const 对象写、调用非 const 成员 | 未做（只记录标志） |
+| **类外成员定义** `int C::f() const { }` | — | 未做 |
+| 解引用的 **cv 合并** | `*const ptr` 的结果类型 | 未做 |
+
+> ★ §5「顺带发现、本批未修」是**成文时的快照**，本表按**当前**状态填写，差异在演进记录里逐条列出。
+
 ## 0. 起因：一次被数据推翻的判断
 
 先把验收面摆清楚。对 `my-test/cpp/src/test/template/` 的 25 个文件逐个编译：
@@ -429,3 +452,33 @@ clang++-18 -std=c++20 tests/lang/test_basics_01.cpp -o /tmp/b1 && /tmp/b1; echo 
 | 测试（集成） | `tests/lang/test_basics_01.cpp`（四项一次跑通，退出码汇总，clang 与本编译器同为 rc=0） |
 | 测试（单元） | `tests/unit/test_expressions.cpp` 的 `Semantics.DerefRequiresPointer`（读 / 写 / 链式 + 非指针报错文案）；`tests/unit/test_expr_parser.cpp` 的 `ExprParserErrors` 用例同步（`*3` 已语法合法，改用 `1 *`） |
 | 回归 | `logdiff.sh` 基线重刷；`struct : Base` 与 `static` 两处**新增日志行**已进基线 |
+
+## 9. 真实版多做了什么、为什么
+
+（把 §7 对照表第三列与 §5 的"顺带发现"表合并成一张两列表。）
+
+| clang 真实版多做的 | 为什么可以砍 |
+|---|---|
+| `Sema::ActOnBaseSpecifier` 按 `getTagKind()` 取默认继承级别，并落实**访问控制** | 本项目在 Parser 里用 `isStruct` 一个 bool 取默认 —— 不做访问控制的**语义效果**（`public:` / `private:` 段的实际约束） |
+| 解引用结果类型走 `Sema::CheckIndirectionOperand` | 本项目在 `inferUnary` 里算，但**不合并 cv**（`*const ptr` 之类形态未做） |
+| 解引用的取 / 存按**精确类型宽度**发射（`EmitLoadOfLValue` / `EmitStoreOfScalar`） | 本项目只按 bool / int / 其它 **三档宽度**分派 |
+| 后置 const 进 `FunctionProtoType` 的 **qualifier 位**，因而参与重载区分 | 本项目**只记标志** ⇒ `f()` 与 `f() const` 共用一个符号（§5 的已知边界） |
+| `Sema::CheckFunctionDeclaration` 设 `CXXMethodDecl::isStatic`，CodeGen 的 `CGFunctionInfo` 不含 this | 本项目用 `FunctionDecl::isStatic` + `hasThis` 两个字段表达同一件事 |
+| clang 的表达式解析有 **cast 层**（`ParseCastExpression` 的 `tok::star` 分支） | 本项目无 cast 层，`*` 直接落 unary —— 教学上少一层 |
+| clang 有完整的 **const 正确性检查** | 本项目只记录标志 —— **宽方向**（多放过，而不是误拒合法程序） |
+| clang 的 static **数据成员**有完整的存储与初始化语义 | 本批不做 —— 后来由 learn/44（[class.static.data]）单独补齐 |
+| `f()` / `f() const` 作为**两个重载**分别发射符号 | 未做 —— 符号名只编码"名字 + 形参类型"，不含成员函数的 cv 限定 ⇒ 二者仍撞符号 |
+
+## 演进记录
+
+| 日期 | 改了什么 | 为什么 |
+|---|---|---|
+| 2026-11-02 | 按四段式文档标准补齐骨架：能力清单 / 真实版多做了什么 / 演进记录 | 规范见 docs/constraints/06 |
+| 2026-09-22 | 语言基础补齐 + 模板三项收尾（commit e0ff653）：本批四项 + NTTP 值位参与偏特化模式 + 模板模板参数 + 成员模板 | 25 个外部模板用例剥掉 I/O 后暴露的第一层**全是基础缺口**，不是模板机制 —— 先补地基再谈考点 |
+| 2026-09-22 | 顺带修 PITFALLS **I4**（蓝图摘要把 NTTP 打成 `typename N`）与 **F2** 残留（Phase 4 演示只看第二位形参） | 两处都是"文档 / 演示与实现不一致"的陈旧描述 |
+| 2026-09-30 | 无声明符的声明被拒收（B16，commit bf19d93） | 与 §5 里"类外成员定义"同族 —— 都是声明解析的边界 |
+| 2026-10-08 | static / virtual 的**识别位置**写反（B19，commit acbc48f） | 成员模板的 `static` 前缀问题 —— 与本批的 static 成员函数同族 |
+| 2026-10-08 | 成员方法身份收口为「名字 + 形参类型」（B22，commit da7f110） | ★ **符号命名规则变了**（从"名字 + 参数个数"改成"名字 + 形参类型链"）；本批"重载区分"那条边界至今未做，但同族的"同名同个数撞符号"已修 |
+| 2026-10-23 | static **数据**成员落地（[class.static.data]，B33，commit 36a1fda） | §5 边界表里"static 数据成员"那条被填上 |
+| 2026-10-27 | const 类对象端到端修复（B34，commit 327a421）：类性判定剥穿 `Const` 包壳 | 一层 const 包壳、三层各自独立写错的判据（成员访问误报 / 掉标量路径 SIGSEGV / 拷贝静默退化）；回归用例含 const 对象上调 const 成员函数 |
+

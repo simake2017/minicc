@@ -1,5 +1,7 @@
 # 多级继承支持规格（3+ 层级）
 
+> **归档说明**：本文是 2026-09-01 的设计稿，正文已被 docs/learn/11 / 16 / 17 取代，仅作设计史留存。当前结论见 [docs/learn/17 多继承布局：primary base 判定、size/align 分离与嵌套子对象](../../learn/17-multiple-inheritance-layout.md)。
+
 ## 1. 现状分析
 
 ### 1.1 当前能力边界
