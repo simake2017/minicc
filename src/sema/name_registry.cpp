@@ -53,7 +53,7 @@ NameClassification NameRegistry::classify(const std::string& name) const {
 NameClassification
 NameRegistry::classifyQualified(const std::string& scope,
                                 const std::string& name) const {
-    // Sema 侧：scope 精确相等，不做末段回退（消费点 3.4 的裁决依据）
+    // scope 精确相等，不做末段回退（★ B38 起零生产调用点，留给 Stage 3）
     if (auto it = m_entries.find({scope, name}); it != m_entries.end())
         return fromBits(it->second);
     return NameClassification{};

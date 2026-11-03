@@ -51,6 +51,7 @@
 #include "token.h"
 #include "ast.h"
 #include "name_registry.h"
+#include "name_scope.h"
 #include <vector>
 #include <memory>
 #include <stdexcept>
@@ -61,6 +62,12 @@
 #include <utility>
 
 namespace minicc {
+
+// ★ 前向声明（Sema 活句柄用）—— 对照 clang 的 Parser.h：
+//   clang/include/clang/Parse/Parser.h:639 持有 `Sema &Actions;`，
+//   而 Sema 的完整定义只出现在 Parser.cpp 里（clang/include/clang/Sema/Sema.h）。
+//   本项目同理：parser.h 不引入 sema 域的头，句柄只在前向声明上。
+class SemanticAnalyzer;
 
 // =============================================================================
 // 语法错误的专用异常（panic 模式唯一的"预期异常"，B32 / 主线 I 第 3 项）
@@ -83,12 +90,20 @@ public:
 class Parser {
 public:
     // 按值接收后 move 进成员，避免拷贝整个 Token 数组。
-    // 重载 1（主线）：名字登记表由调用方（main）构造并与 Sema 共享——
-    //   Sema 的限定名裁决（消费点 3.4）与本表同源（spec 拍板 2）。
+    // 重载 1（主线）：名字登记表由调用方（main）构造并交给 Parser——
+    //   ★ B38 起 Sema 不再持有这张表（限定名的作用域裁决改由 Sema 自己的
+    //     注册表回答，第二份作用域事实随之退场）；构造点见 src/driver/main.cpp。
     // 重载 2（单测便利）：内部自建并收集一张表，行为与 B31 等价。
     explicit Parser(std::vector<Token> tokens,
                     const std::shared_ptr<const NameRegistry>& names);
     explicit Parser(std::vector<Token> tokens);
+
+    // ── 挂上 Sema 句柄（Stage 3：clang Actions 模式）──
+    // ★ Parser 不再自建作用域事实：名字的种类与可见性由 Sema 的活作用域表裁决，
+    //   Parser 只在"声明点"登记、在"消歧点"查询（窄接口，见 semantic_analyzer.h）。
+    //   对照 clang：Parser 构造时拿到的 `Sema &Actions`（clang Parser.h:639）。
+    // 不挂（单测自建 Parser）⇒ 登记/查询一律跳过，行为退化为 B38 之前的样子。
+    void setSema(SemanticAnalyzer* sema) { m_sema = sema; }
 
     // 解析整个编译单元（入口函数，由 main 驱动调用）
     TranslationUnit parseTranslationUnit();
@@ -249,7 +264,8 @@ private:
     // 生产做法（clang）：Parser 持 Actions 句柄，歧义点回调 isTemplateName()/
     // ClassifyName() 问一个 bit 的问题，决议权仍在 Sema。minicc 轻量版：
     // NameRegistry 在解析开始前【前向扫一遍 token 流】收集本 TU 名字的种类
-    // 投影（type/namespace/template 三位并集），Parser 与 Sema 各持 const 访问。
+    // 投影（type/namespace/template 三位并集），Parser 持 const 访问
+    //   （★ B38 起 Sema 不再持有本表 —— 限定名裁决归 Sema 自己的注册表）。
     // 查询面只到"名字的种类"，不做方法存在性 lookup，不打破 Sema 分层。
     // ★ 前向收集而非边解析边登记：名字可以先使用后声明（Sema 三遍扫描支持），
     //   使用点出现在声明之前时登记表也必须已含该名。
@@ -258,6 +274,22 @@ private:
     //   declval 例外（表达式位置调用），经 builtin 种子收入。边界见 docs/learn/46/47。
     std::shared_ptr<const NameRegistry> m_names;
     const NameRegistry& names() const { return *m_names; }
+
+    // ── Sema 活句柄（Stage 3）──
+    // ★ 只持指针，不持作用域数据 —— 作用域表住在 Sema 那边（红线 1）。
+    //   没有句柄时（单测自建 Parser）下面三个助手一律空转。
+    SemanticAnalyzer* m_sema = nullptr;
+
+    // ── 名字登记助手（Stage 3）──
+    // 三条判据各写一处、只写一处（判据单点）：
+    //   声明一个名字到当前作用域；
+    //   声明一个"引入作用域的名字"并进入该作用域（返回新作用域路径）；
+    //   离开当前作用域。
+    // 空句柄时全部空转 ⇒ 单测自建 Parser 的行为与挂上句柄时【仅名字表】不同，
+    // 其余完全一致。
+    void declareName(const std::string& name, unsigned bits);
+    void openScope(ScopeKind kind, const std::string& name, unsigned bits);
+    void closeScope();
 
     // 日志【单一出口】（B32「正确的写法」第 2 条）：全部 [parse:*] 打点过
     //   这里。收口前 87 处 std::cout 散点直写 —— 符号定名、择优早已"判据

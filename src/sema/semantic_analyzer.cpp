@@ -1366,6 +1366,51 @@ SemanticAnalyzer::SemanticAnalyzer() {
         });
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// 解析期活作用域（Stage 3：clang Actions 模式）
+// ══════════════════════════════════════════════════════════════════════════════
+// ① 定位：本组函数是 Parser 与 Sema 之间的【唯一名字通道】—— Parser 登记
+//    "我声明了什么名字"，Sema 持有作用域链并回答"这个名字在此处是什么"。
+// ② 源码锚点：clang/lib/Sema/SemaDecl.cpp:1574:Sema::PushOnScopeChains（入作用域）
+//    + clang/include/clang/Sema/Scope.h:Scope（作用域链）
+//    + clang/lib/Parse/Parser.cpp:427/437:Parser::EnterScope/ExitScope（作用域进出）。
+// ③ 动机：★ 这层接口薄到"只转调"是刻意的 —— 判据必须住在**一处**
+//    （ParseScopeTable），Parser 侧不许复制一份作用域逻辑（红线 1「语义裁决权单一」
+//    + spec 拍板记录 #1「不做 Parser 自建作用域链表」）。
+//    若哪天这层开始长出分支逻辑（"如果……就……"），说明判据跑偏了 ——
+//    该修的是表，不是这层。
+// ④ demo: 解析 `namespace N { struct S{}; }`
+//       enterParseScope(Namespace,"N") ⇒ 表里链变成 [global, "N::"]，且 N 这个
+//       名字登记进 global 层（带 scopePath="N::"）
+//       leaveParseScope() ⇒ N 层的名字并入持久上下文 ⇒ 之后 `N::S` 仍查得到
+// 回归：tests/unit/test_parse_scope.cpp
+void SemanticAnalyzer::enterParseScope(ScopeKind kind, const std::string& name) {
+    m_parseScopes.enter(kind, name);
+}
+
+void SemanticAnalyzer::leaveParseScope() {
+    m_parseScopes.leave();
+}
+
+void SemanticAnalyzer::declareParseName(const std::string& name, unsigned bits) {
+    m_parseScopes.declare(name, bits);
+}
+
+std::string SemanticAnalyzer::openParseScope(ScopeKind kind,
+                                              const std::string& name,
+                                              unsigned bits) {
+    return m_parseScopes.openScope(kind, name, bits);
+}
+
+unsigned SemanticAnalyzer::classifyParseName(const std::string& name) const {
+    return m_parseScopes.classify(name);
+}
+
+unsigned SemanticAnalyzer::classifyParseQualified(
+    const std::string& qualified) const {
+    return m_parseScopes.classifyQualified(qualified);
+}
+
 // ─── 推导缩进辅助 ───────────────────────────────────────────────────────────
 std::string SemanticAnalyzer::inferIndent() const {
     return std::string(m_inferDepth * 2, ' ');

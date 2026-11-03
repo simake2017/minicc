@@ -2605,7 +2605,11 @@ void CodeGen::visit(CallExpr& expr) {
             if (!mem->resolvedCalleeSymbol.empty()) {
                 // 成员模板实例：符号由 Sema 推导+实例化后回填
                 // （`S_id_int` 这种——同一方法名的多个实例必须各有符号）
-                funcName = mem->resolvedCalleeSymbol;
+                // ★ 必须过 asmSymbol：符号里可能带 "::"（嵌套类的方法
+                //   "A::B_get"）—— 定义端（emitFunction 的 .globl）净化过，
+                //   调用端不净化就是两套命名 ⇒ 汇编期 "junk `::B_get'"。
+                //   这正是 B10 的教训：同一处语义判断不许写两份。
+                funcName = asmSymbol(mem->resolvedCalleeSymbol);
             } else if (objType && objType->isClass()) {
                 funcName = objType->name + "_" + mem->memberName;
             } else {

@@ -661,6 +661,14 @@ int main(int argc, char* argv[]) {
 
         // 递归下降解析（对照标准 [gram] 文法的子集），
         // 产出 TranslationUnit = 顶层声明列表（函数/类/模板）。
+        // ★ Sema 先于 Parser 构造（Stage 3：clang Actions 模式）——
+        //   Parser 解析期要向 Sema 登记"我声明了什么名字"、查询"这个名字在此处
+        //   是什么"（窄接口，见 semantic_analyzer.h），故句柄必须在 Parser 之前
+        //   就位。对照 clang：Parser 构造时就持有 `Sema &Actions`
+        //   （clang/include/clang/Parse/Parser.h:639）。
+        //   ★ Sema 的构造【不产生任何输出】—— 阶段顺序与日志逐字节不变。
+        SemanticAnalyzer semaAnalyzer;
+
         // ★ parser 名字识别（spec §2 步骤 1）：先建登记表并前向收集，
         //   供 Parser 的消歧做【候选过滤】（"名字是不是模板"这一问）。
         //   ★ B38 起 Sema 不再持有这张表 —— 限定名的作用域裁决改由 Sema 自己的
@@ -668,6 +676,7 @@ int main(int argc, char* argv[]) {
         auto nameReg = std::make_shared<NameRegistry>();
         nameReg->collect(tokens);
         Parser parser(std::move(tokens), nameReg);
+        parser.setSema(&semaAnalyzer);
         TranslationUnit unit = parser.parseTranslationUnit();
 
         std::cout << std::format("  {} top-level declarations parsed\n",
@@ -686,7 +695,7 @@ int main(int argc, char* argv[]) {
 
         // 类型检查 + auto 推导 + 类内存布局（字段偏移/对齐、vtable、RTTI）。
         // 布局结果供两处消费：下方打印（可观测性）与阶段 5 CodeGen（访存偏移）。
-        SemanticAnalyzer semaAnalyzer;
+        // ★ semaAnalyzer 已在【阶段 2 之前】构造（Stage 3：Parser 持 Sema 句柄）。
         semaAnalyzer.analyze(unit);
 
         auto& classTypes = semaAnalyzer.getClassTypes();

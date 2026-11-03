@@ -3049,3 +3049,40 @@ int main() { return A::B::f(); }   // ★ 修前：注册成 "B::f" ⇒ "Undefin
 **遗留（Stage 3）**：解析期"名字是不是模板"这一问仍由登记表回答（过渡态近似）。
 clang 的答案是 Sema 的活符号表（`Actions.isTemplateName`）+ 语法试探兜底
 （`isTemplateArgumentList`）—— 需要边解析边 `ActOn*` 登记的架构改造。
+
+---
+
+## B39. 成员调用点没把符号名过净化：命名空间里的类，调用其成员方法链接期炸
+
+- severity: medium ｜ status: fixed ｜ related: src/codegen/codegen.cpp, docs/learn/17, docs/BUGS.md B10
+
+**现象**
+
+```cpp
+namespace NS {
+struct S { int f() { return 7; } };
+}
+int main() {
+    NS::S s;
+    return s.f();     // ★ 修前：汇编期 junk '::S_f' after expression
+}
+```
+
+**性质**：**编译期全绿、汇编期红**（错误停在 `as`，不在 minicc 自己的诊断里）。
+
+**根因**：**同一处语义判断写了两份，且两份不一致** —— 这正是 B10 记的教训。
+调用点（CodeGen 生成 `callq` 目标）直接用 `MemberExpr::resolvedCalleeSymbol`
+的原文，而定义点（生成 `.globl`）过了 `asmSymbol()` 净化（`::` ⇒ `__`）。
+两处不一致 ⇒ 定义是 `NS__S_f`、调用是 `NS::S_f` ⇒ 汇编器拒绝 `::`。
+★ 只有**带作用域**的名字会炸：全局类 `S::f` 的符号里没有 `::` ⇒ 恰好一致
+⇒ 此前**没有任何用例写过命名空间里的类的成员方法调用**，这条错法一直藏着。
+
+**修法**：调用点也过 `asmSymbol()`（一处净化，判据单点）——
+`funcName = asmSymbol(mem->resolvedCalleeSymbol);`。
+
+**回归**：修复后 `s.f()` 返回 7（与 clang 一致）；既有集成用例**逐字节零漂移**
+（该路径此前无人走到）。
+
+**教训**：**"恰好一致"不是"一致"** —— 两份实现只要在某个输入子集上碰巧相同，
+就会把错法藏起来，直到有人写出那个子集。判据要收口到**一处**，
+而不是"两处都写对了"。

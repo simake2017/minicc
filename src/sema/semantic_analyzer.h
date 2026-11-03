@@ -29,6 +29,7 @@
 #include "ast.h"
 #include "ast_visitor.h"
 #include "constant_folder.h"
+#include "parse_scope.h"
 #include "type.h"
 #include "template_instantiation.h"
 #include <string>
@@ -248,6 +249,41 @@ public:
     // 获取符号表（供调试输出）
     SymbolTable& getSymbolTable() { return m_symbolTable; }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // 解析期活作用域（Stage 3：clang Actions 模式）
+    // ══════════════════════════════════════════════════════════════════════
+    // ★ 这组接口是 Parser 唯一的名字通道 —— 对照 clang 的 Actions 模式：
+    //   clang/include/clang/Parse/Parser.h:639 的 `Sema &Actions;`
+    //   + clang/lib/Parse/Parser.cpp:427/437 的 EnterScope/ExitScope
+    //     （写作用域），
+    //   + clang/lib/Parse/Parser.cpp:1696 的 Actions.ClassifyName(...)
+    //     （读：问名字的种类）。
+    //   本项目的对应形状：Parser 持 SemanticAnalyzer* 句柄，登记走
+    //   enter/leave/declareParseName，查询走 classifyParseName。
+    // 【为什么表住在 Sema 而不是 Parser】红线 1「语义裁决权单一」：名字的
+    //   种类与可见性只由 Sema 裁决；Parser 只能通过窄接口**问**，并服从答复。
+    //   若表住在 Parser，就是"Parser 自建第二份作用域事实"（spec 拍板记录 #1
+    //   明确拒绝的形态）。
+    // 【为什么与语义期的符号表不是同一张】clang 也是两张：Scope 节点是
+    //   【临时】的解析期结构，DeclContext 是【持久】的语义期结构；本表对应
+    //   前者，Sema 现有的 m_classTypes / m_functions 等对应后者。
+
+    // 进入一层作用域（Namespace/Class 会把 name 追加进路径；其余沿用父层）。
+    void enterParseScope(ScopeKind kind, const std::string& name);
+    // 离开当前作用域。
+    void leaveParseScope();
+    // 声明一个名字到当前作用域（位并集；ScopeBit::Type / Namespace /
+    // Template / Value）。
+    void declareParseName(const std::string& name, unsigned bits);
+    // 声明一个"引入作用域的名字"并进入该作用域（clang 的
+    // PushOnScopeChains + EnterScope 两步合一）；返回新作用域的路径。
+    std::string openParseScope(ScopeKind kind, const std::string& name,
+                                unsigned bits);
+    // 分类：沿作用域链内→外首命中即返回（0 = 此处未声明）。
+    unsigned classifyParseName(const std::string& name) const;
+    // 限定名分类："N::B"（限定者逐段定位；限定者那层查不到即无，不外溢）。
+    unsigned classifyParseQualified(const std::string& qualified) const;
+
     // ── 诊断可视化（--dump-* 系列）──
     // dumpHierarchy: 类层次结构图（继承树 + 每个类详情框 + typeinfo 链）
     // dumpLayout: 三层内存布局详图（对象 → vtable(含[-2][-1]) → typeinfo 链）
@@ -258,6 +294,12 @@ public:
 private:
     // ── 符号表管理 ──
     SymbolTable m_symbolTable;
+
+    // ── 解析期活作用域表（Stage 3；clang 的 Scope 链对应物）──
+    // 解析期由 Parser 经上面那组窄接口写入（登记/进出），查询走同一张表。
+    // 与语义期的 m_symbolTable 等**不是同一张**：前者是临时的作用域结构
+    // （名字 → 种类位），后者是持久的语义事实（类型/布局/符号）。
+    ParseScopeTable m_parseScopes;
 
     // 常量折叠器（主线 D）：语句访问点先 fold 再定型，折叠结果写回 AST
     ConstantFolder m_constantFolder;

@@ -686,7 +686,9 @@ const 共享，判据单点）：`NameClassification` 对齐 clang `Sema::Classi
 enum/typedef/using，**template 头后不置**——`Box;` 对类模板名保持非类型
 解释）+ namespace 位（`namespace X {` 推作用域栈按花括号深度配对 /
 `namespace A = B;`）+ declval 种子（移到构造函数，空表也在）。
-**消费点 4 个**：语句层裸名 `S;` 判声明（新增，[stmt.ambig] 声明优先、
+**消费点 4 个**（★ 第 4 个已于 **B38 退场**——Sema 不再持表，
+`classifyQualified` 零调用点，当前实存 **3 个**、全在 Parser 侧）：
+语句层裸名 `S;` 判声明（新增，[stmt.ambig] 声明优先、
 同名跨类只看 type 位，打 `[parse:stmt]` 日志）/ 表达式模板闸 / 语句层
 模板 id 链闸（换入口，等价性保证零漂移）/ Sema 限定模板名裁决
 （**B35 尾剥改作用域精确裁决，修 B36 误绑**：N::B 不存在不再落到全局 B，
@@ -773,6 +775,42 @@ docs/learn/49 + BUGS.md B38。
 ★ **基线也被过期二进制骗了**：上一版基线的 `369` 是**没重建的 unit_tests**
 留下的假象（learn/47 §6 第三种失败面具，这回连基线也骗）⇒ 重建后 371，
 本批 +5 ⇒ **376/376** 全绿。
+
+✅ **解析期活作用域表已落地（B39 + Stage 3 批 1，docs/learn/51 + specs/designs）** ——
+**这是红线 1 改写后三阶段的收尾批**：Stage 1（B37 可见性下沉）✅、Stage 2（B38 作用域即身份）✅、
+**Stage 3 批 1（本批）**✅ —— 目标是把"前向扫 token 流反推名字"的 `NameRegistry`
+换成 clang 的形状：**解析期就有一张活的作用域链，Parser 登记、Sema 裁决**。
+**四个 clang 机制逐条对上**：`Parser.h:639` 的 `Sema &Actions;` ⇒ `Parser::m_sema`
+（前向声明 + 可空指针，单测自建 Parser 时空转）/ `Parser.cpp:427/437` 的
+EnterScope·ExitScope ⇒ `openScope`·`closeScope` / `SemaDecl.cpp:1574` 的
+PushOnScopeChains ⇒ `ParseScopeTable::declare`·`openScope` /
+`SemaDecl.cpp:912` 的 ClassifyName ⇒ `classifyParseName`。
+**新模块**：`include/name_scope.h`（跨域契约：`ScopeKind` 六种 + `ScopeBit` 四位）+
+`src/sema/parse_scope.h/.cpp`（活链 + 持久上下文两张结构）。
+★ **三条判据各写一处**：内层遮蔽外层（classify 沿链首命中即返回）/
+限定名不外溢（`N::B` 里 N 没有 B 就是没有，不退到全局 B）/
+作用域名字可持久（离开 N 后 `N::S` 仍可达 —— clang 的 DeclContext 持久、Scope 临时）。
+★ **"可见性"与"限定可达"是两件事**：前者查活链、后者查持久上下文 ——
+只留一张表，要么"离开 N 后 `N::S` 查不到"，要么"`S` 在全局裸用也查得到"，两个都错。
+★ **模板形参作用域是"透明"的**：`template<class T> struct Box` 的 `Box` 属命名空间、
+`T` 属形参域（clang 同款：模板名挂外层 DeclContext，形参挂自己的 TemplateParameterList）——
+判据落在 `nameScopeIndex()`（最近的外层非形参作用域）。写反的后果：模板名随形参域一起消失。
+**登记点铺了 11 类**（命名空间/类含模板与前置声明/枚举名/枚举项/别名顶层与类内/
+模板形参三种形态/模板名五种/变量/函数与形参/局部变量/块与 for 隐式作用域）。
+**批 1 刻意行为中立**：三个消歧点（`parser.cpp` 的语句层裸名判定 / 语句层模板 id 链闸 /
+表达式模板闸）**仍读旧 `NameRegistry`** ⇒ 新增日志会让 160 份集成基线全漂，故本批**零日志**。
+**顺带修 B39**（真 HEAD bug）：`namespace NS { struct S{ int f(); }; }` + `s.f()` ⇒
+调用点没用净化后的符号、定义点用了 ⇒ 汇编期 `junk '::S_f' after expression`
+（根因同 B10：同一处语义判断写了两份；只有带作用域的名字会炸 ⇒ 此前无人写过这个用法）。
+测试 tests/unit/test_parse_scope.cpp（12 例：链/遮蔽/可见性/限定名/持久/透明/局部类/位并存）；
+全量 ctest 376 → **388**；**160 份集成日志逐字节零漂移**（唯一差异是 `_unit_cases` +12）。
+docs/specs/parse-stage-live-scope.spec.md + docs/designs/…design.md + docs/learn/51 + BUGS.md B39。
+★ **下一批（Stage 3 批 2/3）**：value 位落地 + C++20 `UndeclaredTemplate` 规则
+（名字查不到且下一个 token 是 `<` ⇒ 假定它是模板名，clang 的 SemaDecl.cpp:995-1003）→
+三个消歧点切表 → `NameRegistry` 整类删除。★ 切表会改诊断文案
+（未声明的名字从 "Undefined variable" 变 clang 的 "use of undeclared identifier"），
+属**有意漂移**，须与用户确认口径后重刷基线。
+★ 再下一批 = **嵌套类**（用户拍板：用同一张作用域链的通用查询解决，**不做特判**）。
 
 ✅ **源码注释对齐「四段式」标准已完成（docs/learn/50 + specs/comment-standard-conformance.spec.md）** ——
 依据 `~/wiki/common/docs/design-standard/comment-standard.md`。

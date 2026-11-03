@@ -50,7 +50,8 @@ struct NameClassification {
 };
 
 // =============================================================================
-// NameRegistry：写一次（collect），之后全程只读；Parser 与 Sema 各持 const 访问
+// NameRegistry：写一次（collect），之后全程只读；Parser 持 const 访问
+//   （★ B38 起 Sema 不再持有本表 —— 限定名裁决改走 Sema 自己的注册表）
 // =============================================================================
 // 键 = (scope, name)。scope 空串 = 全局作用域；嵌套命名空间拼 "N1::N2"。
 // 同名跨类合法（`int S; struct S;`）——同一 (scope,name) 的位做 OR 累加，
@@ -79,8 +80,10 @@ public:
     //   精确作用域查询会漏收合法程序，见设计否决记录 4）。
     NameClassification classify(const std::string& name) const;
 
-    // Sema 侧查询（消费点 3.4）：scope 必须精确相等——限定名 N::B 裁决的
-    // 唯一依据；配不上 = 响亮报错，杜绝裸尾剥误绑全局 B。
+    // scope 精确查询：scope 必须精确相等，配不上 = 无命中。
+    // ★ B38 起【零生产调用点】——原 Sema 侧消费点（限定名 N::B 裁决）已退场，
+    //   改由 Sema 自己的模板注册表回答（learn/49）。本入口留着，等 Stage 3
+    //   改走 clang 的 Actions 模式时复用（ROADMAP 主线 I 第 7 项）。
     NameClassification classifyQualified(const std::string& scope,
                                          const std::string& name) const;
 

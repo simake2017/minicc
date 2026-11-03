@@ -40,6 +40,7 @@ set(SOURCES
     src/ast/constant_folder.cpp
     src/lex/lexer.cpp
     src/sema/name_registry.cpp
+    src/sema/parse_scope.cpp
     src/parse/parser.cpp
     src/ast/type.cpp
     src/sema/semantic_analyzer.cpp
@@ -92,6 +93,7 @@ add_executable(unit_tests
     tests/unit/test_member_template_in_class_template.cpp
     tests/unit/test_arg_binding.cpp
     tests/unit/test_name_registry.cpp
+    tests/unit/test_parse_scope.cpp
     tests/unit/test_name_visibility.cpp
     tests/unit/test_scope_qualified_names.cpp
     src/lex/preprocessor.cpp
@@ -99,6 +101,7 @@ add_executable(unit_tests
     src/ast/constant_folder.cpp
     src/lex/lexer.cpp
     src/sema/name_registry.cpp
+    src/sema/parse_scope.cpp
     src/parse/parser.cpp
     src/sema/semantic_analyzer.cpp
     src/codegen/codegen.cpp

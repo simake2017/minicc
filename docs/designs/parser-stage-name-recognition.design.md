@@ -26,7 +26,7 @@
 | §2 步骤 1 收集（前向扫描、零日志、declval 种子） | 子流程 3.1 `NameRegistry::collect()`（parser.cpp:78-120 现有逻辑搬迁+扩展） |
 | §2 步骤 2 语句层裸名判定（新增消费点） | 子流程 3.2 `parseStatement` 试探块（parser.cpp:2282-2291 的 `else if` 内新增分支） |
 | §2 步骤 3 表达式模板闸（换入口） | 子流程 3.3 `parsePrimaryExpr`（parser.cpp:3113，`isKnownTemplateName` → `m_names->isTemplateName`） |
-| §2 步骤 4 Sema 限定名裁决（N::B 作用域链） | 子流程 3.4 `resolveType` 模板 id 分支（semantic_analyzer.cpp:920-935 尾剥改裁决） |
+| §2 步骤 4 Sema 限定名裁决（N::B 作用域链） | 子流程 3.4 `resolveType` 模板 id 分支（semantic_analyzer.cpp:920-935 尾剥改裁决）——★ **B38 退场**：该消费点删除，裁决改由 Sema 自己的模板注册表按完整限定名回答 |
 | §2 步骤 5 诊断文案对齐 | semantic_analyzer.cpp:1156 错误括注改写（有意漂移，申报重刷基线） |
 | §2.5 更新对照实例 A | 3.2 新增分支产 EmptyStmt + `[parse:stmt]` 日志行 |
 | §2.5 更新对照实例 B | 3.4 裁决失败报错 rc=1；真存在 N::B 的用例走命中路径零漂移 |
@@ -179,7 +179,9 @@ scope="N"，误绑闭环。
 - 查询未命中 = **条目不存在**（不是「存在但 bits 全 false」）——消费点一律
   按「位未命中」处置，禁止反向推断。
 - scope 字段空串 = 全局作用域；namespace 别名 A 的条目 scope = A 的外层作用域。
-- 登记表生命周期 = 一次编译：collect() 后零写入，Parser/Sema 各持 const 访问。
+- 登记表生命周期 = 一次编译：collect() 后零写入，Parser/Sema 各持 const 访问
+  （★ **B38 起 Sema 不再持表** —— 限定名裁决改走 Sema 自己的注册表，见
+  `docs/specs/scope-qualified-names.spec.md` S2-4；当前只有 Parser 持表）。
 
 ## 6. 目录落点 + 数据形状
 

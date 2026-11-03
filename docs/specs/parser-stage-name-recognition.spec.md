@@ -236,3 +236,8 @@ Sema 限定名裁决  复用 [resolve] 行；实例 B 报错文案与 clang 逐�
 ★ **后续批次的改写**（不在本批范围内，登记在此以便追溯）：本 spec 把"可见性"
 也交给了登记表；**B37 批次**已把可见性裁决改回 Sema 符号表
 （`docs/specs/visible-name-lookup.spec.md`），登记表降级为**过渡态的候选过滤器**。
+**B38 批次**进一步把**消费点 3.4（Sema 侧限定名裁决）整条退场** ——
+Sema 不再持有本表，限定名的作用域由 Sema 自己的模板注册表回答
+（`docs/specs/scope-qualified-names.spec.md` S2-4）；
+故本文里"Parser 与 Sema 各持 const 访问"描述的是**成文时**的形态，
+当前只有 Parser 持表，`classifyQualified` 为零生产调用点（留给 Stage 3）。

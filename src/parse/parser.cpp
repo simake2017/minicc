@@ -39,6 +39,10 @@
 // =============================================================================
 
 #include "parser.h"
+// ★ Sema 活句柄的完整定义只在这里出现 —— 对照 clang：
+//   clang/lib/Parse/Parser.cpp 引入 clang/Sema/Sema.h，而 clang Parser.h 只
+//   前向声明 `class Sema;` 并持有 `Sema &Actions;`（clang Parser.h:639）。
+#include "semantic_analyzer.h"
 #include <cstdint>     // uint64_t —— 字面量按无符号 64 位解析（[lex.icon]/2 的表）
 #include <format>
 #include <iostream>
@@ -66,6 +70,34 @@ Parser::Parser(std::vector<Token> tokens)
     : m_tokens(std::move(tokens)),
       m_names(std::make_shared<NameRegistry>()) {
     const_cast<NameRegistry&>(*m_names).collect(m_tokens);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 名字登记助手（Stage 3：clang Actions 模式）
+// ─────────────────────────────────────────────────────────────────────────────
+// ① 定位：Parser 在【声明点】把"我声明了什么名字"告诉 Sema；Sema 持有作用域链。
+// ② 源码锚点：clang/lib/Parse/Parser.cpp:427/437:Parser::EnterScope/ExitScope
+//    （作用域进出）+ clang/lib/Sema/SemaDecl.cpp:1574:Sema::PushOnScopeChains
+//    （名字入作用域）。
+// ③ 动机：★ Parser 侧**不持任何作用域数据**（红线 1「语义裁决权单一」）：
+//    这里只做转发，判据在 Sema 的 ParseScopeTable 里。
+//    空句柄（单测自建 Parser）⇒ 空转，解析行为不变。
+// ④ demo: 解析 `struct S {};` ⇒ declareName("S", ScopeBit::Type) 登记进当前作用域；
+//       解析 `namespace N { ... }` ⇒ openScope(Namespace,"N",ScopeBit::Namespace)
+//       进 "N::" 层，closeScope() 出来。
+void Parser::declareName(const std::string& name, unsigned bits) {
+    if (!m_sema) return;
+    m_sema->declareParseName(name, bits);
+}
+
+void Parser::openScope(ScopeKind kind, const std::string& name, unsigned bits) {
+    if (!m_sema) return;
+    m_sema->openParseScope(kind, name, bits);
+}
+
+void Parser::closeScope() {
+    if (!m_sema) return;
+    m_sema->leaveParseScope();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -945,6 +977,13 @@ GlobalVarDeclPtr Parser::parseGlobalVarDecl() {
             "Expected member name after '::' in out-of-class definition");
         decl->name += "::" + next.text;
     }
+    // ★ 全局变量名进当前作用域（值位）。
+    //   ★ 限定名（`int A::count = 7;` 的静态成员类外定义）**不登记** ——
+    //     它的名字住在类 A 的作用域里，不是全局作用域；把带 "::" 的整串
+    //     当裸名登记，限定名查找会拿它去裸名表里找（永远查不到）。
+    if (decl->name.find("::") == std::string::npos) {
+        declareName(decl->name, ScopeBit::Value);
+    }
     decl->declaredType = parseArrayDeclaratorSuffix(decl->declaredType);
     // 主线 D 二批：接走 parseType 留下的 constexpr 前缀（读走即清，防串味）
     decl->isConstexpr = m_pendingConstexpr;
@@ -966,6 +1005,10 @@ EnumDeclPtr Parser::parseEnumDecl() {
     }
     if (check(TokenType::Identifier)) {
         decl->name = advance().text;
+        // ★ 枚举名进当前作用域（类型位）—— 枚举是类型名。
+        //   对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::ActOnEnumBody 把枚举名挂进
+        //   外层 DeclContext（clang/lib/Sema/SemaDecl.cpp:ActOnEnumDecl）。
+        declareName(decl->name, ScopeBit::Type);
     }
     if (match(TokenType::Colon)) {
         decl->underlyingType = parseType();
@@ -979,6 +1022,10 @@ EnumDeclPtr Parser::parseEnumDecl() {
         item.location = current().location;
         const Token& nameTok = expect(TokenType::Identifier, "Expected enum item name");
         item.name = nameTok.text;
+        // ★ 枚举项登记进**外层**作用域（值位）—— 不受限枚举的枚举项是外层
+        //   作用域的普通名字（[basic.scope.enum]：枚举项声明在枚举说明符
+        //   出现的作用域里）。故此处不另开枚举作用域。
+        declareName(item.name, ScopeBit::Value);
         if (match(TokenType::Assign)) {
             item.hasCustomValue = true;
             item.valueExpr = parseExpression();
@@ -1008,11 +1055,18 @@ NamespaceDeclPtr Parser::parseNamespaceDecl() {
     expect(TokenType::KwNamespace, "Expected 'namespace'");
     const Token& nameTok = expect(TokenType::Identifier, "Expected namespace name");
     decl->name = nameTok.text;
+    // ★ 进命名空间作用域（Stage 3）：名字 N 登记进**外层**作用域并带上
+    //   作用域路径 "N::"，供限定名查找（`N::S`）定位。
+    //   对照 clang：clang/lib/Parse/ParseDeclCXX.cpp:Parser::ParseNamespace 走
+    //   ParseScope(Scope::DeclScope)，
+    //   Sema 侧 ActOnNamespaceDeclaration 把名字挂进外层 DeclContext。
+    openScope(ScopeKind::Namespace, decl->name, ScopeBit::Namespace);
     expect(TokenType::LBrace, "Expected '{' in namespace declaration");
     while (!check(TokenType::RBrace) && !isAtEnd()) {
         decl->declarations.push_back(parseDeclaration());
     }
     expect(TokenType::RBrace, "Expected '}' after namespace declaration");
+    closeScope();
     return decl;
 }
 
@@ -1047,6 +1101,10 @@ DeductionGuideDeclPtr Parser::parseDeductionGuide() {
 
     const Token& nameTok = expect(TokenType::Identifier, "Expected class template name in deduction guide");
     decl->guideName = nameTok.text;
+    // ★ 指引名进当前作用域（模板位）—— 指引是为某个模板写的，不是新类型。
+    //   对照 clang：clang/lib/Sema/SemaTemplate.cpp:Sema::isDeductionGuideName
+    //   把指引挂进外层 DeclContext。
+    declareName(decl->guideName, ScopeBit::Template);
 
     expect(TokenType::LParen, "Expected '(' in deduction guide");
     if (!check(TokenType::RParen)) {
@@ -1106,6 +1164,12 @@ TypeAliasDeclPtr Parser::parseTypeAliasDecl() {
         decl->aliasName = aliasTok.text;
         expect(TokenType::Semicolon, "Expected ';' after typedef declaration");
     }
+    // ★ 类型别名进当前作用域（类型位）—— 别名是类型名。
+    //   对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::ActOnTypedefNameDecl 挂进当前
+    //   DeclContext（clang/lib/Sema/SemaDecl.cpp:ActOnTypeAliasDecl）。
+    if (!decl->aliasName.empty()) {
+        declareName(decl->aliasName, ScopeBit::Type);
+    }
     return decl;
 }
 
@@ -1154,6 +1218,12 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
     //    （ParseTemplate.cpp:332），同样开在解析形参表之前、MultiParseScope 析构时 Exit。
     //    （理论见 docs/learn/30）
     TemplateParamFrame frame(this, decl.get());
+    // ★ 进模板形参作用域（Stage 3）：形参名登记进这一层，模板体（类体/函数体）
+    //   解析期间可见 —— `template<class T> struct Box { T v; };` 里的 T。
+    //   ★ 该作用域对【名字登记】是透明的：模板自己的名字（Box）属于外层作用域。
+    //   对照 clang：ParseTemplateParameters 的 TemplateScopes.Enter(TemplateParamScope)
+    //   （clang/lib/Parse/ParseTemplate.cpp:332）。
+    openScope(ScopeKind::TemplateParam, "", 0u);
 
     if (!check(TokenType::Greater)) {
         int unnamedSeq = 0;        // 无名形参的合成名序号（见下方 unnamed 分支）
@@ -1336,6 +1406,20 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
             decl->templateParams.push_back(
                 std::make_shared<TemplateParam>(std::move(param)));
             frame.count = decl->templateParams.size();   // ← 可见范围同步扩张
+            // ★ 形参名登记进【模板形参作用域】（Stage 3）—— 种类位按形参形态分：
+            //   类型形参 ⇒ 类型位 / NTTP ⇒ 值位 / 模板模板形参 ⇒ 模板位。
+            //   ★ 位置与上面那两行同步（都在默认实参解析之后）—— [basic.scope.pdecl]/9：
+            //     形参名的作用域从其声明符之后才开始。
+            {
+                const TemplateParam& tp = *decl->templateParams.back();
+                unsigned paramBits = ScopeBit::Type;
+                if (tp.kind == TemplateParamKind::NonType) {
+                    paramBits = ScopeBit::Value;
+                } else if (tp.kind == TemplateParamKind::Template) {
+                    paramBits = ScopeBit::Template;
+                }
+                declareName(tp.name, paramBits);
+            }
             logParse(
                 "  [parse:template]   ↗ register tparam '{}' into scope\n",
                 decl->templateParams.back()->name);
@@ -1439,6 +1523,20 @@ TemplateDeclPtr Parser::parseTemplateDecl() {
     else {
         errorAt(current(),
             "Expected 'class' or a function signature after template parameter list");
+    }
+
+    // ★ 出模板形参作用域 + 模板名登记进【外层】作用域（Stage 3）——
+    //   ★ 位置在 closeScope() 之后：此时"当前作用域"就是模板声明所在的外层
+    //     作用域（模板形参作用域对【名字登记】是透明的）。
+    //   类模板的名字已由 parseClassDecl 的 openScope 登记（类型位|模板位）；
+    //   别名模板 / 推导指引 / 函数模板的名字在这里补登记。
+    closeScope();
+    if (decl->isFunctionTemplate()) {
+        // 函数模板的名字是【值】名（函数），但它同时是模板名。
+        declareName(decl->templateName(), ScopeBit::Value | ScopeBit::Template);
+    } else if (!decl->isClassTemplate()) {
+        // 别名模板的名字是类型名；推导指引的名字指向被推导的类模板（也是类型名）。
+        declareName(decl->templateName(), ScopeBit::Type | ScopeBit::Template);
     }
 
     logParse("  [parse:template] ◀ {} template '{}' with {} parameter(s) stored as blueprint\n",
@@ -1664,8 +1762,20 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
         logParse(
             "  [parse:class] ★ forward declaration of '{}' (no body) [dcl.type.elab]\n",
             decl->name);
+        // ★ 前置声明没有类体 ⇒ 不开类作用域，但名字仍要在外层可见
+        //   （`struct A;` 之后 `A* p;` 要能认出 A 是类型）。
+        declareName(decl->name,
+                    ScopeBit::Type | (outSpecPattern ? ScopeBit::Template : 0u));
         return decl;
     }
+
+    // ★ 进类作用域（Stage 3）：类名登记进【外层】作用域（类型位；模板再加模板位），
+    //   类体里的成员（字段/方法/嵌套类/类内别名）登记进这一层。
+    //   对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::ActOnTagStartDefinition 走
+    //   ParseScope(Scope::DeclScope)，
+    //   Sema 侧 ActOnTagStartDefinition/ActOnTagFinishDefinition 挂成员。
+    openScope(ScopeKind::Class, decl->name,
+              ScopeBit::Type | (outSpecPattern ? ScopeBit::Template : 0u));
 
     expect(TokenType::LBrace, "Expected '{' after class name");
 
@@ -1718,6 +1828,8 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             expect(TokenType::Semicolon, "Expected ';' after alias declaration");
             decl->typeAliases[aliasTok.text] = target;
             decl->typeAliasOrder.push_back(aliasTok.text);
+            // ★ 类内类型别名登记进【类作用域】（类型位）—— 类作用域的成员。
+            declareName(aliasTok.text, ScopeBit::Type);
             logParse("  [parse:alias] using {} = {}\n",
                 aliasTok.text, target->toString());
             continue;
@@ -1730,6 +1842,8 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             expect(TokenType::Semicolon, "Expected ';' after typedef");
             decl->typeAliases[aliasTok.text] = target;
             decl->typeAliasOrder.push_back(aliasTok.text);
+            // ★ 类内类型别名登记进【类作用域】（类型位）—— 类作用域的成员。
+            declareName(aliasTok.text, ScopeBit::Type);
             logParse("  [parse:alias] typedef {} {}\n",
                 target->toString(), aliasTok.text);
             continue;
@@ -1787,6 +1901,8 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             auto memTmpl = std::make_shared<TemplateDecl>();
             // 形参作用域建帧：使下面 parseMethodDecl 里的裸 T 认得出是模板形参
             TemplateParamFrame memFrame(this, memTmpl.get());
+            // ★ 进模板形参作用域（Stage 3）：形参名登记进这一层，方法体解析期间可见。
+            openScope(ScopeKind::TemplateParam, "", 0u);
 
             if (!check(TokenType::Greater)) {
                 do {
@@ -1810,6 +1926,12 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
                     }
                     memTmpl->templateParams.push_back(tp);
                     memTmpl->typeParams.push_back(tp->name);
+                    // ★ 形参名登记进【模板形参作用域】（Stage 3）—— 种类位按形态分。
+                    declareName(tp->name,
+                                tp->kind == TemplateParamKind::NonType
+                                    ? ScopeBit::Value
+                                    : (tp->kind == TemplateParamKind::Template
+                                           ? ScopeBit::Template : ScopeBit::Type));
                 } while (match(TokenType::Comma));
             }
             expect(TokenType::Greater,
@@ -1839,6 +1961,12 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             memTmpl->funcTemplate = method;   // templateName() 由此取到函数名
             memTmpl->isMemberTemplate = true;
             decl->memberTemplates.push_back(memTmpl);
+            // ★ 出模板形参作用域；随后给方法名补【模板位】——
+            //   ★ 位置在 closeScope() 之后：此时"当前作用域"是类作用域，
+            //     方法名本来就登记在那儿（parseFunctionDecl 登记的值位），
+            //     这里只补一位（位并集 ⇒ 值位|模板位）。
+            closeScope();
+            declareName(method->name, ScopeBit::Template);
 
             logParse(
                 "  [parse:member] ★ '{}' 是成员模板（{} 个模板形参，[temp.mem]）"
@@ -1933,6 +2061,9 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
                 sm.initializer = std::move(smInit);
                 sm.isConstexpr = m_pendingConstexpr;   // parseType 留下的前缀
                 m_pendingConstexpr = false;
+                // ★ static 数据成员登记进【类作用域】（值位）—— 它是类作用域的名字，
+                //   但【不占对象内存】（存储在类外定义，[class.static.data]）。
+                declareName(smName.text, ScopeBit::Value);
                 decl->staticDataMembers.push_back(std::move(sm));
                 logParse(
                     "  [parse:member] ★ '{}' 是 static 数据成员（不占对象内存，"
@@ -1947,6 +2078,8 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
 
             FieldInfo field;
             field.name = fieldName.text;
+            // ★ 字段登记进【类作用域】（值位）。
+            declareName(fieldName.text, ScopeBit::Value);
             field.type = fieldType;
             field.access = access;
             decl->fields.push_back(field);
@@ -1956,6 +2089,7 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
     expect(TokenType::RBrace, "Expected '}' after class body");
     expect(TokenType::Semicolon, "Expected ';' after class definition");
 
+    closeScope();
     return decl;
 }
 
@@ -2017,6 +2151,12 @@ FuncDeclPtr Parser::parseFunctionDecl(bool isVirtual, const std::string& ownerCl
     const Token& nameToken = expect(TokenType::Identifier, "Expected function name");
     decl->name = nameToken.text;
 
+    // ★ 进函数作用域（Stage 3）：函数名登记进【外层】作用域（值位），形参登记进
+    //   函数作用域，函数体是它里面的一层块作用域。
+    //   对照 clang：ActOnStartOfFunctionDef 里 PushScope(Scope::DeclScope) 开函数
+    //   作用域，形参挂在其中（clang/lib/Sema/SemaDecl.cpp:ActOnStartOfFunctionDef）。
+    openScope(ScopeKind::Function, decl->name, ScopeBit::Value);
+
     // 参数列表
     expect(TokenType::LParen, "Expected '(' after function name");
     decl->parameters = parseParameterList();
@@ -2056,6 +2196,7 @@ FuncDeclPtr Parser::parseFunctionDecl(bool isVirtual, const std::string& ownerCl
         expect(TokenType::Semicolon, "Expected '{' or ';' after function declaration");
     }
 
+    closeScope();
     return decl;
 }
 
@@ -2091,6 +2232,10 @@ std::vector<Parameter> Parser::parseParameterList() {
         } else {
             const Token& nameToken = expect(TokenType::Identifier, "Expected parameter name");
             param.name = nameToken.text;
+            // ★ 形参名登记进【函数作用域】（值位）—— 形参在函数体里可见。
+            //   无名形参（合成名 "$unnamedN"）不登记：那个名字用户写不出来，
+            //   引用不到它，登记进去只会污染查找面。
+            declareName(param.name, ScopeBit::Value);
         }
         params.push_back(param);
     } while (match(TokenType::Comma));
@@ -2278,6 +2423,9 @@ StmtPtr Parser::parseStatement() {
 //   → 产出 BlockStmt{ statements = [VarDeclStmt x, AssignStmt x=1] }
 StmtPtr Parser::parseBlockStmt() {
     expect(TokenType::LBrace, "Expected '{'");
+    // ★ 进块作用域（Stage 3）：块内声明的名字只在这一层可见。
+    //   对照 clang：ParseCompoundStatement 走 ParseScope(Scope::DeclScope)。
+    openScope(ScopeKind::Block, "", 0u);
     std::vector<StmtPtr> stmts;
 
     while (!check(TokenType::RBrace) && !isAtEnd()) {
@@ -2285,6 +2433,7 @@ StmtPtr Parser::parseBlockStmt() {
     }
 
     expect(TokenType::RBrace, "Expected '}'");
+    closeScope();
     return std::make_shared<BlockStmt>(std::move(stmts));
 }
 
@@ -2311,6 +2460,8 @@ TypePtr Parser::parseArrayDeclaratorSuffix(TypePtr baseType) {
 StmtPtr Parser::parseVarDeclStmt(TypePtr type) {
     auto loc = current().location;
     const Token& nameToken = expect(TokenType::Identifier, "Expected variable name");
+    // ★ 局部变量名登记进【当前作用域】（值位）—— 块作用域的普通名字。
+    declareName(nameToken.text, ScopeBit::Value);
     type = parseArrayDeclaratorSuffix(type);
 
     ExprPtr init = nullptr;
@@ -2476,6 +2627,10 @@ StmtPtr Parser::parseForStmt() {
     auto loc = current().location;
     expect(TokenType::KwFor, "Expected 'for'");
     expect(TokenType::LParen, "Expected '(' after 'for'");
+    // ★ for 的【隐式作用域】（[stmt.for]/2：init 的声明在条件与循环体里可见，
+    //   但出了 for 语句就看不见）—— 用块作用域表达。
+    //   对照 clang：ParseForStatement 里 ParseScope(Scope::DeclScope)。
+    openScope(ScopeKind::Block, "", 0u);
 
     // init：空（;) / 声明式（类型开头，自带结尾分号）/ 表达式式或赋值式
     // （赋值在本语言是语句，for 头局部放宽 —— 与 incr 同款的处置）
@@ -2527,6 +2682,7 @@ StmtPtr Parser::parseForStmt() {
 
     StmtPtr body = parseStatement();
 
+    closeScope();   // ★ 出 for 的隐式作用域
     auto stmt = std::make_shared<ForStmt>(init, cond, incr, body);
     stmt->location = loc;
     return stmt;
