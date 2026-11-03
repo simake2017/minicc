@@ -37,7 +37,6 @@
 #include "lexer.h"
 #include "parser.h"
 #include "semantic_analyzer.h"
-#include "name_registry.h"
 #include "preprocessor.h"
 #include "template_instantiation.h"
 #include "codegen.h"
@@ -669,13 +668,10 @@ int main(int argc, char* argv[]) {
         //   ★ Sema 的构造【不产生任何输出】—— 阶段顺序与日志逐字节不变。
         SemanticAnalyzer semaAnalyzer;
 
-        // ★ parser 名字识别（spec §2 步骤 1）：先建登记表并前向收集，
-        //   供 Parser 的消歧做【候选过滤】（"名字是不是模板"这一问）。
-        //   ★ B38 起 Sema 不再持有这张表 —— 限定名的作用域裁决改由 Sema 自己的
-        //   注册表回答（模板按完整限定名注册），第二份作用域事实随之退场。
-        auto nameReg = std::make_shared<NameRegistry>();
-        nameReg->collect(tokens);
-        Parser parser(std::move(tokens), nameReg);
+        // ★ Stage 3 批 2：名字登记表（NameRegistry）已退场 —— 它是【前向扫
+        //   token 流】猜出来的第二份作用域事实，回答不了"此处可见吗"。
+        //   Parser 现在直接问 Sema 的活作用域表（clang Actions 模式）。
+        Parser parser(std::move(tokens));
         parser.setSema(&semaAnalyzer);
         TranslationUnit unit = parser.parseTranslationUnit();
 

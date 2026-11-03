@@ -23,7 +23,6 @@ SRCS=(
     sema/sfinae.cpp
     ast/constant_folder.cpp
     lex/lexer.cpp
-    sema/name_registry.cpp
     sema/parse_scope.cpp
     parse/parser.cpp
     ast/type.cpp

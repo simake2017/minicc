@@ -15,10 +15,10 @@
 | 11 类登记点铺满（命名空间 / 类 / 枚举 / 别名 / 模板 / 形参 / 变量 / 函数 / 成员 / 块 / for） | ✅ 批 1 已做 | `src/parse/parser.cpp` |
 | 限定名逐段定位 + 不外溢 | ✅ 批 1 已做 | `ParseScopeTable::classifyQualified` |
 | 作用域名字持久（离开 N 后 `N::S` 仍可达） | ✅ 批 1 已做 | `ParseScopeTable::leave` |
-| value 位（不再是占位恒 false） | ⬜ 批 2 | — |
-| C++20 `UndeclaredTemplate` 规则（未声明的名字按模板名解释） | ⬜ 批 2 | — |
-| 三个消歧点切到活作用域表 | ⬜ 批 3 | `parser.cpp` 三处 `names()` |
-| `NameRegistry` 整类删除 | ⬜ 批 3 | `include/name_registry.h` / `src/sema/name_registry.cpp` |
+| value 位（不再是占位恒 false） | ✅ 批 2+3 | `include/name_scope.h` + 11 类登记点 |
+| C++20 `UndeclaredTemplate` 规则（未声明的名字按模板名解释） | ✅ 批 2+3 | `Parser::isTemplateNameHere` |
+| 三个消歧点切到活作用域表 | ✅ 批 2+3 | `parser.cpp` 三处 `names()` → `nameBits` |
+| `NameRegistry` 整类删除 | ✅ 批 2+3 | `src/sema/name_registry.*` 已删 |
 
 ## §1 理论背景：clang 的形状
 
@@ -193,16 +193,30 @@ clang++-18 -std=c++20 -fsyntax-only /tmp/probe1/d.cpp
 | 枚举项 | 登记进**外层**作用域 | 不限���枚举的枚举项是外层作用域的名字（[basic.scope.enum]） |
 | `for` 的隐式作用域 | 用块作用域表达 | [stmt.for]/2：init 的声明在条件与循环体里可见，出了 for 看不见 |
 | 类模板的模板形参域 | 覆盖到类体解析结束 | 形参在类体里可见（`template<class T> struct Box { T v; };`） |
-| 三个消歧点 | **仍读旧登记表** | ★ 批 1 刻意如此（行为中立）；批 3 才切 |
+| 三个消歧点 | 批 2+3 已切到活表 | ★ 批 1 刻意保持行为中立（仍读旧登记表），批 2+3 才切 —— 见 docs/learn/52 |
 
-## §8 下一批（Stage 3 批 2 / 批 3）
+## §8 下一批（Stage 3 批 2+3 已完成 → 批 4）
 
-- **批 2**：value 位落地（变量 / 形参 / 函数 / 枚举项 ⇒ Value 位）+ **C++20
-  `UndeclaredTemplate` 规则**（名字查不到且下一个 token 是 `<` ⇒ 假定它是模板名，
-  再用 `isTemplateArgumentList` 式的语法试探兜底）。
-- **批 3**：三个消歧点切到活作用域表 ⇒ `NameRegistry` 整类删除。
-  ★ 切表会改诊断文案（例如未声明的名字从 "Undefined variable" 变成 clang 的
-  "use of undeclared identifier"），属**有意漂移**，须与用户确认口径后重刷基线。
+- **批 2+3 ✅**（2026-11-02 完成，详见 **docs/learn/52**）：value 位落地 +
+  C++20 `UndeclaredTemplate` 规则 + 三个消歧点切表 + `NameRegistry` 整类删除。
+  ★ 切表确实改了诊断文案（未声明的名字从 "Undefined variable" 变成 clang 的
+  "use of undeclared identifier"）—— 属**有意漂移**，已按 clang 口径重刷基线。
+- **批 4 ⬜**：**嵌套类** —— 用同一张作用域链的通用查询解决，不做特判。
+
+### 8.1 给批 4 的三条交接
+
+1. **别再开第二张表**：嵌套类的"这个名字在类作用域里可见吗"就是
+   `ParseScopeTable::classify` 的活链查询 —— 类作用域已经在链上了
+   （`openScope(ScopeKind::Class, …)`），缺的只是**嵌套类的登记**与
+   **类作用域内成员名的可见性裁决**（后者在 Sema 侧，判据单点在
+   `lookupVisibleType` 的第 ① 步"当前类作用域"）。
+2. **别做特判**：`findClassScopeType` 一类"在类里找找看"的特判函数，
+   就是"为解决而解决" —— 它会把"作用域链查询"这件事重新抄一遍，
+   抄的那份迟早与活表分叉（本批修掉的两个 bug 就是分叉的产物）。
+3. **先量再动**：批 4 的验收形态是"A::B 与全局 B 并存不串"，
+   先写出来源用例（clang 对拍），再写实现 —— 本批的教训是
+   **用例的注释与实现曾经互相矛盾**（basics_23 现场②的注释写着"是表达式"，
+   实现却判成声明），靠对拍才暴露。
 
 ## 演进记录
 
@@ -211,6 +225,5 @@ clang++-18 -std=c++20 -fsyntax-only /tmp/probe1/d.cpp
 | Stage 1（B37） | 2026-11-02 | 可见性裁决下沉 Sema（`lookupVisibleType` 单点） | ctest 369/369 |
 | Stage 2（B38） | 2026-11-02 | 作用域即身份（模板按完整限定名注册）；登记表退场一处 | ctest 376/376 |
 | **Stage 3 批 1** | **2026-11-02** | **活作用域表 + Actions 句柄 + 11 类登记点**（消歧点仍读旧表 ⇒ 行为中立） | build 0 警告 / ctest **388/388** / 160 份集成日志**逐字节零漂移** |
-| Stage 3 批 2 | ⬜ | value 位 + C++20 `UndeclaredTemplate` 规则 | ⬜ |
-| Stage 3 批 3 | ⬜ | 三个消歧点切表 + `NameRegistry` 删除 | ⬜ |
+| **Stage 3 批 2+3** | **2026-11-02** | **value 位 + C++20 `UndeclaredTemplate` 规则 + 三个消歧点切表 + `NameRegistry` 删除** | ctest **382/382** / 162 份集成日志逐字节零差异 |
 | Stage 3 批 4 | ⬜ | **嵌套类**（用同一张作用域链的通用查询解决，不做特判） | ⬜ |

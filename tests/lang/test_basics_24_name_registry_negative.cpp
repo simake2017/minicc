@@ -4,10 +4,12 @@
 // 理论点：
 //   · B35 的 Sema 尾剥对 `N::B<...>` 取末段查【全局】蓝图表——N::B 真存在时
 //     归一正确，但 N::B 不存在而全局存在同名模板 B 时方向性错（误绑）。
-//   · parser 名字识别后改为登记表 classifyQualified（scope 精确）裁决：
+//   · parser 名字识别后改为【活作用域表】classifyQualified（scope 精确）裁决：
 //     全局 B 的 scope="" 配不上 scope="N" ⇒ 响亮报错。
 //   · 判据「名字在哪个作用域当真」单点：Parser 语句层闸（模板 id 层查表）、
-//     表达式层闸、Sema 限定名裁决共用同一张登记表（spec 拍板 2）。
+//     表达式层闸、Sema 限定名裁决共用同一张表（spec 拍板 2）。
+//     ★ Stage 3 批 2 起这张表是 Sema 的【活作用域链】（ParseScopeTable），
+//     旧的"名字登记表"（前向扫 token 流猜的跨作用域并集）已退场。
 // 预期行为：rc=1，报错文案与 clang 逐字对齐（探针实测）：
 //   [Semantic Error] no template named 'B' in namespace 'N'
 //   （clang 另附 "did you mean simply 'B'?" 提示——本实现不做建议，见 spec OOS 5）

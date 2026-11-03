@@ -3086,3 +3086,76 @@ int main() {
 **教训**：**"恰好一致"不是"一致"** —— 两份实现只要在某个输入子集上碰巧相同，
 就会把错法藏起来，直到有人写出那个子集。判据要收口到**一处**，
 而不是"两处都写对了"。
+
+## B40. 变量遮蔽在 Parser 层看不见：同名类型被当成可见，裸名语句判错
+
+- severity: medium ｜ status: fixed ｜ related: src/parse/parser.cpp, docs/learn/52, docs/BUGS.md B37
+
+**现象**
+
+```cpp
+struct S { int x; };
+int main() {
+    int S = 5;      // ★ 块作用域的变量遮蔽了全局的类 S
+    S;              // ★ 修前：判为【声明】（无声明符声明）；修后：表达式
+    if (S != 5) return 1;
+    return 0;
+}
+```
+
+**性质**：**判错但结果侥幸正确**（旧路径把 `S;` 当成无声明符声明，不发射代码，
+运行结果与 clang 相同）—— 属"静默走错分支"型缺陷：日志与 AST 形状错，
+但因为那条语句没有副作用，行为上看不出来。
+
+**根因**：语句层的消歧判据问的是**名字登记表**的 type 位，而那张表是
+**前向扫 token 流**得到的**跨作用域并集** —— 它分不出"这里有个变量遮蔽了同名类型"
+（[basic.scope.hiding]）。而 tests/lang/test_basics_23 的注释**早就写着**
+"块作用域的变量 S【遮蔽】全局的类 S ⇒ 此处的 `S;` 是【表达式】不是声明"——
+★ 实现与用例文档互相矛盾，靠对拍才暴露。
+
+**修法**：判据换成 Sema 的**活作用域表**（Stage 3 批 2+3）：问的是
+"这个名字在此处**是不是一个值**"——是值 ⇒ 表达式；不是 ⇒ 声明候选
+（可见性仍由 Sema 的 `lookupVisibleType` 裁决）。活表登记了块作用域里的
+局部变量 ⇒ 遮蔽可见。
+
+**回归**：tests/lang/test_basics_23（现场②现在没有 `[parse:stmt]` 行、
+汇编多一条 `movq` 加载局部变量）+ tests/lang/test_basics_25（现场④同款）；
+单测 tests/unit/test_parse_scope.cpp 的 `ParseScopeRetirement.ValueBitDistinguishesShadowingFromTypes`。
+
+**教训**：**用例的注释也是契约** —— 注释说"应该是表达式"而实现说"是声明"，
+说明二者有一个在说谎；只跑"结果对不对"看不出问题（两者运行结果相同），
+要靠**读用例意图 + 对拍**才抓得到。
+
+## B41. 模板名不是类型名，但仍是可见的名字：`Box;` 被拒收（合法程序被拒）
+
+- severity: medium ｜ status: fixed ｜ related: src/sema/semantic_analyzer.cpp, docs/learn/52
+
+**现象**
+
+```cpp
+template<class T> struct Box { T v; };
+int main() {
+    Box;              // ★ 修前：use of undeclared identifier 'Box'（rc=1）；修后：rc=0
+    return 0;
+}
+```
+
+**性质**：**拒收合法程序**（clang 只给 `-Wmissing-declarations` warning，rc=0）。
+
+**根因**：裸名声明的裁决分三问（`SemanticAnalyzer::visit(EmptyStmt&)`）：
+① 是不是**可见的类型**？② 是不是声明过的名字？③ 都不是 ⇒ 响亮拒收。
+第一问查的是 `lookupVisibleType` ⇒ 走符号表 ⇒ **模板名不在符号表里**
+（模板的蓝图在 `m_classTemplates`）⇒ 第一问答否；
+第二问 `isNameDeclared` 也只查符号表 ⇒ 同样答否 ⇒ 落到第三问 ⇒ 报错。
+★ 根子是**只问了"是不是类型"，没问"是不是模板名"** —— 而模板名虽然不是类型名，
+却是**可见的名字**（[basic.scope.scope]：模板名与类型名不同类，但都能作声明）。
+
+**修法**：加第三问 `isVisibleTemplateName`（判据单点：类模板 / 别名模板蓝图各一张表），
+与表达式语句折叠那条路径共用同一句判据（原先那里写的是内联的两张表.count）。
+
+**回归**：tests/lang/test_basics_31（`Box;` 与 `N::B;` 两条，rc=0；
+日志含 "[sema:stmt] 'Box' 可见的模板名 ⇒ 判为无声明符声明"）。
+
+**教训**：**"X 不是 Y"不等于"X 什么都不是"** —— 一条判据只问了"是不是类型"，
+就把"是模板名"这一类合法输入漏在了门外。判据要覆盖**问题的完整分类**，
+而不是覆盖"最常见的那一类"。

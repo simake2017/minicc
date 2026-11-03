@@ -50,7 +50,6 @@
 
 #include "token.h"
 #include "ast.h"
-#include "name_registry.h"
 #include "name_scope.h"
 #include <vector>
 #include <memory>
@@ -90,19 +89,21 @@ public:
 class Parser {
 public:
     // 按值接收后 move 进成员，避免拷贝整个 Token 数组。
-    // 重载 1（主线）：名字登记表由调用方（main）构造并交给 Parser——
-    //   ★ B38 起 Sema 不再持有这张表（限定名的作用域裁决改由 Sema 自己的
-    //     注册表回答，第二份作用域事实随之退场）；构造点见 src/driver/main.cpp。
-    // 重载 2（单测便利）：内部自建并收集一张表，行为与 B31 等价。
-    explicit Parser(std::vector<Token> tokens,
-                    const std::shared_ptr<const NameRegistry>& names);
+    // ★ Stage 3 批 2 起：Parser 自带一个 Sema（对照 clang 的 `Sema &Actions`
+    //   是构造期就位的前提）—— 名字的种类与可见性由 Sema 的活作用域表回答，
+    //   Parser 只在"声明点"登记、在"消歧点"查询（窄接口，见 semantic_analyzer.h）。
+    //   旧设计（名字登记表 NameRegistry）随本批退场：它是【前向扫 token 流】
+    //   猜出来的第二份作用域事实，与 Sema 的活表各说各话（B38 起已不合流）。
     explicit Parser(std::vector<Token> tokens);
+    // ★ 析构函数必须【在 .cpp 里定义】：成员是 std::unique_ptr<SemanticAnalyzer>
+    //   而 SemanticAnalyzer 在本头文件里只有前向声明（不引 sema 域的头）。
+    ~Parser();
 
     // ── 挂上 Sema 句柄（Stage 3：clang Actions 模式）──
     // ★ Parser 不再自建作用域事实：名字的种类与可见性由 Sema 的活作用域表裁决，
     //   Parser 只在"声明点"登记、在"消歧点"查询（窄接口，见 semantic_analyzer.h）。
     //   对照 clang：Parser 构造时拿到的 `Sema &Actions`（clang Parser.h:639）。
-    // 不挂（单测自建 Parser）⇒ 登记/查询一律跳过，行为退化为 B38 之前的样子。
+    // 不挂 ⇒ 登记/查询一律跳过（消歧点退化为"不知道"⇒ 宁宽勿窄地走老路）。
     void setSema(SemanticAnalyzer* sema) { m_sema = sema; }
 
     // 解析整个编译单元（入口函数，由 main 驱动调用）
@@ -258,38 +259,41 @@ private:
     //   试探路径用；非试探路径行为与直写 std::cout 逐字节一致。
     std::vector<std::string> m_logBuffers;
 
-    // ── B31→47：只读「名字登记表」（ROADMAP 主线 I 第 1 项 → parser 名字识别）──
-    // 消歧判据需要回答"a 是模板名吗 / S 是类型名吗"——这个信息住在 Sema 的
-    // 符号表里，而 [stmt.ambig] 的设计基石是"语法期零语义"（B16/B21 确立）。
-    // 生产做法（clang）：Parser 持 Actions 句柄，歧义点回调 isTemplateName()/
-    // ClassifyName() 问一个 bit 的问题，决议权仍在 Sema。minicc 轻量版：
-    // NameRegistry 在解析开始前【前向扫一遍 token 流】收集本 TU 名字的种类
-    // 投影（type/namespace/template 三位并集），Parser 持 const 访问
-    //   （★ B38 起 Sema 不再持有本表 —— 限定名裁决归 Sema 自己的注册表）。
-    // 查询面只到"名字的种类"，不做方法存在性 lookup，不打破 Sema 分层。
-    // ★ 前向收集而非边解析边登记：名字可以先使用后声明（Sema 三遍扫描支持），
-    //   使用点出现在声明之前时登记表也必须已含该名。
-    // ★ std 垫片（registerBuiltins 直接注入 AST）不经 token 流——shim 名只在
-    //   【类型位置】使用（parseType 分支，不走本消歧），故不收进表也不影响；
-    //   declval 例外（表达式位置调用），经 builtin 种子收入。边界见 docs/learn/46/47。
-    std::shared_ptr<const NameRegistry> m_names;
-    const NameRegistry& names() const { return *m_names; }
-
     // ── Sema 活句柄（Stage 3）──
     // ★ 只持指针，不持作用域数据 —— 作用域表住在 Sema 那边（红线 1）。
-    //   没有句柄时（单测自建 Parser）下面三个助手一律空转。
+    //   自建 Parser 时由 m_ownedSema 兜底（clang 的 Actions 恒在位）。
     SemanticAnalyzer* m_sema = nullptr;
+    // 自建 Sema（仅"Parser 单跑"时用；主线由 main 注入，见 src/driver/main.cpp）。
+    std::unique_ptr<SemanticAnalyzer> m_ownedSema;
 
     // ── 名字登记助手（Stage 3）──
     // 三条判据各写一处、只写一处（判据单点）：
     //   声明一个名字到当前作用域；
     //   声明一个"引入作用域的名字"并进入该作用域（返回新作用域路径）；
     //   离开当前作用域。
-    // 空句柄时全部空转 ⇒ 单测自建 Parser 的行为与挂上句柄时【仅名字表】不同，
-    // 其余完全一致。
+    // 空句柄时全部空转 ⇒ 登记/查询退化为"不知道"（宁宽勿窄）。
     void declareName(const std::string& name, unsigned bits);
     void openScope(ScopeKind kind, const std::string& name, unsigned bits);
     void closeScope();
+
+    // ── 名字种类查询（Stage 3 批 2：消歧点向 Sema 问"这个名字在此处是什么"）──
+    // ★ 位含义见 include/name_scope.h；查不到 = 0 = 未知 = 宁宽勿窄
+    //   （只做正向判定，绝不从"没有某位"反推"不是某类"）。
+    //   限定名与裸名统一入口（限定名的逐段解析在表那一侧做）。
+    unsigned nameBits(const std::string& name) const;
+
+    // ★ C++20 [temp.names] 的 UndeclaredTemplate 规则：名字在本作用域链上
+    //   【查不到】+ 后面是 '<' ⇒ 必须假定它是模板名。
+    //   对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::ClassifyName ——
+    //     "NotFound && NextTokenIsLess ⇒ UndeclaredTemplate"
+    //     （"we're required to assume that this is a template name"）。
+    //   复核由【试探实参表】完成（clang 用 isTemplateArgumentList，本实现在
+    //   同一处试探：解析不出实参表 ⇒ 回滚成比较链）。
+    // ★ 声明过就【不】假定：变量可以遮蔽模板名（[basic.scope.hiding]）。
+    bool isTemplateNameHere(const std::string& name) const;
+
+    // 语句层链闸专用：实参表已解析完 ⇒ '<' 必然存在 ⇒ C++20 假定直接适用。
+    bool isTemplateNameInTemplateId(const std::string& name) const;
 
     // 日志【单一出口】（B32「正确的写法」第 2 条）：全部 [parse:*] 打点过
     //   这里。收口前 87 处 std::cout 散点直写 —— 符号定名、择优早已"判据

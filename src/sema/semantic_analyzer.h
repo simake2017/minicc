@@ -547,6 +547,10 @@ private:
     VisibleType lookupVisibleType(const std::string& name);
     // 这个名字声明过吗（任意 kind：变量/函数/类型）——裸名声明裁决的第二问。
     bool isNameDeclared(const std::string& name);
+    // 这个名字是【可见的模板名】吗（类模板 / 别名模板蓝图）——
+    //   模板名不是类型名，但它是可见的名字：`Box;` 在 clang 是合法程序。
+    //   判据单点：裸名声明裁决与表达式语句折叠两处共用（红线 3）。
+    bool isVisibleTemplateName(const std::string& name) const;
 
     // ── decltype 求值（实现 DecltypeEvaluator 接口，理论见 docs/learn/20）──
     // [dcl.type.decltype] 两套规则，按原文形态分派（int a; int& r = a;）：

@@ -167,4 +167,60 @@ TEST(ParseScopeBits, SameNameCanBeBothTypeAndTemplate) {
     EXPECT_EQ(t.classify("Box"), ScopeBit::Type | ScopeBit::Template);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 名字登记表的退场（Stage 3 批 2）：旧表（NameRegistry）是【前向扫 token 流】
+// 猜出来的跨作用域并集，本表是 Sema 的活作用域链 —— 下面四条钉住两者的分水岭。
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(ParseScopeRetirement, TemplateInNamespaceIsNotVisibleAsBareName) {
+    // ★ 旧表说"可见"（裸名对任意作用域 OR 取并集）⇒ `B<int>` 在 N 外也被
+    //   当成模板；真 C++ 里 N 里的模板在 N 外不可见（[basic.lookup.unqual]）。
+    ParseScopeTable t;
+    t.openScope(ScopeKind::Namespace, "N", ScopeBit::Namespace);
+    t.declare("B", ScopeBit::Type | ScopeBit::Template);
+    t.leave();
+    EXPECT_EQ(t.classify("B"), 0u);              // 裸名不可见
+    EXPECT_EQ(t.classifyQualified("N::B"), ScopeBit::Type | ScopeBit::Template);
+}
+
+TEST(ParseScopeRetirement, ClassScopeAliasIsNotVisibleOutsideTheClass) {
+    // ★ 旧表把类体内的名字登记在【外层】作用域 ⇒ 全局裸用 `B` 被误判成
+    //   "这里有类型 B"（basics_27 的现场）；活表里它只活在类作用域内。
+    ParseScopeTable t;
+    t.openScope(ScopeKind::Class, "A", ScopeBit::Type);
+    t.declare("B", ScopeBit::Type);              // A 内的 using B = int;
+    t.leave();
+    EXPECT_EQ(t.classify("B"), 0u);              // 类外不可见
+    EXPECT_EQ(t.classifyQualified("A::B"), ScopeBit::Type);
+}
+
+TEST(ParseScopeRetirement, ValueBitDistinguishesShadowingFromTypes) {
+    // ★ 旧表没有 value 位 ⇒ 块作用域的变量遮蔽同名全局类型时，Parser 分不出
+    //   `S;` 是声明还是表达式（basics_23 现场②）；活表有 value 位 ⇒ 分得出。
+    ParseScopeTable t;
+    t.declare("S", ScopeBit::Type);              // 全局 struct S
+    EXPECT_EQ(t.classify("S") & ScopeBit::Value, 0u);   // 类型：不是值
+    t.openScope(ScopeKind::Block, "", 0u);
+    t.declare("S", ScopeBit::Value);             // 块作用域的 int S;
+    EXPECT_EQ(t.classify("S") & ScopeBit::Value, ScopeBit::Value);
+    EXPECT_EQ(t.classify("S") & ScopeBit::Type, 0u);    // ★ 遮蔽：类型位被压住
+    t.leave();
+    EXPECT_EQ(t.classify("S") & ScopeBit::Value, 0u);   // 出了块作用域，遮蔽消失
+}
+
+TEST(ParseScopeRetirement, NamespaceScopeStackIsRestoredOnPop) {
+    // 旧表的花括号深度配对只能判"在不在某个作用域"，活表直接给出路径与深度。
+    ParseScopeTable t;
+    t.openScope(ScopeKind::Namespace, "N1", ScopeBit::Namespace);
+    t.openScope(ScopeKind::Namespace, "N2", ScopeBit::Namespace);
+    t.declare("S2", ScopeBit::Type);
+    t.leave();
+    t.declare("S1", ScopeBit::Type);             // N1 里的（不在 N2 里）
+    t.leave();
+    EXPECT_EQ(t.classifyQualified("N1::N2::S2"), ScopeBit::Type);
+    EXPECT_EQ(t.classifyQualified("N1::S1"), ScopeBit::Type);
+    EXPECT_EQ(t.classifyQualified("N1::N2::S1"), 0u);   // N2 里没有 S1
+    EXPECT_EQ(t.classify("S1"), 0u);                     // 裸名都在 N1 之外不可见
+}
+
 }  // namespace

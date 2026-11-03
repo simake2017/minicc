@@ -56,21 +56,17 @@ namespace minicc {
 // 文法：（无）—— 仅持有 Token 流，游标 m_pos 初始化为 0（指向第一个 Token）。
 // 入参 demo：tokens = [int][main][(][)][{][return][0][;][}][Eof]
 //           构造后 m_pos = 0 → current() = [int]
-// B31/47：构造时关联名字登记表（前向收集、只读查询），
-//       [stmt.ambig] 消歧点据此只读查询，见 name_registry.h / docs/learn/46/47。
-Parser::Parser(std::vector<Token> tokens,
-               const std::shared_ptr<const NameRegistry>& names)
-    : m_tokens(std::move(tokens)), m_names(names) {
-    if (!m_names) throw std::logic_error("NameRegistry must not be null");
-}
-
-// 单测便利重载：内部自建并收集一张登记表（与主线共享表的行为等价；
-// B31 的 collectTemplateNames 已搬迁进 NameRegistry::collect）。
+// ★ Stage 3 批 2：自建一个 Sema 当"名字裁决者"（clang 的 `Sema &Actions`
+//   是 Parser 的构造前提，不是可选配件）。主线由 main 注入自己那份
+//   （semaAnalyzer 必须在 Parser 之前构造，见 src/driver/main.cpp）。
 Parser::Parser(std::vector<Token> tokens)
     : m_tokens(std::move(tokens)),
-      m_names(std::make_shared<NameRegistry>()) {
-    const_cast<NameRegistry&>(*m_names).collect(m_tokens);
+      m_ownedSema(std::make_unique<SemanticAnalyzer>()) {
+    m_sema = m_ownedSema.get();
 }
+
+// 析构：unique_ptr<SemanticAnalyzer> 的完整类型只在本文件可见 ⇒ 在此定义。
+Parser::~Parser() = default;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 名字登记助手（Stage 3：clang Actions 模式）
@@ -98,6 +94,54 @@ void Parser::openScope(ScopeKind kind, const std::string& name, unsigned bits) {
 void Parser::closeScope() {
     if (!m_sema) return;
     m_sema->leaveParseScope();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 名字种类查询（Stage 3 批 2：消歧点问 Sema "这个名字在此处是什么"）
+// ─────────────────────────────────────────────────────────────────────────────
+// ① 定位：把"名字的种类"这一问收敛到 Sema 的活作用域表；Parser 侧只做转发
+//    与 C++20 规则的两条分支判断，不自建第二份事实（红线 1「语义裁决权单一」）。
+// ② 源码锚点：clang/lib/Sema/SemaDecl.cpp:912:Sema::ClassifyName（沿链查并分类）
+//    + clang/lib/Sema/SemaDecl.cpp:995:Sema::ClassifyName 的 C++20 分支
+//    （NotFound + 下一个 token 是 '<' ⇒ UndeclaredTemplate）。
+// ③ 动机：旧实现拿"前向扫 token 流"猜出来的名字登记表回答同一问 —— 那张表
+//    不区分作用域（跨作用域取并集），于是"别的命名空间里的模板名"在本处
+//    也算数，消歧点据此做出的判断与 Sema 的符号表各说各话。
+//    换成活作用域表后，"此处可见"这件事只有一个答案。
+// ④ demo: namespace N { struct S{}; } int main(){ S; }
+//       nameBits("S") ⇒ 0（S 不在全局这条链上）⇒ 语句层走【表达式】分支
+//       ⇒ Sema 报 "use of undeclared identifier 'S'"（与 clang 逐字）。
+//    demo: template<class T> struct Box{}; int main(){ Box<int> b; }
+//       nameBits("Box") ⇒ ScopeBit::Template ⇒ 模板 id 消歧闸放行。
+unsigned Parser::nameBits(const std::string& name) const {
+    if (!m_sema) return 0;
+    // 限定名与裸名统一入口：表那一侧负责逐段解析限定者（不外溢）。
+    return m_sema->classifyParseQualified(name);
+}
+
+// 表达式消歧闸用：此处是模板名吗？
+//   ① 表里有模板位 ⇒ 是（clang：ClassifyName 命中模板名）。
+//   ② 表里查不到 + 下一个 token 是 '<' ⇒ 按 C++20 [temp.names] 假定是模板名
+//      （clang 的 UndeclaredTemplate 分支）。复核在【试探实参表】那一步完成：
+//      解析不出实参表 ⇒ 回滚成比较链（宁宽勿窄）。
+//   ③ 查不到但后面不是 '<' ⇒ 不是模板名（普通表达式路径）。
+// ★ ② 只对【裸名】成立 —— clang 的条件是 `SS.isEmpty()`（限定名为空）：
+//   `N::unknown<int>(y)` 里 unknown 在 N 中不存在时，clang 报
+//   "no member named 'unknown' in namespace 'N'"，【不】按模板名假定
+//   （clang 探针实测，见 docs/learn/52 §1.3）。
+bool Parser::isTemplateNameHere(const std::string& name) const {
+    const unsigned bits = nameBits(name);
+    if (bits & ScopeBit::Template) return true;
+    if (bits != 0) return false;   // 声明过（变量可遮蔽模板名）⇒ 不假定
+    if (name.find("::") != std::string::npos) return false;   // 限定名不假定
+    return check(TokenType::Less);
+}
+
+// 语句层链闸用：实参表已解析完 ⇒ '<' 必然存在 ⇒ C++20 假定直接适用。
+bool Parser::isTemplateNameInTemplateId(const std::string& name) const {
+    const unsigned bits = nameBits(name);
+    if (bits & ScopeBit::Template) return true;
+    return bits == 0;   // 查不到 ⇒ 按 C++20 假定是模板名
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2364,29 +2408,41 @@ StmtPtr Parser::parseStatement() {
                     }
                     isDecl = hasTemplIdSyntax && isDeclaratorlessDecl(type);
                     // ★ 裸 `S;`（无模板 id 语法、无声明符）：parser 名字识别
-                    //   新增消费点（spec §2 步骤 2 / 设计 3.2）——查登记表的
-                    //   type 位：命中 ⇒ 声明解释（[stmt.ambig]「能当声明就当
-                    //   声明」；`int S; struct S;` 并存时声明优先，与 clang 同）。
-                    //   查不到 = 位未命中 = 走表达式（宁宽勿窄，spec 异常 1），
-                    //   Sema 对未声明名的报错兜底。替换 B35「裸 S; 刻意不算、
-                    //   留表达式路径给 Sema」的注释策略——当时登记表只有模板位。
-                    // ★★ B37：命中只是【候选】——"这个类型名在此处可见吗"由 Sema
-                    //   用自己的符号表裁决（红线 3 判据单点）。故此处把名字带进
-                    //   AST（EmptyStmt::typeName），Parser 不下"可见"的结论：
-                    //   登记表的 type 位是跨作用域并集，命中不等于可见
-                    //   （`namespace N { struct S{}; } int main(){ S; }` 里
-                    //   S 在 N 里、全局不可见 —— 此前直接判声明 ⇒ 静默放行）。
-                    if (!isDecl && !hasTemplIdSyntax
-                        && names().classify(type->name).isType) {
-                        isDecl = true;
-                        bareDeclName = type->name;   // commit 后打日志
+                    //   新增消费点（spec §2 步骤 2 / 设计 3.2）——问 Sema 的活
+                    //   作用域表："这个名字在此处【是不是一个值】？"
+                    //   不是值 ⇒ 声明解释（[stmt.ambig]「能当声明就当声明」；
+                    //   `int S; struct S;` 并存时声明优先，与 clang 同）。
+                    //   ★ 判据为什么是"不是值"而不是"是类型"：
+                    //     clang 的分流是"能当类型名吗"（[stmt.ambig]），
+                    //     但 minicc 把【可见性】留给 Sema 裁决（B37），Parser
+                    //     只给候选。此处若要求"必须是可见的类型"，则
+                    //     "完全没声明过的名字"会落到表达式分支 ⇒ minicc 报
+                    //     "Undefined variable 'q'"（与 clang 的
+                    //     "use of undeclared identifier 'q'" 不一致）；
+                    //     按"不是值"分流 ⇒ 未声明的名字也走声明分支 ⇒
+                    //     交给 Sema 的 EmptyStmt 分支报 clang 的文案（逐字）。
+                    //   ★ 名字可见性由 Sema 的 lookupVisibleType 裁决（红线 3
+                    //     判据单点）—— Parser 不下"可见"的结论，只把名字
+                    //     带进 AST（EmptyStmt::typeName）。
+                    //     `namespace N { struct S{}; } int main(){ S; }` 里
+                    //     S 在 N 里、全局不可见 ⇒ 这里判"不是值" ⇒ 走声明
+                    //     分支 ⇒ Sema 报 "use of undeclared identifier 'S'"。
+                    if (!isDecl && !hasTemplIdSyntax) {
+                        const unsigned bits = nameBits(type->name);
+                        if ((bits & ScopeBit::Value) == 0) {
+                            isDecl = true;
+                            bareDeclName = type->name;   // commit 后打日志
+                        }
                     }
                 }
-                // 登记表第一层闸（B35）：模板 id 层的基名不在登记表 ⇒ 比较链
+                // 模板 id 链闸（B35）：模板 id 层的基名不是模板名 ⇒ 比较链。
+                // ★ Stage 3 批 2：判据换成"活作用域表 + C++20 假定"
+                //   （isTemplateNameInTemplateId）——旧判据查的是前向扫出来
+                //   的名字登记表（跨作用域并集，猜的）。
                 if (isDecl) {
                     for (TypePtr t = type; t; t = t->nestedQualifier) {
                         if (!t->templateArgs.empty()
-                            && !names().isTemplateName(t->name)) {
+                            && !isTemplateNameInTemplateId(t->name)) {
                             isDecl = false;
                             break;
                         }
@@ -3214,13 +3270,15 @@ ExprPtr Parser::parsePrimaryExpr() {
         // ★ 只捕获 ParseError（语法错误这一"预期信号"）——旧代码 catch
         //   std::exception 全集会把试探内部的真 bug（越界/logic_error）吞成
         //   "不是模板"，静默降级（BUGS.md B31 附带问题，主线 I 第 3 项）。
-        // ★ B31 第一层闸（ROADMAP 主线 I 第 1 项）：'<' 出现只说明"可能是"
-        //   小于号——先查只读模板名登记表，名字不在表中 ⇒ 无论 '>' 后跟
-        //   什么都不是 template-id，直接按比较运算解析。修复 `a<b>(c)`
-        //   全变量比较链被误判（试探解析把 a 当模板名，"实参表"竟也成立，
-        //   直到 Sema 才炸）。名字在表中也未必是（变量可以遮蔽模板名），
-        //   仍走试探——试不出来回退比较，方向保守。
-        if (check(TokenType::Less) && names().isTemplateName(name)) {
+        // ★ Stage 3 批 2：第一层闸改成"问 Sema"（活作用域表 + C++20 假定）。
+        //   '<' 出现只说明"可能是"小于号——先问"这个名字在此处是不是模板名"：
+        //     ① 表里有模板位 ⇒ 是 ⇒ 继续试探实参表；
+        //     ② 表里查不到 ⇒ 按 C++20 [temp.names] 假定是模板名（clang 的
+        //        UndeclaredTemplate 分支）⇒ 同样试探实参表；
+        //     ③ 查得到但不是模板（变量遮蔽模板名）⇒ 不是 ⇒ 走比较运算。
+        //   旧判据查的是"前向扫 token 流"猜出来的名字登记表（跨作用域并集），
+        //   那张表已随本批退场 —— 它回答不了"此处可见吗"这件事。
+        if (check(TokenType::Less) && isTemplateNameHere(name)) {
             std::vector<TemplateArg> explicitArgs;
             bool isTemplateId = false;
             {

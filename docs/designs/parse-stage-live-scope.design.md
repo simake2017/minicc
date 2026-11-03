@@ -1,4 +1,4 @@
-# 技术设计：解析期活作用域表（Stage 3 批 1 —— Actions 句柄与作用域链，B38 遗留）
+# 技术设计：解析期活作用域表（Stage 3 批 1~3 —— Actions 句柄、作用域链、三个消歧点切表）
 
 > 对应源码：`include/name_scope.h`（跨域契约）、`src/sema/parse_scope.h/.cpp`（活作用域表）、
 > `src/sema/semantic_analyzer.h/.cpp`（Sema 持有 + 窄接口）、`src/parse/parser.h/.cpp`（句柄 + 登记点）、
@@ -148,12 +148,27 @@ void Parser::declareName(const std::string& name, unsigned bits) {
 | Class | ✅（**局部类除外**） | `A::B`（嵌套类）要可达；函数 / 块里的类是**局部类**，C++ 里没有 `f::Local` 这种限定名 |
 | Function / Block / TemplateParam | ❌ | 局部声明不该被限定名查到 |
 
+### 3.6 三个消歧点的新判据（批 2+3）
+
+三个消歧点从"查前向扫描猜出来的登记表"改成"问活作用域表"，判据各写一处：
+
+| 消歧点 | 位置 | 旧判据（登记表） | 新判据（活表） |
+|---|---|---|---|
+| 语句层裸名 `S;` | `parser.cpp` 的 `parseStatement` | `classify(name).isType`（跨作用域并集 ⇒ **看不见遮蔽**） | `!(bits & Value)` ⇒ 声明候选（可见性交 Sema 裁决） |
+| 语句层模板 id 链闸 | 同上 | `isTemplateName(基名)` | `isTemplateNameInTemplateId(基名)`：有模板位 ∨ 查不到（C++20 假定） |
+| 表达式模板闸 `f<T>(x)` | `parser.cpp` 的 `parsePrimaryExpr` | `isTemplateName(name)` | `isTemplateNameHere(name)`：有模板位 ∨ **查不到且是裸名且下一个 token 是 `<`** |
+
+★ 三条判据的**分歧点**只有一处：C++20 假定在表达式闸**限定名不适用**
+（clang 的 `SS.isEmpty()`），在语句层链闸**适用**（那里问的是"是不是模板 id 语法"，
+不是"是不是模板名"；若不适用，`N::B<int> x;` 会退化成比较链，
+丢掉与 clang 逐字一致的 "no template named 'B' in namespace 'N'"）。
+
 ## 4. 异常流转表
 
 | 异常 | 触发点 | 处理 |
 |---|---|---|
 | 解析中途 `ParseError` | 任意声明点 | 作用域链停在半开层 —— 整个编译单元中止，表随之丢弃，**无影响** |
-| Parser 无 Sema 句柄 | 单测自建 Parser | 三个助手全部空转（`if (!m_sema) return;`）—— 行为退化为"没有这张表" |
+| Parser 无 Sema 句柄 | 显式置空（正常路径不会发生：Parser 自带 Sema） | 三个助手全部空转（`if (!m_sema) return;`）—— 行为退化为"没有这张表" |
 | `leave()` 时链只剩 Global | 逻辑错误 | 直接返回（Global 不可弹出） |
 | 限定名查不到 | `classifyQualified` | 返回 0；**由宽改严的方向由调用方决定**（消歧点据此走"不是模板"） |
 
@@ -190,10 +205,11 @@ tests/unit/test_parse_scope.cpp 12 例单测
 
 | AI 可以自决 | 必须问人 |
 |---|---|
-| 登记点的**具体位置**（在声明点后、在作用域内） | 三个消歧点**何时切到活作用域表**（批 3）—— 影响诊断文案，须与用户确认口径 |
-| 持久化判据的细节（局部类不持久） | C++20 `UndeclaredTemplate` 规则是否**照 clang 逐字**实现（批 2） |
-| 表的内部表示（`unordered_map` vs `map`） | 是否**顺带**把 `inferVar` 的 "Undefined variable" 改成 clang 的 "use of undeclared identifier"（影响面大） |
-| 单测的用例切分 | 嵌套类是否用**同一张作用域链**解决（★ 用户已拍板：要"正统方式"，不做特判） |
+| 登记点的**具体位置**（在声明点后、在作用域内） | ~~三个消歧点何时切到活作用域表~~ ⇒ **批 2+3 已切**，口径按 clang（诊断文案对齐 + 基线重刷） |
+| 持久化判据的细节（局部类不持久） | ~~C++20 规则是否照 clang 逐字实现~~ ⇒ **已定：照 clang**（裸名限定，`SS.isEmpty()`） |
+| 表的内部表示（`unordered_map` vs `map`） | ~~是否顺带把 "Undefined variable" 改成 clang 文案~~ ⇒ **已做**（裸名改；限定名待做，见 learn/52 §7） |
+| 单测的用例切分 | 嵌套类是否用**同一张作用域链**解决 ⇒ **用户已拍板：要"正统方式"，不做特判**（批 4） |
+| 限定名的 C++20 假定要不要做 | clang 的 `SS.isEmpty()` 说明**不做** —— 但语句层的模板 id 链闸仍对限定名放行（那里问的是"是不是模板 id 语法"，不是"是不是模板名"） |
 
 ## 8. 与 clang 的对照
 
@@ -203,5 +219,6 @@ tests/unit/test_parse_scope.cpp 12 例单测
 | `clang/lib/Sema/SemaDecl.cpp:1574:Sema::PushOnScopeChains` | `ParseScopeTable::declare` / `openScope` | 名字入作用域 |
 | `clang/lib/Parse/Parser.cpp:427/437:Parser::EnterScope/ExitScope` | `Parser::openScope` / `closeScope` | 作用域进出 |
 | `clang/include/clang/Parse/Parser.h:639:Sema &Actions` | `Parser::m_sema`（`SemanticAnalyzer*`） | Parser 持 Sema 句柄 |
-| `clang/lib/Sema/SemaDecl.cpp:912:Sema::ClassifyName` | `SemanticAnalyzer::classifyParseName` | 问名字的种类（**批 3 才接上消歧点**） |
-| `clang/lib/Sema/SemaDecl.cpp:995-1003`（C++20 `UndeclaredTemplate`） | — | **批 2 才做** |
+| `clang/lib/Sema/SemaDecl.cpp:912:Sema::ClassifyName` | `SemanticAnalyzer::classifyParseName` / `classifyParseQualified` | 问名字的种类（批 3 已接上三个消歧点） |
+| `clang/lib/Sema/SemaDecl.cpp:996-1003`（C++20 `UndeclaredTemplate`） | `Parser::isTemplateNameHere` | 名字查不到 + 下一个 token 是 `<` ⇒ 假定是模板名（批 2 已做，**裸名限定**，照 clang 的 `SS.isEmpty()`） |
+| `clang/lib/Parse/ParseTentative.cpp:1957:Parser::isTemplateArgumentList` | `Parser::parseTemplateArgumentList` + `TokenCheckpoint` | 复核：解析不出实参表 ⇒ 回滚成比较运算 |

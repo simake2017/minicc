@@ -903,6 +903,17 @@ bool SemanticAnalyzer::isNameDeclared(const std::string& name) {
     return false;
 }
 
+// ★ 这个名字是【可见的模板名】吗（类模板 / 别名模板的蓝图）——
+//   模板名不是类型名（[basic.scope.scope]：模板名与类型名不同类），
+//   但它是一个【可见的名字】：`Box;` / `N::B;` 在 clang 是合法程序
+//   （只给 -Wmissing-declarations 警告），不是表达式。
+//   判据单点：裸名声明裁决（EmptyStmt）与表达式语句折叠（ExprStmt）两处共用。
+//   demo: template<class T> struct Box{}; int main(){ Box; }  ⇒ 模板名可见
+//   demo: int Box; int main(){ Box; }                    ⇒ 变量遮蔽 ⇒ 不是模板名
+bool SemanticAnalyzer::isVisibleTemplateName(const std::string& name) const {
+    return m_classTemplates.count(name) > 0 || m_aliasTemplates.count(name) > 0;
+}
+
 TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
     if (!type) return nullptr;
 
@@ -1026,6 +1037,13 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
                     error(std::format(
                         "no template named '{}' in namespace '{}'",
                         tail, scope), SourceLocation{});
+                } else {
+                    // ★ 裸名：clang 的 "no template named 'unknown'"（clang 探针：
+                    //   int main(){ unknown<int> v; } → error: no template named 'unknown'）。
+                    //   此前落到末尾的 "unknown type name 'unknown'" —— 那是【类型名】
+                    //   的文案，而这里缺的是【模板名】，两回事（[temp.names]/3）。
+                    error(std::format("no template named '{}'", type->name),
+                          SourceLocation{});
                 }
             }
 
@@ -1364,6 +1382,20 @@ SemanticAnalyzer::SemanticAnalyzer() {
             }
             return std::nullopt;
         });
+
+    // ── 内建名字种子（解析期活作用域表）──
+    // ★ 有些名字【不经 token 流】却在源码里出现 —— std::declval<T>() 是
+    //   registerBuiltins 直接注入 AST 的内建模板（主线 H），解析器看不到它的
+    //   声明 ⇒ 活作用域表若不知道它，表达式层的模板 id 闸就放行不了
+    //   （`std::declval<T>()` 会被当成比较链 ⇒ 解析失败）。
+    //   对照 clang：clang 的 ASTContext 预置了 __builtin_* 声明，
+    //   Sema::isTemplateName 查的就是那张表。
+    //   ★ 种子必须在【构造期】登记 —— 解析发生在语义分析之前，
+    //   registerBuiltins 那时还没跑（对照旧的"名字登记表"里的种子名单，
+    //   那是同一个问题的同一份答案）。
+    m_parseScopes.openScope(ScopeKind::Namespace, "std", ScopeBit::Namespace);
+    m_parseScopes.declare("declval", ScopeBit::Template);
+    m_parseScopes.leave();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -3783,6 +3815,17 @@ void SemanticAnalyzer::visit(EmptyStmt& stmt) {
         return;
     }
 
+    // ── 第一问之二：它是【可见的模板名】吗？──
+    //   模板名不是类型名，但它仍是可见的名字 ⇒ `Box;` 是无声明符的声明
+    //   （clang：declaration does not declare anything，只给警告，rc=0），
+    //   不是表达式。此前本分支只问"是不是类型" ⇒ 模板名落到第三问
+    //   （响亮拒收）⇒ 拒收合法程序。
+    if (isVisibleTemplateName(stmt.typeName)) {
+        std::cout << std::format(
+            "  [sema:stmt] '{}' 可见的模板名 ⇒ 判为无声明符声明\n", stmt.typeName);
+        return;
+    }
+
     // ── 第二问：这个名字【声明过】吗？──
     //   声明过但不是类型 ⇒ 它是表达式语句（clang：warning expression result
     //   unused，rc=0）⇒ 走表达式路径，让既有的表达式 machinery 处理。
@@ -3816,8 +3859,7 @@ void SemanticAnalyzer::visit(ExprStmt& stmt) {
     if (stmt.expr && stmt.expr->kind == NodeKind::Var) {
         auto& var = static_cast<VarExpr&>(*stmt.expr);
         VisibleType hit = lookupVisibleType(var.name);
-        if (hit.type || m_classTemplates.count(var.name) ||
-            m_aliasTemplates.count(var.name)) {
+        if (hit.type || isVisibleTemplateName(var.name)) {
             stmt.expr = nullptr;
             return;
         }
@@ -4135,7 +4177,20 @@ TypePtr SemanticAnalyzer::inferVar(VarExpr& expr) {
         return funcIt->second->returnType;
     }
 
-    error(std::format("Undefined variable '{}'", expr.name), expr.location);
+    // ★ 文案与 clang 对齐（Stage 3 批 2 附带）：裸名未声明 ⇒ clang 的
+    //   "use of undeclared identifier 'x'"（clang/lib/Sema/SemaExpr.cpp 的
+    //   diag::err_undeclared_var_use）。本实现旧文案是 "Undefined variable"，
+    //   与 clang 不一致 —— 而【同一个名字】在语句层无声明符声明那条路上
+    //   已经用的是 clang 的文案（EmptyStmt 分支），两处自相矛盾。
+    //   ★ 限定名（'A::B::f'）暂不统一：clang 对限定名的文案是
+    //   "no member named 'f' in namespace 'A::B'"（要区分限定者是命名空间
+    //   还是类），本实现暂缺这一层 ⇒ 保留旧文案（已知边界，docs/learn/51 §7）。
+    if (expr.name.find("::") == std::string::npos) {
+        error(std::format("use of undeclared identifier '{}'", expr.name),
+              expr.location);
+    } else {
+        error(std::format("Undefined variable '{}'", expr.name), expr.location);
+    }
 }
 
 // ─── 二元表达式推导（[expr.arith.conv] 的大幅简化）───────────────────────────

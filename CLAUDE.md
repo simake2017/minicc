@@ -880,6 +880,54 @@ TODO（新增 G 组"内容侧欠账"）、ROADMAP（主线 J 六条）、本文�
 ★ 未做（有意）：正文不重写（与 clang 逐字对齐的诊断文案、实测探针数据是资产）；
 `tests/` 与 `demos/` 下的 .md 不进守卫（那是用例说明）。
 
+✅ **Stage 3 批 2+3（名字可见性：切活表 + C++20 UndeclaredTemplate 规则 + 登记表整类退场）已完成
+（docs/learn/52 + learn/51 + specs/designs）** ——
+★ 起点是用户那句「**往 clang 工业级方向靠拢**」——不是"把 bug 修掉"，而是
+**换掉整个机制**：minicc 原先的"名字登记表"是**前向扫 token 流**得到的
+**跨作用域并集**（`NameRegistry`），它分不出遮蔽、分不出"这个 `<` 是不是模板实参表"。
+**改法是照 clang 的 Actions 模式重画**：Parser 不再自建第二份表，改为
+**向 Sema 提问**（clang 的 `Parser.h:639` `Sema &Actions;` 构造期前置条件 +
+`SemaDecl.cpp:912 Sema::ClassifyName` 活链查询）；判据单点收口到
+`SemanticAnalyzer::classifyParseQualified` + `ScopeTable`（活作用域表，
+块作用域 push/pop）。
+① **C++20 `UndeclaredTemplate` 规则落地**（[temp.names]/3 + P0846R0；
+clang `SemaDecl.cpp:996-1003`：`getCPlusPlusVersion() >= CXX20 && SS.isEmpty()
+&& NextToken.is(tok::less)` ⇒ `getAssumedTemplateName`）——
+★ 关键判据：**问的是"是不是一个值"**，不是"是不是一个类型"：
+声明过但是变量 ⇒ 不假定模板（[basic.scope.hiding]，变量可遮蔽模板名）；
+**查不到** ⇒ 按 C++20 假定是模板名 ⇒ `unknown<int>(y)` 走 template-id 路径
+⇒ 报 clang 逐字相同的 `use of undeclared identifier 'y'`（**含列号 33:18**）。
+② **三处消歧点切活表**：语句层裸名 / 语句层模板 id 链闸 / 表达式模板闸；
+★ `SS.isEmpty()` 只用在**表达式闸**（限定名不假定），
+语句层链闸**保留** C++20 假定 —— 否则 `N::B<int> x;` 会退化成比较链、
+丢掉 B38 建立的「no template named 'B' in namespace 'N'」逐字文案。
+③ **两处 clang 对齐修复**：`Box;`（可见的模板名单独成句）此前**拒收合法程序**
+（模板名不是类型名、却是**可见的名字** ⇒ 补第三问 `isVisibleTemplateName`，
+clang 只 warning、rc=0）；裸名未声明诊断 `Undefined variable` ⇒
+`use of undeclared identifier`（**仅限无限定名**，限定名保留旧文案）。
+④ **`NameRegistry` 整类删除**（src/sema/name_registry.{h,cpp} +
+tests/unit/test_name_registry.cpp 11 例 + CMakeLists/build.sh 三处登记）：
+它是"第二份作用域事实"，与红线 1（语义裁决权单一）直接冲突。
+★ 附带一个**真 bug 被抓出来**（BUGS.md B40）：活表能看见遮蔽 ⇒
+`int S; S;` 终于判成**表达式**（clang 同款）—— 而**用例 test_basics_23 的注释
+早就写着"遮蔽 ⇒ 是表达式"**，是实现与用例文档互相矛盾、靠对拍才暴露。
+（第二次印证"**用例注释也是契约**"。）
+★ 内建名字（`std::declval`）**必须由 Sema 构造期播种**进活表——
+它在 token 流里根本不出现，漏播 ⇒ SFINAE 两个用例当场红（"查不到"≠"不是"）。
+★ Parser 现在**自持一个 Sema**（`m_ownedSema`），主流程由 main.cpp
+`parser.setSema(&semaAnalyzer)` 注入真 Sema —— 解析期查询与语义期裁决**同一张表**。
+测试 tests/lang/test_basics_30（负例 rc=1，文案+列号与 clang 逐字同）+
+basics_31（正例 rc=0）+ 单测 tests/unit/test_parse_scope.cpp（`ParseScopeRetirement.*` 4 例）；
+文档 docs/learn/52（新）+ learn/51（§8 重写 + §8.1 给批 4 的三条交接）+
+specs/parse-stage-live-scope.spec.md + designs/…design.md（§3.6 三处消歧点新旧判据对照）；
+BUGS.md 新增 **B40**（遮蔽看不见）/ **B41**（模板名单独成句被拒收）。
+★ **有意漂移 2 处**（basics_23/25：遮蔽终于在 Parser 层可见），基线已重刷。
+全量 ctest **382/382** / build 0 警告 / **logdiff 零漂移**（162 集成用例逐字节一致）/
+check-doc-standard.sh 六判据全绿。
+★ 未做（下一批 = 批 4）：**嵌套类**（ROADMAP 主线 I 行 7-3）——
+须用**同一条作用域链查询**回答，不许为"嵌套"开特判；
+交接三条见 docs/learn/51 §8.1（不建第二张表 / 不开特判 / 先把源码现场对着 clang 写）。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、
@@ -894,14 +942,13 @@ NTTP：**任意常量表达式** `Buf<2+2>` / `Buf<k>`（主线 D）、字面量
 `\x`/`\u` 转义、非整型 NTTP（指针/引用/枚举/字面量类）、`template<auto V>` 的**偏特化**模式
 —— 见 docs/learn/35 §5；
 **名字可见性三阶段（红线 1 改写后的路线，B37 起）**：Stage 1 = 可见性裁决下沉 Sema
-✅（B37/learn/48）；Stage 2 = 作用域即身份 + 登记表退场一处 ✅（B38/learn/49，
-登记表的**限定名**消费点已删（`classifyQualified` 零调用点），Parser 侧**三处**仍在）；Stage 3 = 边解析边 `ActOn*`
-登记的正规模式（clang 的 Actions 模式）+ 登记表整体退场（含 **value 位**：
-clang 对**未声明**的名字按 C++20 规则当 template-id 解释，探针
-`unknown<x>(y)` ⇒ clang 报 "use of undeclared identifier 'x'"，
-minicc 走比较链 ⇒ 报 "Undefined variable 'unknown'" —— 分水岭是"这个名字
-**声明过**吗"，登记表至今没有 value 位）；
-**B37 查实、到 B38 仍未修的两处缺口**：命名空间变量在块作用域不可见
+✅（B37/learn/48）；Stage 2 = 作用域即身份 + 登记表退场一处 ✅（B38/learn/49）；
+Stage 3 = **批 1** 活表就位（行为不变）+ **批 2+3**（✅，见上条：value 位落地 /
+C++20 `UndeclaredTemplate` 规则 / 三处消歧点切活表 / `NameRegistry` 整类退场）；
+**批 4 = 嵌套类** ⬜（ROADMAP 主线 I 行 7-3，交接见 docs/learn/51 §8.1）——
+★ 三阶段走完后，Parser 侧**不再有任何自建的名字/作用域事实**，
+剩下的是"作用域链能表达的东西"（嵌套类 / 类作用域成员 / using 声明）；
+**B37 查实、到 Stage 3 批 3 仍未修的两处缺口**：命名空间变量在块作用域不可见
 （`namespace N { int g; }` 裸用 g 不可见）/ 嵌套类不支持。
 ⏭ 后续计划见 **docs/ROADMAP.md**（主线 C 控制流 → D 常量折叠 → E 数组/高级类型 → F 深水区选做，
 每条含理论点/clang 参照/任务分解/验收）。新会话接手：先读本文件与 ROADMAP，选定主线再开工。

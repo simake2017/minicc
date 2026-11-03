@@ -18,6 +18,7 @@
 | 日期 | 版本 | 改了哪条 |
 |---|---|---|
 | 2026-11-02 | v1 | 首版：Stage 3 三批的边界与验收；批 1 已落地（活作用域表 + Actions 句柄 + 登记点） |
+| 2026-11-02 | v2 | 批 2+3 已落地：三个消歧点切表、C++20 `UndeclaredTemplate` 规则、value 位落地、`NameRegistry` 整类删除；诊断文案对齐 clang |
 
 ## 1. 概念
 
@@ -89,8 +90,8 @@
 |---|---|---|---|
 | S3-1 | **活作用域表**（`ParseScopeTable`）+ Sema 持有 + Parser 持 `SemanticAnalyzer*` 句柄（clang 的 `Sema &Actions`） | 批 1 | ✅ 已完成 |
 | S3-2 | **登记点铺满**（命名空间 / 类 / 枚举 / 别名 / 模板 / 形参 / 变量 / 函数 / 成员 / 块 / for 隐式作用域） | 批 1 | ✅ 已完成 |
-| S3-3 | **value 位落地**（不再是占位恒 false）+ **C++20 `UndeclaredTemplate` 规则**（未声明的名字按 C++20 当模板名） | 批 2 | ⬜ 未做 |
-| S3-4 | **三个消歧点切到活作用域表** + **登记表整类删除**（`NameRegistry` 退场） | 批 3 | ⬜ 未做 |
+| S3-3 | **value 位落地**（不再是占位恒 false）+ **C++20 `UndeclaredTemplate` 规则**（未声明的名字按 C++20 当模板名） | 批 2 | ✅ 已完成 |
+| S3-4 | **三个消歧点切到活作用域表** + **登记表整类删除**（`NameRegistry` 退场） | 批 3 | ✅ 已完成 |
 
 ### 2.2 批 1 的行为约束（★ 本批必须行为中立）
 
@@ -108,7 +109,7 @@
 | # | 异常 | 如何处理 |
 |---|---|---|
 | 1 | 解析中途抛 `ParseError`（语法错） | 作用域链可能停在半开的层 —— **不影响正确性**：整个编译单元中止，表随之丢弃。**不可重试** |
-| 2 | Parser 未挂 Sema 句柄（单测自建 Parser） | 登记 / 查询一律**空转**（`m_sema == nullptr` 守卫）—— 解析行为退化为"没有这张表"的样子。**可重试**（挂上句柄即可） |
+| 2 | Parser 未挂 Sema 句柄 | ★ 批 2+3 起 Parser **自带**一个 Sema（clang 的 `Sema &Actions` 是构造前提），因此这条只在"显式把句柄置空"时才发生；此时登记 / 查询一律**空转**（`m_sema == nullptr` 守卫），解析行为退化为"没有这张表"的样子。**可重试**（挂上句柄即可） |
 | 3 | `leave()` 时链只剩 Global | 直接返回（Global 不可弹出）—— 防栈空。**不可重试** |
 | 4 | 限定名查不到 | 返回 0（未声明）—— **由宽改严**的方向由调用方决定（消歧点据此走"不是模板"）。**可重试** |
 
@@ -127,7 +128,10 @@
 
 | 键 | 何时打 | 说明 |
 |---|---|---|
-| （本批无新日志） | — | ★ 批 1 **刻意零日志**：行为中立是硬约束，新增日志会让 160 份集成基线全漂。消歧点切表时（批 3）再补"这个名字是什么/为什么不是模板"的解释行 |
+| `[parse:stmt] 'X' 判为声明（type 位）` | 语句层裸名判为声明时 | 批 1 已有；批 2+3 的判据从"登记表 type 位"换成"活表里没有 Value 位"，行文不变 |
+| `[sema:stmt] 'X' 可见的类型名 ⇒ 判为无声明符声明` | Sema 裁决裸名声明时 | 批 1 已有（可见性裁决的落点） |
+| `[sema:stmt] 'X' 可见的模板名 ⇒ 判为无声明符声明` | 同上，但 X 是模板名 | ★ 批 2+3 新增 —— 模板名不是类型名，却是可见的名字（clang 只给 warning） |
+| `[parse] template-id: X<...>` | 表达式位置认出模板 id 时 | 批 1 已有；批 2+3 的进入条件从"登记表有模板位"换成"活表有模板位 ∨ C++20 未声明模板假定" |
 
 ## 附：实施记录（批 1）
 
@@ -155,5 +159,29 @@
 （类 · 别名 · 函数 · 指引 · 成员模板）/ 全局变量 / 函数与方法 / 形参 / 局部变量 /
 块与 for 的隐式作用域。
 
-**下一步（批 2 / 批 3）**：value 位与 C++20 `UndeclaredTemplate` 规则落地 ⇒
-三个消歧点切到活作用域表 ⇒ `NameRegistry` 整类删除。
+## 附：实施记录（批 2+3）
+
+**落点**
+
+| 文件 | 角色 |
+|---|---|
+| `src/parse/parser.h/.cpp` | 三个消歧点改问活表（`nameBits` / `isTemplateNameHere` / `isTemplateNameInTemplateId`）；Parser 自带 Sema（`std::unique_ptr<SemanticAnalyzer>`，析构在 .cpp 定义） |
+| `src/sema/semantic_analyzer.h/.cpp` | 构造期登记内建名字种子（`std::declval`）；`isVisibleTemplateName`（模板名也是可见的名字，判据单点）；未声明名的诊断文案对齐 clang；裸名模板 id 报 "no template named 'X'" |
+| `src/sema/name_registry.{h,cpp}`（删） | **整类删除** —— 前向扫 token 流猜出来的第二份作用域事实 |
+| `tests/unit/test_name_registry.cpp`（删） | 随被测类退场（11 例） |
+| `tests/unit/test_parse_scope.cpp` | +4 例（`ParseScopeRetirement.*`：模板在命名空间外不可见 / 类作用域别名类外不可见 / value 位区分遮蔽 / 命名空间栈出栈还原） |
+| `tests/lang/test_basics_30_cxx20_undeclared_template_error.cpp`（新） | C++20 假定：`unknown<int>(y)` ⇒ 模板 id 路径 ⇒ "use of undeclared identifier 'y'"（与 clang 逐字含列号） |
+| `tests/lang/test_basics_31_template_name_declaratorless.cpp`（新） | `Box;` / `N::B;` ⇒ 可见的模板名 ⇒ 无声明符声明（rc=0，clang 同） |
+
+**验收数据**
+
+- build：0 警告；
+- ctest：388 → **382**（−11 随类退场 ＋4 新单测 ＋1 新集成用例）；
+- logdiff：162 份集成用例**逐字节零漂移**（相对重刷后的基线）；
+  ★ **有意漂移 2 处**（basics_23 / basics_25）：变量遮蔽终于在 Parser 层可见
+  ⇒ `int S;` 之后的 `S;` 从"声明"变成"表达式"（与 clang 同，也与这两个用例
+  自己的注释所写的一致 —— 此前实现与用例文档互相矛盾）；
+- 注释守卫 `check-comment-style.sh`：✅ 全达标。
+
+**批 4 的正题**：嵌套类 —— 用同一张作用域链的通用查询解决，**不做特判**
+（见 docs/ROADMAP.md 主线 I 的 7-3 行）。
