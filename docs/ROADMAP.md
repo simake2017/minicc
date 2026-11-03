@@ -7,6 +7,10 @@
 > 非虚继承的菱形在标准下合法；该文件已改写为私有继承错误用例）。
 > 构建：`cmake -S . -B build-linux -DCMAKE_CXX_COMPILER=clang++-18 && cmake --build build-linux -j`
 >
+> ★ **2026-11-03**：§0.1 批 0-2（**实例化步骤 5.8：克隆嵌套类**）已完成
+> （docs/learn/56 + BUGS.md B47）—— §0.1 只剩 **0-1（按值返回 + 拷贝省略）**，
+> 之后按 §0.2 进主线 K 六项。
+>
 > ★ **2026-11-02 重排**：本文件原来按"批次先后"排列（旧的在前面），
 > 下个会话读到顶只看到一堆 ✅ 的已完成主线，看不出**下一批该做什么**。
 > 现改为：**§0 当前优先级（执行序）→ §1 下一条主线 → §2 既有主线现状（存档）**。
@@ -35,7 +39,7 @@
 | # | 项 | 性质 | 现状（clang++-18 对拍，2026-11-02） | 落点 | 验收 |
 |---|---|---|---|---|---|
 | 0-1 | **按值返回 + 拷贝省略**（主线 A 延伸） | ★ **静默算错** | `S f(){S s; s.v=7; return s;} S x=f();` ⇒ clang rc=**7** / minicc rc=**0**（初始化式被丢弃，对象退化成默认构造） | sret 风格返回缓冲 + 逐字节拷贝；`visit(VarDeclStmt)` 的平凡拷贝分支补"调用表达式返回类对象"形态 | 运行期退出码与 clang 一致 |
-| 0-2 | **实例化步骤 5.8：克隆嵌套类**（批 4 留的边界） | 边界收口 | `template<class T> struct Box{ struct Inner{T v;}; }; Box<int>::Inner i;` ⇒ clang rc=0 / minicc rc=1 `no type named 'Inner' in 'Box_int'` | `instantiateClassTemplate` 增步骤 5.8：蓝图嵌套类克隆进实例（字段/方法随形参替换），登记名 `Box_int::Inner` | rc=0 与 clang 对拍 |
+| 0-2 ✅ | **实例化步骤 5.8：克隆嵌套类**（批 4 留的边界） | 边界收口 | `template<class T> struct Box{ struct Inner{T v;}; }; Box<int>::Inner i;` ⇒ clang rc=0 / 修前 minicc rc=1 `no type named 'Inner' in 'Box_int'` | `instantiateClassTemplate` 增步骤 5.8：蓝图嵌套类克隆进实例（字段/方法随形参替换），登记名 `Box_int::Inner` | ✅ **已完成 2026-11-03**：rc=0 与 clang 对拍；ctest 396 → **403**；167 份集成日志逐字节零漂移；docs/learn/56 + BUGS.md B47 |
 
 ### 0.2 批 1~6：主线 K —— 模板线六项（理论密度最高）
 
@@ -518,7 +522,7 @@ SFINAE 探测不命中时**静默回退**而非报错；与 clang oracle 对拍�
 | 7-2 ✅ | **Stage 3 批 2+3（合并）**：value 位落地 + C++20 `UndeclaredTemplate` 规则 + 三个消歧点切表 + `NameRegistry` 整类删除 | `SemaDecl.cpp:995-1003` + B31/B37 的收口 | ① 三个消歧点（语句层裸名判定 / 语句层模板 id 链闸 / 表达式模板闸）改问活作用域表；② 名字查不到且下一个 token 是 `<` ⇒ 按 C++20 假定它是模板名（复核仍在试探实参表那一步）；③ **value 位不再是占位** —— "是不是值"参与语句层分流（变量遮蔽同名类型 ⇒ `S;` 是表达式，clang 同）；④ `NameRegistry` 三文件（头/实现/单测）整类删除，Parser 自带 Sema（clang `Sema &Actions` 是构造前提） | 登记表类删除；`unknown<int>(y)` ⇒ rc=1 `use of undeclared identifier 'y'`（与 clang 逐字**含列号**）；裸 `q;` ⇒ 同款文案（旧：Undefined variable）；`Box;`（可见的模板名）⇒ rc=0（**修掉拒收合法程序**）；tests/lang/test_basics_30..31 + tests/unit/test_parse_scope.cpp（16 例）；★ **有意漂移 2 处**（basics_23/25：遮蔽终于在 Parser 层可见）；docs/learn/52 |
 | 7-3 ✅ | **Stage 3 批 4**：嵌套类（用户拍板：用同一张作用域链的通用查询解决，**不做特判**） | 用户原始问题（`class A{ B; }` 与全局 `B`） | 嵌套类登记为外层类作用域的成员（登记名带作用域 `A::B`）；类作用域从"一张别名表"升级成**一条链**（类自身 → 别名 → 嵌套类 → 外层类）；查找顺序改为 **类作用域 → 命名空间链 → 全局**（由内向外）；构造函数符号改由 Sema 选定并回填（CodeGen 不再硬拼） | `A::B` 与全局 `B` 并存不串；`A::B` 限定名可达；rc=0 与 clang 对拍；tests/lang/test_basics_32..33 + tests/unit/test_nested_class.cpp（7 例，突变验证 5/5）；docs/learn/53 + specs/designs |
 | 7-4 ✅ | **Stage 3 批 5**：vtable 槽 → `FuncDeclPtr` 句柄（主线 G 的第一笔债） | B20/B22 的根因（槽里放的是**字符串符号**，规则在多处各写一遍） | 虚表槽存**声明句柄**而非符号串 ⇒ 符号名由唯一的定名函数产出（`registerFunction`）；CodeGen 只发句柄给出的符号（`vtableEntrySymbol`）；三个填槽落点只换句柄、**不算符号**；析构槽改看声明名（不再猜符号子串） | ★ 修掉 **B45**（嵌套类作虚函数重载的形参 ⇒ 槽与定义点两个符号 ⇒ 链接期 undefined reference）与 **B46**（名字含 "dtor" 的普通虚函数被误认成析构 ⇒ 静默少调一次析构）；164 份既有集成日志**逐字节零漂移**；ctest 390 → **396**；tests/lang/test_basics_34 + tests/unit/test_vtable_handle.cpp（6 例，突变验证 5/5）；docs/learn/54 + specs/designs |
-| 7-5 ⬜ | 实例化步骤 5.8：克隆嵌套类（类模板里的嵌套类） | docs/learn/53 §7 边界 1 | 类模板实例化时把蓝图的嵌套类克隆进实例（字段/方法随形参替换），登记名 `Box_int::Inner` | `template<class T> struct Box { struct Inner { T v; }; };` rc=0 与 clang 对拍 —— ★ **已排进 §0.1 批 0-2**（成本低、关掉批 4 留的边界） |
+| 7-5 ✅ | 实例化步骤 5.8：克隆嵌套类（类模板里的嵌套类） | docs/learn/53 §7 边界 1 | 类模板实例化时把蓝图的嵌套类克隆进实例（字段/方法随形参替换），登记名 `Box_int::Inner` | ✅ **已完成（2026-11-03，§0.1 批 0-2）**：实例化新增步骤 5.8（`cloneNestedClass`：字段/方法/static/别名/成员模板随形参替换，嵌套类递归克隆）；★ 登记名**不在克隆处拼** —— 克隆只交裸名，前缀化仍由 `processClassDecl` 统一做（判据单点）；★ 连带修 Pass 2/3 的扁平遍历 ⇒ 改递归原语 `forEachClassMethod`（否则嵌套类的方法不注册 ⇒ 链接期 undefined reference）；ctest 396 → **403**；167 份集成日志**逐字节零漂移**；tests/lang/test_basics_35..36 + tests/unit/test_nested_class_in_template.cpp（6 例）；docs/learn/56 + BUGS.md B47 |
 
 **原则**：每项独立成批、三绿（build 0 警告 / ctest 全绿 / logdiff 零差异）再进下一项；
 批次间互不阻塞，可与特性主线穿插。完成一条就在 BUGS.md 转 ✅ 并记回归用例。

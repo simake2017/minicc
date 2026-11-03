@@ -324,6 +324,11 @@ private:
     FuncDeclPtr cloneMethod(FuncDeclPtr method, const TypeSubstitution& subst,
                             const std::string& newClassName);
     FieldInfo cloneField(const FieldInfo& field, const TypeSubstitution& subst);
+    // 克隆嵌套类（[class.nest]）：类模板的成员之一，字段/方法里可以出现外层形参 T
+    //   （`struct Inner { T v; }`）。克隆产物交【裸名】，前缀化（"Box_int::Inner"）
+    //   由 Sema::processClassDecl 统一做 —— 前缀规则只留那一份（红线 3 判据单点）。
+    ClassDeclPtr cloneNestedClass(const ClassDeclPtr& src,
+                                  const TypeSubstitution& subst);
 };
 
 // 实例名清洗（见类内注释；定义在 src/template_instantiation.cpp）

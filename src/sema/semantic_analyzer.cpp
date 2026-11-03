@@ -5748,12 +5748,12 @@ TypePtr SemanticAnalyzer::getOrInstantiateClass(
     m_classInstanceCache[key] = instanceType;
 
     // ── ③ 实例方法：注册（等价 Pass 2）+ 函数体分析（等价 Pass 3）──
-    for (auto& method : instance->methods) {
-        registerFunction(method);
-    }
-    for (auto& method : instance->methods) {
-        analyzeFunctionBody(method);
-    }
+    // ★ 走 forEachClassMethod（递归进嵌套类）：嵌套类的方法不在外层类的 methods 表里，
+    //   只遍历 instance->methods ⇒ Pass 2 不注册、Pass 3 不分析 ⇒ CodeGen 从没收到
+    //   那些方法 ⇒ 链接期 undefined reference（与命名空间递归同款：DeclContext 树
+    //   本身就是递归的 —— 见 forEachClassMethod 的注释）。
+    forEachClassMethod(instance, [&](FuncDeclPtr m) { registerFunction(m); });
+    forEachClassMethod(instance, [&](FuncDeclPtr m) { analyzeFunctionBody(m); });
 
     std::cout << std::format(
         "  [instantiate:class] ✔ {} ready ({} bytes, {} method(s))\n",

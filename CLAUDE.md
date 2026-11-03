@@ -1046,9 +1046,35 @@ K-5 类外定义特化成员；K-6 函数模板显式 NTTP 实参（已响亮拒
 守卫脚本 7 条判据全绿 + check-comment-style 全绿 + ctest **396/396** + logdiff 零漂移。
 文档 docs/learn/55（新）+ docs/constraints/06 §2.0 + docs/ROADMAP.md §0/§1。
 
+✅ **类模板里的嵌套类已完成（实例化步骤 5.8，BUGS.md B47，docs/learn/56）** ——
+★ 起点是 ROADMAP §0.1 批 0-2（learn/53 批 4 留的边界）：`template<class T> struct Box{
+struct Inner{T v;}; }; Box<int>::Inner i;` ⇒ clang rc=0 / minicc rc=1
+`no type named 'Inner' in 'Box_int'`（**合法程序被拒**）。
+★ **根因**：实例化只搬"顶层四样"（字段/方法/别名/static），**没搬嵌套类** ——
+而嵌套类按 [class.nest]/1 也是外层类的成员，按 [temp.inst]/5 该随实例化一起克隆。
+★ 与 learn/26（命名空间递归漏方法）同款：**DeclContext 树本身就是递归的，扁平遍历必然漏**。
+★ **对照 clang 根本没有"克隆嵌套类"这个专门步骤** —— 它只有一个成员循环
+（`Sema::InstantiateClass` 的 `for (auto *Member : Pattern->decls())` → `Instantiator.Visit`），
+遇 `CXXRecordDecl` 就递归进 `VisitCXXRecordDecl` ⇒ "嵌套类跟着实例化"是成员循环的**自然结果**。
+**修法三处**（缺一不可）：① 实例化新增步骤 5.8（`cloneNestedClass`：字段/方法/static/
+别名/成员模板随形参替换，嵌套类递归克隆，产物挂进实例类 `nestedClasses`）；
+② **登记名不在克隆处拼** —— 克隆只交裸名，前缀化（`Box_int::Inner`）仍由 `processClassDecl`
+统一做（learn/49 的"作用域即身份"；★ 理由与 B45 同源：**"两处共用一个函数"只治了
+"写错"，治不了"算两次"** ⇒ 治本只有"只算一次，别处只引用"）；
+③ **连带修 Pass 2/3 的扁平遍历** ⇒ 改递归原语 `forEachClassMethod`
+（否则嵌套类的方法不在外层 `methods` 表里 ⇒ 不注册、不分析 ⇒ 链接期 undefined reference）。
+★ 两条可复用判据：**"成员表"是递归结构，遍历它就必须递归**；**"只算一次，别处只引用"**。
+★ 边界不放大：蓝图里没有的成员名仍响亮拒收（`Box<int>::Missing` ⇒ rc=1，
+文案差在拼写：minicc 报实例名 `Box_int`、clang 报模板 id `Box<int>` —— 查的是实例的成员表）。
+测试 tests/lang/test_basics_35..36（正例 rc=0 与 clang 对拍 + 负例 rc=1）
++ 单测 tests/unit/test_nested_class_in_template.cpp（`NestedClassInTemplate.*` 6 例，
+断言**性质**而非拼写：被克隆/字段替换/两实例互不干扰/方法注册/嵌套套嵌套/边界不放大）。
+全量 ctest 396 → **403**；**167 份集成日志逐字节零漂移**；build 0 警告。
+文档 docs/learn/56（新）+ BUGS.md B47 + ROADMAP §0.1 批 0-2 标 ✅。
+
 **未做（按优先级）**：★ **2026-11-02 起不再在本文件维护待办清单** ——
 统一到 `docs/ROADMAP.md` §0（当前优先级 = 执行序）。本文件只留"已完成"的台账。
-要点：§0.1 批 0（按值返回+拷贝省略 = ★静默算错；实例化 5.8 克隆嵌套类）→
+要点：§0.1 批 0（按值返回+拷贝省略 = ★静默算错；~~实例化 5.8 克隆嵌套类~~ ✅ learn/56）→
 §0.2 主线 K 模板线六项（别名模板特化的**非法程序拒收** / 偏特化模式的值位 /
 `template<auto V>` 偏特化 / 模板模板形参的形参包·默认实参·嵌套 /
 类外定义特化成员 / 函数模板显式 NTTP 实参）→ §0.3 降级区（语法面 17 条）→

@@ -59,6 +59,10 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B34](#b34-const-类对象端到端缺失成员访问误报--掉标量路径-sigsegv--拷贝静默退化) | const 类对象三层判据不看穿 Const 包壳：成员访问误报（拒收）/ 掉标量路径读成员当指针解引用（SIGSEGV）/ 拷贝初始化静默退化成默认构造（算错） | `src/semantic_analyzer.cpp` inferMember + 拷贝/构造升级；`src/codegen.cpp` 类表查询 7 处 | 高（miscompile + 静默算错 + 拒收，一层包壳三层错） | ✅ 已修 |
 | [B35](#b35-语句层前瞻只认固定-token-顺序限定名模板-id-与全变量比较链双双被拒收) | parseStatement 2245 前瞻是 parseType 语法的【残缺复制品】：`<` 跳过只认第一个标识符后的位置 ⇒ `N::B<Box> x;`（限定名+模板 id）漏跳被拒收；无任何"是不是模板名"的判据 ⇒ `a < b > c;` 全变量比较链被误判成声明 `a<b> c`（B31 的语句层兄弟） | `src/parser.cpp` parseStatement 类名前瞻分支（2245-2323 手写 token 跳过人） | 中（罕见写法 ×2，但都是拒收合法程序 + 语法复制品是维护隐患） | ✅ 已修 |
 | [B36](#b36-限定模板名-nb-误绑全局模板-bsema-尾剥无作用域裁决) | Sema 限定名归一只取 `::` 末段查【全局】蓝图表：N::B 真存在时正确，真不存在而全局有同名模板 B 时误绑（方向性错） | `src/semantic_analyzer.cpp` resolveType 模板 id 分支（B35 尾剥） | 中（静默走错路，报错指向派生类型） | ✅ 已修 |
+| [B47](#b47-类模板里的嵌套类不支持蓝图不克隆成员合法程序被拒) | 类模板实例化只搬"顶层四样"（字段/方法/别名/static），**嵌套类没克隆** ⇒ `Box<int>::Inner` 报 no type named 'Inner'（合法程序被拒） | `src/sema/template_instantiation.cpp` 实例化步骤 5.8 + `src/sema/semantic_analyzer.cpp` forEachClassMethod | 中（合法程序被拒；连带链接期 undefined reference） | ✅ 已修 |
+
+> ★ **索引欠账（历史遗留）**：B37~B46 六条**未补进上表**（条目正文都在，
+> 只是索引没跟上）—— 本表自 B36 之后断档，B47 是补上的第一行新条目。
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
 > B13/B14/B15 三条根因相同 —— 见文末[小结](#小结-字符串兼任-id-与路径)。
@@ -3373,3 +3377,55 @@ int main() {
 同族）—— 符号串是**给人看的**，语义判定要落在**声明**上。
 ★ 附带一条：子串匹配的错误方向往往是**静默**的（少调一次函数没人会发现），
 ⇒ 这类判据必须有"钉住可观测后果"的用例，而不是只断言"没有报错"。
+
+## B47. 类模板里的嵌套类不支持：蓝图不克隆成员（合法程序被拒）
+
+- severity: medium ｜ status: fixed ｜ related: src/sema/template_instantiation.cpp, src/sema/semantic_analyzer.cpp, docs/learn/56
+
+**现象**
+
+```cpp
+template <class T> struct Box {
+    struct Inner { T v; };      // ★ 嵌套类也是外层类的成员
+};
+int main() {
+    Box<int>::Inner i;          // ★ clang rc=0；minicc 报 no type named 'Inner' in 'Box_int'
+    return 0;
+}
+```
+
+★ 修前：minicc rc=1，`[Semantic Error] no type named 'Inner' in 'Box_int'`；
+clang rc=0（`Box<int>::Inner` 是合法类型）。
+**性质**：**功能缺失**（合法程序被拒）—— 比"静默算错"好，但仍是缺口。
+
+**根因**：实例化一个类模板时只搬了"顶层四样"
+（字段 / 方法 / 类型别名 / static 数据成员），**没有搬嵌套类**。
+★ 而嵌套类按 [class.nest]/1 也是外层类的成员，按 [temp.inst]/5
+应当随实例化一起克隆 —— 少搬一项，产出的就是一张**缺项的成员表**。
+★ 与 learn/26（命名空间递归漏方法）是同款：**DeclContext 树本身就是递归的，
+扁平遍历必然漏**（那次漏在 Pass 2/3，这次漏在实例化本身）。
+
+**修法**（三处，缺一不可）：
+
+1. **实例化新增步骤 5.8（克隆嵌套类）**：字段 / 方法 / static 成员 / 类型别名 /
+   成员模板全部随形参替换，嵌套类**递归**克隆；产物挂进实例类的 `nestedClasses`
+   （对照 clang 的 `TemplateDeclInstantiator::VisitCXXRecordDecl` → `Owner->addDecl`）。
+2. **登记名不在克隆处定**：克隆只交**裸名**（`Inner`），前缀化（`Box_int::Inner`）
+   仍由 `processClassDecl` 统一做 ⇒ "登记名 = 外层登记名 + :: + 裸名"只有那一份
+   （learn/49 的"作用域即身份"；理由见 learn/56 §2.3）。
+3. **Pass 2 / Pass 3 必须递归进嵌套类**：`getOrInstantiateClass` 里扁平的
+   `for (auto& method : instance->methods)` 改为递归原语 `forEachClassMethod`
+   —— 嵌套类的方法**不在**外层类的 `methods` 表里，不递归 ⇒ 不注册、不分析 ⇒
+   CodeGen 从没收到那些方法 ⇒ **链接期 undefined reference**。
+
+**回归**：tests/lang/test_basics_35（正例，rc=0，与 clang 对拍）
++ tests/lang/test_basics_36（负例：`Box<int>::Missing` 仍响亮拒收）
++ 单测 `NestedClassInTemplate.*` 6 例 —— 断言的是**性质**而非拼写
+（被克隆 / 字段随形参替换 / 两个实例的嵌套类互不干扰 / 方法被注册 /
+嵌套套嵌套 / 边界不放大），命名规则随便改都不会误报。
+
+**教训**：★ **"少做一步"与"做错一步"症状完全不同** ——
+少做（漏克隆）⇒ 响亮报错（还算幸运）；做错（替换没做、名字算两遍）⇒ **静默算错**。
+★ 本批真正的收获是两条可复用判据：
+**"成员表"是递归结构，遍历它就必须递归**；
+**"只算一次，别处只引用"**（登记名前缀化只有一处，不给"两处各算一遍"留缝）。

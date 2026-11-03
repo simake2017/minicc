@@ -579,6 +579,26 @@ ClassDeclPtr TemplateInstantiator::instantiate(
         newClass->staticDataMembers.push_back(std::move(cloned));
     }
 
+    // 5.8 克隆嵌套类（[class.nest] + [temp.inst]/5）
+    // ★ 为什么必须克隆：嵌套类也是【外层类模板的成员】—— 它的字段/方法里可以出现
+    //   外层的形参 T（`struct Inner { T v; }`）。不克隆 ⇒ 实例 Box_int 里压根没有
+    //   Inner 这个类型 ⇒ `Box<int>::Inner i;` 报 "no type named 'Inner' in 'Box_int'"
+    //   （docs/ROADMAP.md §0.1 批 0-2）。
+    // ★ 登记名【不在这里定】：本处只交出裸名（"Inner"），前缀化（"Box_int::Inner"）
+    //   由 Sema::processClassDecl 统一做 —— 前缀规则只有那一份（红线 3 判据单点）。
+    // 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:SemaTemplateInstantiator::
+    //   InstantiateClassTemplate → TransformDecl 递归遍历类成员（含嵌套 RecordDecl），
+    //   嵌套类的 DeclContext 指向实例化后的外层类。
+    if (!templateDecl->classTemplate->nestedClasses.empty()) {
+        std::cout << "  ║ ── Nested Class Substitution ──\n";
+    }
+    for (auto& nc : templateDecl->classTemplate->nestedClasses) {
+        auto clonedNc = cloneNestedClass(nc, subst);
+        newClass->nestedClasses.push_back(clonedNc);
+        std::cout << std::format("  ║   nested class '{}' → 克隆（字段/方法随形参替换）\n",
+            nc->name);
+    }
+
     // 6. 生成 mangled name
     std::string mangledName = NameMangler::mangleTemplateInstance(
         templateDecl->classTemplate->name, args);
@@ -1097,6 +1117,68 @@ FuncDeclPtr TemplateInstantiator::cloneMethod(
     }
 
     return newMethod;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 克隆嵌套类 —— 类模板的成员递归克隆（[class.nest] + [temp.inst]/5）
+// 嵌套类的字段类型、方法签名与函数体里的【外层形参】T 一并替换；嵌套类里的嵌套类
+//   递归克隆（Box → A → B 三层同理）。
+// ★ 登记名不在这里定：本函数交出【裸名】（"Inner"），前缀化（"Box_int::Inner"）由
+//   Sema::processClassDecl 统一做 —— "登记名 = 外层登记名 + :: + 裸名"这条规则
+//   只有那一份（红线 3 判据单点；learn/49 的"作用域即身份"）。
+// demo: template<class T> struct Box { struct Inner { T v; }; };
+//       Box<int> ⇒ 克隆出 Inner { int v; } ⇒ 登记名 Box_int::Inner
+// 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:SemaTemplateInstantiator::
+//   InstantiateClassTemplate → TransformDecl 递归遍历 CXXRecordDecl 的成员
+//   （含嵌套 RecordDecl），嵌套类的 DeclContext 指向实例化后的外层类。
+ClassDeclPtr TemplateInstantiator::cloneNestedClass(
+    const ClassDeclPtr& src, const TypeSubstitution& subst) {
+
+    auto cloned = std::make_shared<ClassDecl>();
+    cloned->name = src->name;                    // 裸名；前缀化由 processClassDecl 收口
+    cloned->baseClassNames = src->baseClassNames;
+    cloned->location = src->location;
+    cloned->isForwardDecl = src->isForwardDecl;
+
+    for (auto& f : src->fields) {
+        auto clonedField = cloneField(f, subst);
+        std::cout << std::format("    [clone:nested]   field '{}' : {} → {}\n",
+            f.name, f.type ? f.type->toString() : "?",
+            clonedField.type ? clonedField.type->toString() : "?");
+        cloned->fields.push_back(std::move(clonedField));
+    }
+    // ownerClassName 交空：processClassDecl 会把它写成【登记名】（"Box_int::Inner"），
+    //   那是唯一定名点 —— 这里若先填一个"猜的"名字，两处就会漂。
+    for (auto& m : src->methods) {
+        cloned->methods.push_back(cloneMethod(m, subst, ""));
+    }
+    for (auto& sm : src->staticDataMembers) {
+        StaticDataMember c;
+        c.name = sm.name;
+        c.type = substituteType(sm.type, subst);
+        c.isConstexpr = sm.isConstexpr;
+        if (sm.initializer) c.initializer = cloneExpr(sm.initializer, subst);
+        cloned->staticDataMembers.push_back(std::move(c));
+    }
+    for (const auto& aliasName : src->typeAliasOrder) {
+        auto it = src->typeAliases.find(aliasName);
+        if (it == src->typeAliases.end()) continue;
+        cloned->typeAliases[aliasName] = substituteType(it->second, subst);
+        cloned->typeAliasOrder.push_back(aliasName);
+    }
+    for (auto& mt : src->memberTemplates) {
+        auto clonedMt = std::make_shared<TemplateDecl>();
+        clonedMt->location = mt->location;
+        clonedMt->templateParams = mt->templateParams;   // 内层形参原样带过
+        clonedMt->typeParams = mt->typeParams;
+        clonedMt->isMemberTemplate = true;
+        clonedMt->funcTemplate = cloneMethod(mt->funcTemplate, subst, "");
+        cloned->memberTemplates.push_back(clonedMt);
+    }
+    for (auto& nc : src->nestedClasses) {
+        cloned->nestedClasses.push_back(cloneNestedClass(nc, subst));
+    }
+    return cloned;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
