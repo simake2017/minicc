@@ -3582,6 +3582,33 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
                     decl.name, type->toString(), decl.ctorArgs.size(),
                     decl.ctorSymbol);
             }
+            // ── 按值返回类的调用：`S x = f();`（sret + 拷贝省略）─────────────
+            // f 按值返回类对象 ⇒ 调用点需要一个【返回缓冲】（sret 约定：隐藏指针
+            // 作第 0 参数，rdi）。★ 缓冲【就是 x 的槽】⇒ 返回值直接写进 x，
+            // 不需要再拷一次 —— [class.copy.elision]/8 的拷贝省略（clang 默认也这样）。
+            // ★ 判据单点：标志落在这里，CodeGen 只照办 —— 两处各判一次必漂
+            //   （learn/49 的"作用域即身份"同款：只算一次，别处只引用）。
+            // ★ 此前这一形态【静默算错】：初始化式被丢弃，对象退化成默认构造
+            //   （`S x = f();` ⇒ x.v 恒 0，而 clang 给出 f 写的值）。
+            else if (ce->resolvedType && bareForClass(ce->resolvedType)->isClass()) {
+                if (!bareForClass(ce->resolvedType)->equals(bareForClass(type))) {
+                    error(std::format(
+                        "Type mismatch in '{}': declared '{}', got '{}'",
+                        decl.name, type->toString(),
+                        bareForClass(ce->resolvedType)->toString()),
+                        decl.location);
+                } else {
+                    decl.initIsSretCall = true;
+                    std::string calleeName = (ce->callee->kind == NodeKind::Var)
+                        ? std::static_pointer_cast<VarExpr>(ce->callee)->name
+                        : (ce->callee->kind == NodeKind::Member)
+                            ? std::static_pointer_cast<MemberExpr>(ce->callee)->memberName
+                            : "?";
+                    std::cout << std::format(
+                        "  [sret] ★ {} : {} = {}() ⇒ 返回缓冲落在本变量槽（拷贝省略）\n",
+                        decl.name, type->toString(), calleeName);
+                }
+            }
         }
         // ── 平凡拷贝初始化：`Box<int> b = a;`（init 是同类左值）──
         // 用户没写拷贝构造 ⇒ 编译器合成的那个语义就是逐字节复制。旧行为：掉到

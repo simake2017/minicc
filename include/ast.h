@@ -524,6 +524,14 @@ struct VarDeclStmt : Statement {
     // 由 Sema 在 init 类型与声明类型同类时回填。
     bool isTrivialCopy = false;
 
+    // ── 按值返回类的调用初始化：`S x = f();`（sret + 拷贝省略）──
+    // f 按值返回类对象 ⇒ 调用点需要一个【返回缓冲】（sret 约定：隐藏指针作第 0 参数）。
+    // ★ 缓冲【就是 x 的槽】⇒ 调用直接把返回值写进 x，无需再拷贝一次 ——
+    //   这就是 [class.copy.elision]/8 的拷贝省略（clang 默认也这么做）。
+    // ★ 判据由 Sema 落在这里（单一来源）：CodeGen 只照办，
+    //   不再自己判断"这个调用返回不返回类"（两处各判一次必漂，learn/49）。
+    bool initIsSretCall = false;
+
     VarDeclStmt(std::string n, TypePtr t, ExprPtr init)
         : Statement(NodeKind::VarDecl), name(std::move(n)),
           declaredType(std::move(t)), initializer(std::move(init)) {}

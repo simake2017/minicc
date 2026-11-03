@@ -57,6 +57,29 @@ CodeGen::CodeGen() = default;
 // ─────────────────────────────────────────────────────────────────────────────
 // 辅助函数
 // ─────────────────────────────────────────────────────────────────────────────
+// ─── sret 判据（单点）：按值返回类对象？ ──────────────────────────────────────
+// 剥顶层 const 后是不是类类型。★ 只剥 const、**不剥引用** —— `S& f()` 返回的
+// 是引用，不需要返回缓冲（缓冲是给"按值返回的对象"准备的）。
+// ★ 三处必须同源，否则调用点与定义点对不上 ⇒ 调用崩：
+//   ① 定义点 emitFunction（判 m_fnReturnsClassByValue）
+//   ② 调用点 visit(CallExpr)（判本次调用要不要准备缓冲）
+//   ③ Sema 侧（判 initIsSretCall，用裸名类判据 bareForClass —— 与此同规则）
+//   两侧读的是【同一个 Type】⇒ 天然一致（learn/49「作用域即身份」同款）。
+// demo: Class(Int) ⇒ 裸类型 Class ⇒ 是按值返回类；LValueReference(Class) ⇒ 不是
+static TypePtr bareClassType(const TypePtr& t) {
+    if (!t) return nullptr;
+    if (t->isConst()) {
+        TypePtr inner = t->stripConst();
+        return inner ? inner : t;      // 拿不到内层就退回原类型（判据不崩、判"否"）
+    }
+    return t;
+}
+
+static bool returnsClassByValue(const TypePtr& t) {
+    TypePtr bare = bareClassType(t);
+    return bare && bare->isClass();
+}
+
 // 生成全局唯一的汇编标签。
 // 理论：控制流语句（if/while）的跳转目标是"位置"，汇编里用标签表示；
 //       计数器单调递增，保证多个 if/while 的标签互不冲突。
@@ -565,16 +588,42 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
     //   必然错位 —— this 不再占 rdi，形参却仍右移一格，全体静默算错。
     const bool hasThis = !func->ownerClassName.empty() && !func->isStatic;
 
+    // ★ 按值返回类对象 ⇒ sret 形态：隐藏的第 0 参数（rdi）是"返回缓冲指针"，
+    //   它排在 this 之前（System V 的 sret 约定）⇒ 显式实参整体右移一位。
+    //   判据单点：**只看返回类型是不是类**（Type::isClass）—— 调用点与定义点
+    //   读的是同一个 Type ⇒ 两侧天然一致，不会漂（learn/49 / B45 同款教训）。
+    m_fnReturnsClassByValue = returnsClassByValue(func->returnType);
+    m_sretPtrSlot = -1;
+    m_sretValueSize = 0;
+    if (m_fnReturnsClassByValue) {
+        m_sretPtrSlot = paramOffset;                 // -8(%rbp)
+        m_sretValueSize = sretBufferBytes(func->returnType);
+        if (m_sretValueSize == 0) {
+            // 返回类型是类却查不到布局 ⇒ 类没进类表（没实例化 / 前置声明未定义）。
+            // 响亮报错：继续发代码只会静默拷 0 字节（返回垃圾）。
+            throw std::runtime_error(std::format(
+                "[CodeGen Error] sret return type '{}' not in class table (line {})",
+                func->returnType ? func->returnType->toString() : "?",
+                func->location.line));
+        }
+        emit(std::format("movq %{}, {}(%rbp)         # 保存隐藏返回缓冲指针（sret 第 0 参数）",
+            paramRegs[0], m_sretPtrSlot));
+        paramOffset -= 8;
+    }
+
     if (hasThis) {
         m_localVars["this"] = paramOffset;
-        emit(std::format("movq %{}, {}(%rbp)         # 保存 this 指针到栈槽", paramRegs[0], paramOffset));
+        // ★ sret 时 this 走 rsi（rdi 已被返回缓冲指针占用）
+        emit(std::format("movq %{}, {}(%rbp)         # 保存 this 指针到栈槽",
+            paramRegs[m_fnReturnsClassByValue ? 1 : 0], paramOffset));
         paramOffset -= 8;
     }
 
     // 形参 spill：无 this 的（自由函数 / static 成员）形参 i 用第 i 个寄存器；
-    // 有 this 的整体右移一位（regIdx = i+1），因为 rdi 已被隐式第 0 参数占用
+    // 有 this 的整体右移一位（regIdx = i+1），因为 rdi 已被隐式第 0 参数占用；
+    // ★ sret 的再右移一位（rdi 是返回缓冲指针）⇒ 最多 5 个显式实参。
     for (size_t i = 0; i < func->parameters.size() && i < 6; i++) {
-        size_t regIdx = hasThis ? i + 1 : i;
+        size_t regIdx = (hasThis ? 1 : 0) + (m_fnReturnsClassByValue ? 1 : 0) + i;
         if (regIdx < 6) {
             m_localVars[func->parameters[i].name] = paramOffset;
             emit(std::format("movq %{}, {}(%rbp)         # 形参 {} 从寄存器 spill 到栈",
@@ -1025,8 +1074,13 @@ uint32_t CodeGen::estimateFrameBodyBytes(FuncDeclPtr func) {
 
     uint32_t slots = 1;                            // 帧基：paramOffset 从 -8 起
     if (!func->ownerClassName.empty()) slots++;    // this 先占 rdi，spill 一个槽
+    // ★ sret：隐藏返回缓冲指针也占一个 spill 槽（rdi ⇒ 形参与 this 整体右移）
+    //   判据与 emitFunction 的 m_fnReturnsClassByValue【必须同源】——
+    //   两处各判一次必漂（这里数少一个槽 ⇒ 形参 spill 写穿帧底）。
+    const bool hasSret = returnsClassByValue(func->returnType);
+    if (hasSret) slots++;
     for (size_t i = 0; i < func->parameters.size() && i < 6; i++) {
-        size_t regIdx = func->ownerClassName.empty() ? i : i + 1;
+        size_t regIdx = (func->ownerClassName.empty() ? 0 : 1) + (hasSret ? 1 : 0) + i;
         if (regIdx < 6) slots++;
     }
     total += slots * 8;
@@ -1036,7 +1090,190 @@ uint32_t CodeGen::estimateFrameBodyBytes(FuncDeclPtr func) {
 uint32_t CodeGen::estimateFrameSize(FuncDeclPtr func) {
     // 帧主体之外再加【临时对象区】：表达式级构造调用（Box<int>(7)）物化的
     // 临时对象占槽。数法与发射端 allocTempSlot 同序 —— 见 countCtorTempBytes。
-    return estimateFrameBodyBytes(func) + countCtorTempBytes(func->body);
+    // ★ 再加【sret 返回缓冲区】：按值返回类的调用在调用点要一块缓冲。
+    //   与构造临时对象【分开计数】：现存程序一个这种调用都没有 ⇒ 帧大小不变。
+    return estimateFrameBodyBytes(func) + countCtorTempBytes(func->body)
+         + countSretBytes(func->body);
+}
+
+// ─── sret 返回缓冲：字节数与帧估算 ─────────────────────────────────────────
+// 返回缓冲的大小 = 返回类型（类）的对象大小，按 8 字节对齐。
+// 类不在类表里（未实例化 / 前置声明）⇒ 返回 0 ⇒ 调用点不按 sret 处理
+// （此时多半是别处的错误，响亮报在语义层，不在这里猜）。
+uint32_t CodeGen::sretBufferBytes(const TypePtr& returnType) {
+    if (!returnsClassByValue(returnType) || !m_classTypes) return 0;
+    TypePtr bare = bareClassType(returnType);
+    auto it = m_classTypes->find(bare->name);
+    if (it == m_classTypes->end()) return 0;
+    uint32_t size = it->second->classLayout.totalSize;
+    return (size + 7) / 8 * 8;
+}
+
+// 数一个函数体里所有【按值返回类的调用】需要的返回缓冲字节数。
+// ★ 与 countCtorTempBytes 分开走，且只认"按值返回类"这一种调用 ——
+//   现存程序里一个都没有 ⇒ 帧大小逐字节不变（重构零漂移的前提）。
+// skipOwnBuffer：拷贝省略场景（`S x = f();`）里，缓冲就是变量槽（已计入
+//   estimateBlockSize）⇒ 顶层那个不算，但嵌套实参里的缓冲仍要数。
+uint32_t CodeGen::countSretBytes(std::shared_ptr<BlockStmt> block) {
+    if (!block) return 0;
+    uint32_t total = 0;
+    for (auto& stmt : block->statements) {
+        switch (stmt->kind) {
+            case NodeKind::VarDecl: {
+                auto v = std::static_pointer_cast<VarDeclStmt>(stmt);
+                if (v->initializer) {
+                    total += countSretBytesInExpr(v->initializer, v->initIsSretCall);
+                }
+                for (auto& a : v->ctorArgs) total += countSretBytesInExpr(a);
+                break;
+            }
+            case NodeKind::Assign: {
+                auto s = std::static_pointer_cast<AssignStmt>(stmt);
+                total += countSretBytesInExpr(s->value);
+                total += countSretBytesInExpr(s->target);
+                break;
+            }
+            case NodeKind::ExprStmt: {
+                auto s = std::static_pointer_cast<ExprStmt>(stmt);
+                total += countSretBytesInExpr(s->expr);
+                break;
+            }
+            case NodeKind::Return: {
+                auto s = std::static_pointer_cast<ReturnStmt>(stmt);
+                total += countSretBytesInExpr(s->value);
+                break;
+            }
+            case NodeKind::If: {
+                auto s = std::static_pointer_cast<IfStmt>(stmt);
+                total += countSretBytesInExpr(s->condition);
+                if (s->thenBranch && s->thenBranch->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->thenBranch));
+                if (s->elseBranch && s->elseBranch->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->elseBranch));
+                break;
+            }
+            case NodeKind::While: {
+                auto s = std::static_pointer_cast<WhileStmt>(stmt);
+                total += countSretBytesInExpr(s->condition);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::DoWhile: {
+                auto s = std::static_pointer_cast<DoWhileStmt>(stmt);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                total += countSretBytesInExpr(s->condition);
+                break;
+            }
+            case NodeKind::For: {
+                auto s = std::static_pointer_cast<ForStmt>(stmt);
+                if (s->init && s->init->kind == NodeKind::Block) {
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->init));
+                } else if (s->init && s->init->kind == NodeKind::Assign) {
+                    auto a = std::static_pointer_cast<AssignStmt>(s->init);
+                    total += countSretBytesInExpr(a->value);
+                    total += countSretBytesInExpr(a->target);
+                }
+                total += countSretBytesInExpr(s->condition);
+                if (s->increment && s->increment->kind == NodeKind::Assign) {
+                    auto a = std::static_pointer_cast<AssignStmt>(s->increment);
+                    total += countSretBytesInExpr(a->value);
+                    total += countSretBytesInExpr(a->target);
+                }
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Switch: {
+                auto s = std::static_pointer_cast<SwitchStmt>(stmt);
+                total += countSretBytesInExpr(s->condition);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Case: {
+                auto s = std::static_pointer_cast<CaseStmt>(stmt);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Default: {
+                auto s = std::static_pointer_cast<DefaultStmt>(stmt);
+                if (s->body && s->body->kind == NodeKind::Block)
+                    total += countSretBytes(std::static_pointer_cast<BlockStmt>(s->body));
+                break;
+            }
+            case NodeKind::Block:
+                total += countSretBytes(std::static_pointer_cast<BlockStmt>(stmt));
+                break;
+            default:
+                break;
+        }
+    }
+    return total;
+}
+
+// 表达式子树里的 sret 缓冲计数（自顶向下、自左向右，与发射序一致）。
+// 顺序与 countCtorTempBytesInExpr 同款：调用自身先算，再递归 callee，再递归实参。
+uint32_t CodeGen::countSretBytesInExpr(const ExprPtr& expr, bool skipOwnBuffer) {
+    if (!expr) return 0;
+    uint32_t total = 0;
+    switch (expr->kind) {
+        case NodeKind::Call: {
+            auto e = std::static_pointer_cast<CallExpr>(expr);
+            if (!skipOwnBuffer && !e->isCtorCall && e->resolvedType) {
+                uint32_t sz = sretBufferBytes(e->resolvedType);
+                if (sz > 0) total += sz;
+            }
+            total += countSretBytesInExpr(e->callee);
+            for (auto& a : e->arguments) total += countSretBytesInExpr(a);
+            break;
+        }
+        case NodeKind::Binary: {
+            auto e = std::static_pointer_cast<BinaryExpr>(expr);
+            total += countSretBytesInExpr(e->left);
+            total += countSretBytesInExpr(e->right);
+            break;
+        }
+        case NodeKind::Unary: {
+            auto e = std::static_pointer_cast<UnaryExpr>(expr);
+            total += countSretBytesInExpr(e->operand);
+            break;
+        }
+        case NodeKind::Conditional: {
+            auto e = std::static_pointer_cast<ConditionalExpr>(expr);
+            total += countSretBytesInExpr(e->condition);
+            total += countSretBytesInExpr(e->thenExpr);
+            total += countSretBytesInExpr(e->elseExpr);
+            break;
+        }
+        case NodeKind::Comma: {
+            auto e = std::static_pointer_cast<CommaExpr>(expr);
+            total += countSretBytesInExpr(e->left);
+            total += countSretBytesInExpr(e->right);
+            break;
+        }
+        case NodeKind::Member: {
+            auto e = std::static_pointer_cast<MemberExpr>(expr);
+            total += countSretBytesInExpr(e->object);
+            break;
+        }
+        case NodeKind::Index: {
+            auto e = std::static_pointer_cast<IndexExpr>(expr);
+            total += countSretBytesInExpr(e->object);
+            total += countSretBytesInExpr(e->index);
+            break;
+        }
+        case NodeKind::New: {
+            auto e = std::static_pointer_cast<NewExpr>(expr);
+            for (auto& a : e->constructorArgs) total += countSretBytesInExpr(a);
+            break;
+        }
+        default:
+            break;
+    }
+    return total;
 }
 
 // ── 临时对象区估算：数出函数体里所有会被物化的构造调用 ─────────────────────────
@@ -1326,6 +1563,21 @@ void CodeGen::visit(VarDeclStmt& decl) {
             // （编译期全绿的错配）。vptr 随 memcpy 一起复制 ⇒ 动态类型一并拷贝，正确。
             // 源地址约定：局部 VarExpr 取栈槽、全局取标签、类类型 MemberExpr
             // 求值后地址本就在 rax（"子对象取址"约定，见 visit(MemberExpr)）。
+            // ── 按值返回类的调用初始化（`S x = f();`）：拷贝省略 ────────────────
+            // ★ 返回缓冲【就是 x 的槽】⇒ 调用直接把返回值写进来，不需要再拷一次
+            //   （[class.copy.elision]/8：prvalue 直接materialize到目标对象）。
+            //   因此这里【不清零、不装 vptr、不调构造函数】—— 返回值本身就是那个
+            //   完整对象（含它自己的 vptr，随对象表示一起被拷贝过来）。
+            // ★ 判据由 Sema 落在这里（decl.initIsSretCall，单一来源）。
+            if (decl.initIsSretCall) {
+                emitComment(std::format("sret init {} ← 调用直接写入本变量槽（拷贝省略）",
+                    decl.name));
+                m_sretTargetSlot = offset;
+                emitExpr(decl.initializer);
+                m_sretTargetSlot = kNoSretTarget;
+                return;
+            }
+
             if (decl.isTrivialCopy) {
                 emitComment(std::format("trivial copy {} ← init ({} bytes)", decl.name, size));
                 emitClassAddress(decl.initializer);   // rax = 源对象地址
@@ -1769,7 +2021,15 @@ void CodeGen::visit(AssignStmt& stmt) {
             emit("movq %rax, %rcx                # 对象地址存入 rcx");
 
             // 计算右值到 rax
+            // ★ B48：右值求值会踩 rcx（二元表达式拿它周转、函数调用按约定可踩）
+            //   ⇒ 对象地址必须先存栈上，求完右值再取回。
+            //   旧行为把对象地址留在 rcx 里直接求右值 ⇒ rcx 被覆盖后
+            //   `movl %eax, off(%rcx)` 写到【错的地址】⇒ 段错误（rcx=4 时）
+            //   或更糟：静默踩坏别人的内存（rcx 恰是合法地址时）。
+            //   现场：`s.v = s.v + 4;` ⇒ 二元表达式的右操作数把 rcx 改成 4。
+            emit("pushq %rcx                   # 保护对象地址（右值求值会踩 rcx）");
             emitExpr(stmt.value);
+            emit("popq %rcx                    # 对象地址回 rcx");
 
             // 查找字段偏移量
             if (mem->object->resolvedType) {
@@ -1833,8 +2093,24 @@ void CodeGen::visit(AssignStmt& stmt) {
 void CodeGen::visit(ReturnStmt& stmt) {
     if (stmt.value) {
         emitComment("return expr");
-        emitExpr(stmt.value);
-        // 返回值已经在 rax 中
+        if (m_fnReturnsClassByValue) {
+            // ★ sret：按值返回类对象 ⇒ 把对象表示【拷进调用者给的返回缓冲】，
+            //   并按约定把缓冲地址留在 rax（Itanium 的 sret 返回值就是缓冲地址）。
+            //   拷贝必须发生在【析构之前】—— 返回对象先落到缓冲，局部对象再死
+            //   （emitDtorsOnReturn 在下面），顺序反了就是把死对象交出去。
+            emitClassAddress(stmt.value);        // rax = 源对象地址
+            emit("movq %rax, %rsi            # 源对象地址");
+            emit(std::format("movq {}(%rbp), %rdi   # 目标 = 调用者的返回缓冲",
+                m_sretPtrSlot));
+            emit(std::format("movq ${}, %rcx         # 复制字节数 = sizeof(返回类型)",
+                m_sretValueSize));
+            emit("rep movsb                  # 逐字节复制对象表示到返回缓冲");
+            emit(std::format("movq {}(%rbp), %rax   # sret 约定：返回值 = 返回缓冲地址",
+                m_sretPtrSlot));
+        } else {
+            emitExpr(stmt.value);
+            // 返回值已经在 rax 中
+        }
     } else {
         emit("movq $0, %rax               # void 返回，结果置 0");
     }
@@ -2549,6 +2825,27 @@ void CodeGen::visit(CallExpr& expr) {
 
     emitComment("function call");
 
+    // ★ sret：本次调用按值返回类对象 ⇒ 调用点要准备一块【返回缓冲】，
+    //   缓冲地址走 rdi（隐藏的第 0 参数），显式实参整体右移一位。
+    //   判据单点：expr.resolvedType 是类（与定义点读的是同一个 Type ⇒ 两侧一致）。
+    //   缓冲落在哪：
+    //     · 拷贝省略场景（`S x = f();`）⇒ 缓冲【就是 x 的槽】（m_sretTargetSlot）
+    //     · 其余（`f(g())`、`return f();`、作为实参）⇒ 帧临时区新分配一块
+    // ★ m_sretTargetSlot 只给【最外层那一次】用：取走即清零（嵌套调用自己分配），
+    //   否则 `S x = f(g());` 里 g 的返回值会写进 x 的槽（串味）。
+    bool sretCall = false;
+    uint32_t sretSize = 0;
+    int sretBuf = kNoSretTarget;
+    if (expr.resolvedType && returnsClassByValue(expr.resolvedType)) {
+        sretSize = sretBufferBytes(expr.resolvedType);
+        if (sretSize > 0) {
+            sretCall = true;
+            sretBuf = (m_sretTargetSlot != kNoSretTarget)
+                ? m_sretTargetSlot : allocTempSlot(sretSize);
+            m_sretTargetSlot = kNoSretTarget;   // 只给最外层这一次；嵌套调用自己分配
+        }
+    }
+
     // 检查是否是方法调用
     // ── 路径①/②：callee 形如 obj.method —— 先解析对象类型再定虚实 ──
     if (expr.callee->kind == NodeKind::Member) {
@@ -2582,14 +2879,21 @@ void CodeGen::visit(CallExpr& expr) {
                         if (hit) {
                             // 这是虚函数调用！
                             // ★ 喂入 this：emitVirtualCall 约定"入口时对象
-                            //   地址在 rdi"，此处先求值对象表达式（"." 取
-                            //   栈对象地址 / "->" 取指针值）再送入 rdi。
+                            //   地址在 rdi"（sret 时改到 rsi，rdi 让给返回缓冲），
+                            //   此处先求值对象表达式（"." 取栈对象地址 / "->" 取指针值）
+                            //   再送入对应寄存器。
                             //   （P1 修正：原先直接进三部曲，rdi 里是上次
                             //     调用遗留的垃圾——栈对象支持暴露了它）
                             emitExpr(mem->object);
-                            emit("movq %rax, %rdi            # this = 对象地址（第 0 参数）");
+                            emit(std::format("movq %rax, %{}            # this = 对象地址{}",
+                                sretCall ? "rsi" : "rdi",
+                                sretCall ? "（sret：rdi 让给返回缓冲）" : "（第 0 参数）"));
                             emitVirtualCall(objType->name, mem->memberName,
-                                          expr.arguments, entry.index);
+                                          expr.arguments, entry.index, sretBuf);
+                            if (sretCall) {
+                                emit(std::format("leaq {}(%rbp), %rax       # 表达式的值 = 返回缓冲地址",
+                                    sretBuf));
+                            }
                             return;
                         }
                     }
@@ -2600,24 +2904,33 @@ void CodeGen::visit(CallExpr& expr) {
             // 先计算对象地址作为第一个参数（this 指针）
             // Itanium C++ ABI：this 是隐式第 0 参数走 rdi，
             // 显式实参从 rsi 起 —— 故下面实参最多取 5 个（this + 5 = 6 寄存器）
+            // ★ sret 时 rdi 归返回缓冲指针 ⇒ this 挪到 rsi、显式实参从 rdx 起
+            //   （最多 4 个）。两侧（定义点 emitFunction / 调用点此处）必须同口径。
+            const size_t maxArgs = sretCall ? 4 : 5;
             emitExpr(mem->object);
             emit("pushq %rax                   # 暂存 this 指针到栈上");
 
             // 计算参数
             // （逐个压栈暂存，随后逆序弹入 rsi/rdx/rcx/r8/r9）
-            for (size_t i = 0; i < expr.arguments.size() && i < 5; i++) {
+            for (size_t i = 0; i < expr.arguments.size() && i < maxArgs; i++) {
                 emitExpr(expr.arguments[i]);
                 emit("pushq %rax                  # 实参值压栈暂存");
             }
 
             // 恢复参数到寄存器
-            for (int i = static_cast<int>(expr.arguments.size()) - 1; i >= 0 && i < 5; i--) {
-                static const char* regs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
-                emit(std::format("popq %{}                   # 逆序弹出实参到寄存器", regs[i]));
+            static const char* memberArgRegs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
+            for (int i = static_cast<int>(expr.arguments.size()) - 1; i >= 0 && i < static_cast<int>(maxArgs); i--) {
+                emit(std::format("popq %{}                   # 逆序弹出实参到寄存器",
+                    memberArgRegs[sretCall ? i + 1 : i]));
             }
 
-            // this 指针到 rdi
-            emit("popq %rdi                   # 弹出 this 指针到 rdi（第 0 参数）");
+            // this 指针到 rdi（sret 时到 rsi）
+            emit(std::format("popq %{}                   # 弹出 this 指针到 {}（{}）",
+                sretCall ? "rsi" : "rdi", sretCall ? "rsi" : "rdi",
+                sretCall ? "sret：this 让到 rsi" : "第 0 参数"));
+            if (sretCall) {
+                emit(std::format("leaq {}(%rbp), %rdi       # rdi = 返回缓冲（sret 隐藏参数）", sretBuf));
+            }
 
             // 调用
             // 符号名构造：简化 mangling "类名_方法名"（如 Dog_speak），
@@ -2638,13 +2951,18 @@ void CodeGen::visit(CallExpr& expr) {
                 funcName = mem->memberName;
             }
             emit(std::format("callq {}                  # 调用方法 {}", funcName, funcName));
+            if (sretCall) {
+                emit(std::format("leaq {}(%rbp), %rax       # 表达式的值 = 返回缓冲地址", sretBuf));
+            }
             return;
         }
     }
 
     // 普通函数调用
     // 计算参数并放入对应寄存器
-    for (size_t i = 0; i < expr.arguments.size() && i < 6; i++) {
+    // ★ sret 时 rdi 是隐藏的返回缓冲指针 ⇒ 显式实参从 rsi 起（最多 5 个）
+    const size_t maxArgs = sretCall ? 5 : 6;
+    for (size_t i = 0; i < expr.arguments.size() && i < maxArgs; i++) {
         emitExpr(expr.arguments[i]);
         emit("pushq %rax                  # 实参值压栈暂存");
     }
@@ -2652,8 +2970,9 @@ void CodeGen::visit(CallExpr& expr) {
     // 恢复参数到寄存器（逆序）
     static const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
     for (int i = static_cast<int>(expr.arguments.size()) - 1; i >= 0; i--) {
-        if (i < 6) {
-            emit(std::format("popq %{}                   # 逆序弹出实参到寄存器", regs[i]));
+        if (i < static_cast<int>(maxArgs)) {
+            emit(std::format("popq %{}                   # 逆序弹出实参到寄存器",
+                regs[sretCall ? i + 1 : i]));
         }
     }
 
@@ -2666,7 +2985,13 @@ void CodeGen::visit(CallExpr& expr) {
         funcName = asmSymbol(var->name);
     }
 
+    if (sretCall) {
+        emit(std::format("leaq {}(%rbp), %rdi       # rdi = 返回缓冲（sret 隐藏参数）", sretBuf));
+    }
     emit(std::format("callq {}                  # 调用函数 {}", funcName, funcName));
+    if (sretCall) {
+        emit(std::format("leaq {}(%rbp), %rax       # 表达式的值 = 返回缓冲地址", sretBuf));
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2698,42 +3023,54 @@ void CodeGen::emitVirtualCall(
     const std::string& className,
     const std::string& methodName,
     const std::vector<ExprPtr>& args,
-    uint32_t vtableIndex) {
+    uint32_t vtableIndex,
+    int sretBuf) {
 
     emitComment(std::format("VIRTUAL CALL: {}::{} (vtable[{}])",
         className, methodName, vtableIndex));
 
+    // ★ sret（sretBuf != kNoSretTarget）：隐藏返回缓冲占 rdi ⇒ this 挪到 rsi、
+    //   显式实参从 rdx 起。非 sret：this 在 rdi、显式实参从 rsi 起（老口径）。
+    const bool sret = (sretBuf != kNoSretTarget);
+    const char* thisReg = sret ? "rsi" : "rdi";
+    const size_t maxArgs = sret ? 4 : 5;
+
     // ─── 保存对象地址 ───
-    // this 进入时在 rdi；先压栈保护（下面求/弹实参会反复使用 rax 与
-    // 参数寄存器），最后弹回 rdi 兼作第 0 实参
-    emit("pushq %rdi                   # 暂存 this（对象地址）到栈上保护");
+    // this 进入时在 rdi（sret 时在 rsi）；先压栈保护（下面求/弹实参会反复使用
+    // rax 与参数寄存器），最后弹回兼作隐式第 0 实参
+    emit(std::format("pushq %{}                   # 暂存 this（对象地址）到栈上保护", thisReg));
 
     // ─── 准备参数 ───
     // 第一个参数是 this 指针（对象地址）
 
     // 先计算参数（跳过 this）
-    // 显式实参最多 5 个：rdi 留给 this，rsi/rdx/rcx/r8/r9 装 5 个实参
-    for (size_t i = 0; i < args.size() && i < 5; i++) {
+    // 显式实参最多 5 个（sret 时 4 个）：rdi 留给 this，rsi/rdx/rcx/r8/r9 装实参
+    for (size_t i = 0; i < args.size() && i < maxArgs; i++) {
         emitExpr(args[i]);
         emit("pushq %rax                  # 实参值压栈暂存");
     }
 
     // 恢复参数到寄存器
-    for (int i = static_cast<int>(args.size()) - 1; i >= 0 && i < 5; i--) {
-        static const char* regs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
-        emit(std::format("popq %{}                   # 逆序弹出实参到寄存器", regs[i]));
+    static const char* regs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
+    for (int i = static_cast<int>(args.size()) - 1; i >= 0 && i < static_cast<int>(maxArgs); i--) {
+        emit(std::format("popq %{}                   # 逆序弹出实参到寄存器",
+            regs[sret ? i + 1 : i]));
     }
 
-    // this 指针到 rdi：从栈中弹回函数入口时保存的对象地址
+    // this 指针回位：从栈中弹回函数入口时保存的对象地址
     // （弹栈同时把调用方的栈指针复原——push/pop 严格配对，
     //   虚析构经块尾反复调用也不会漂移）
-    emit("popq %rdi                   # 弹出 this 指针（恢复对象地址）");
+    emit(std::format("popq %{}                   # 弹出 this 指针（恢复对象地址）", thisReg));
+
+    if (sret) {
+        emit(std::format("leaq {}(%rbp), %rdi       # rdi = 返回缓冲（sret 隐藏参数）", sretBuf));
+    }
 
     // ─── 虚函数调用三部曲 ───
 
     // (a) 从对象偏移量 +0 处读出 _vptr 指针
     emit("# ═══ 虚函数调用 (a)：从对象读出 _vptr ═══");
-    emit("movq (%rdi), %rax            # 从对象首 8 字节读出 _vptr");
+    emit(std::format("movq (%{}), %rax            # 从对象首 8 字节读出 _vptr", thisReg));
 
     // (b) 从 vtable 中加上 index 偏移量，读出真正的函数地址
     //     _vptr 已指向 vtable[0]（emitNew/构造函数写入 表首+16），

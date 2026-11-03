@@ -53,6 +53,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <climits>
 
 namespace minicc {
 
@@ -126,6 +127,30 @@ private:
     int m_suppressTempDtor = 0;
     int m_lastCtorTempOffset = 0;
     std::string m_lastCtorTempClass;
+
+    // ── sret：按值返回类对象的【隐藏返回缓冲】约定 ──────────────────────────
+    // 教学版口径（对齐 System V 的 sret 形态）：
+    //   调用点：rdi = 返回缓冲地址；显式实参从 rsi 起（成员方法则 rsi = this，
+    //           实参从 rdx 起）；返回值 rax = 缓冲地址。
+    //   定义点：序言把 rdi  spill 到 m_sretPtrSlot；`return <类对象>` 把对象
+    //           逐字节拷进该缓冲，rax 回填缓冲地址。
+    // ★ 判据单点：**"这个函数按值返回类"只看返回类型是不是类**（Type::isClass）——
+    //   调用点与定义点读的是同一个 Type ⇒ 天然一致，不会漂（learn/49 / B45 同款）。
+    bool m_fnReturnsClassByValue = false;  // 当前【定义中】的函数按值返回类
+    int  m_sretPtrSlot = -1;               // 隐藏返回缓冲指针的栈槽（rbp 负偏移）
+    uint32_t m_sretValueSize = 0;          // 返回类型（类）的大小
+    // ★ 哨兵不能用 -1：rbp 偏移【全是负数】⇒ -1 是一个合法槽位！
+    //   （踩坑现场：`m_sretTargetSlot >= 0` 恒假 ⇒ 拷贝省略的缓冲总被当"未指定"
+    //     ⇒ 临时区另分配一块 ⇒ 返回值写进了临时区，变量槽仍是零 ⇒ 静默算错。）
+    static constexpr int kNoSretTarget = INT_MIN;   // "下一次 sret 调用没有指定槽"
+    int  m_sretTargetSlot = kNoSretTarget; // 下一次 sret 调用的缓冲槽（kNoSretTarget = 自分配临时）
+    // 返回缓冲的字节数（按类布局 totalSize 对齐 8）；类不在表里 ⇒ 0（不按值返回）。
+    uint32_t sretBufferBytes(const TypePtr& returnType);
+    // 帧估算用：数出函数体里所有【按值返回类的调用】需要的返回缓冲字节数。
+    // ★ 与构造临时对象的计数【分开走】：本计数只对"按值返回类"的调用生效，
+    //   现存程序一个都没有 ⇒ 帧大小逐字节不变（零漂移）。
+    uint32_t countSretBytes(std::shared_ptr<BlockStmt> block);
+    uint32_t countSretBytesInExpr(const ExprPtr& expr, bool skipOwnBuffer = false);
     // 类值的【取址】：类对象在表达式里没有"标量值"表示，按内存块传递，一律按地址。
     // VarExpr 局部 → 栈槽；全局 → 标签；裸字段 → this+偏移；Member → 递归 + 字段偏移。
     // 与 visit(MemberExpr) 的"子对象取址"约定同源（那边只管类字段这一步）。
@@ -262,10 +287,15 @@ private:
     // 参数：className/methodName 只用于生成可读注释；args 不含 this；
     //   vtableIndex 是 Sema 在 ClassLayout.vtableEntries 里查好的编译期常数
     //   —— "下标编译期定死，表项内容运行期才定"。
+    // ★ sretBuf != kNoSretTarget ⇒ 本次是"按值返回类对象"的虚调用：rdi 归隐藏
+    //   返回缓冲指针，this 挪到 rsi、显式实参从 rdx 起（最多 4 个）。
+    //   kNoSretTarget = 老口径（this 在 rdi）。
+    // ⚠ 哨兵不能用"偏移 >= 0"判定：rbp 偏移【全是负数】⇒ 真实槽位会被当成"没有"。
     void emitVirtualCall(const std::string& className,
                          const std::string& methodName,
                          const std::vector<ExprPtr>& args,
-                         uint32_t vtableIndex);
+                         uint32_t vtableIndex,
+                         int sretBuf = kNoSretTarget);
 
     // ── 辅助 ──
     // 生成全局唯一标签：前缀 + "_" + 计数器，如 else_0、while_begin_1

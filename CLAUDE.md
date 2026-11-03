@@ -1072,9 +1072,48 @@ struct Inner{T v;}; }; Box<int>::Inner i;` ⇒ clang rc=0 / minicc rc=1
 全量 ctest 396 → **403**；**167 份集成日志逐字节零漂移**；build 0 警告。
 文档 docs/learn/56（新）+ BUGS.md B47 + ROADMAP §0.1 批 0-2 标 ✅。
 
+✅ **按值返回 + 拷贝省略已完成（BUGS.md B48/B49，docs/learn/57）** ——
+★ 起点是 ROADMAP §0.1 批 0-1（主线 A 的延伸缺口）：`struct S{int v;};
+S f(){S s; s.v=7; return s;} int main(){S x=f(); return x.v;}`
+⇒ clang rc=**7** / minicc rc=**0**（**初始化式被丢弃**，对象退化成默认构造 ⇒ ★ 静默算错）。
+★ 根因：`visit(VarDeclStmt)` 的平凡拷贝分支只接 `Var`/`Member` 两种**左值**形态
+（源码注释里写着"函数返回同类对象不涉及"），调用表达式落进"无初始化的类声明"。
+★ 修法走 **sret 约定**（Itanium ABI §3.2.3）：
+**定义点** spill 隐藏缓冲指针到 `-8(%rbp)`、`return` 路径把源对象**逐字节拷进缓冲**
+（`rep movsb`）并按约定返回缓冲地址；**调用点**把缓冲地址装进 `%rdi`、**显式实参右移**到
+`%rsi` 起（成员调用 `this` 让到 `%rsi`、实参从 `%rdx` 起；虚调用同款）；
+**拷贝省略**（[dcl.init]/17.6.1 + [class.copy.elision]/8）⇒ 缓冲**就是变量自己的槽**，
+`S x = f();` 一步落位、无中间临时。
+★ **判据单点**（B10→B20→B22→B45 同一个坑的**第五次**现形）：
+"返回类型是不是类" 由 `Type::isClass()` 在**同一个 Type 对象**上判三次
+（Sema 标 `initIsSretCall` / codegen 调用点 / codegen 定义点）⇒ 不会"两处算两次"。
+★ **两个自踩的坑**（都写进 learn/57）：① **`%rbp` 偏移恒为负** ⇒
+"槽 >= 0"这个 sentinel 判据**恒为假** ⇒ 拷贝省略的缓冲落到了临时槽、
+变量值静默为 0 ⇒ 改用 `kNoSretTarget = INT_MIN` 显式哨兵；
+② `std::format("movq ({}), %rax", reg)` 少一个 `%` ⇒ 汇编吐 `movq (rdi), %rax`
+⇒ 链接期 `undefined reference to 'rdi'`。
+★ **顺带修一个与本批无关的老坑（B48）**：成员赋值 `s.v = s.v + 4;` 把对象地址
+留在 `%rcx` 越过右值求值 ⇒ 右值求值踩掉 `%rcx` ⇒ **写到地址 4** ⇒ SIGSEGV
+（clang 给 7）⇒ 加 `pushq %rcx`/`popq %rcx` 保护（**无条件保护**，
+常量右值也保护 —— 单测第三例钉住这点）。
+★ 边界**不放大**：引用返回不是 sret（单测 T6 钉住）；全局类对象仍是坏的
+（8 字节存储 + 地址约定未套用 ⇒ `g.v = 11` 直接 SIGSEGV）⇒ **登记 B50 为 open**，
+下一批收口（两个根因要一起改：存储尺寸 + 全局取地址）。
+测试 tests/lang/test_basics_37_return_class_by_value.cpp（9 检查点，与 clang 对拍 rc=0）
++ 单测 tests/unit/test_sret_return.cpp（`SretReturn.*` 7 例：隐藏指针 spill /
+逐字节拷贝 / 调用点 rdi 装缓冲 / 拷贝省略=变量槽 / 实参右移 / 成员 this 让位 /
+引用返回**不是** sret）+ 单测 tests/unit/test_member_assign_clobber.cpp
+（`MemberAssignClobber.*` 3 例）；
+突变验证 6/6 实跑变红（tools/verify-sret-mutations.sh）。
+全量 ctest 403 → **413**；集成新增 1 份、**有意漂移 43 份**（B48 的 push/pop 两行 +
+连带的 `.text` 尺寸/`main @` 地址位移；★ **rc 与运行输出逐字节不变** —— 漂移全是汇编行，
+语义日志一行未动，已重刷基线）；build 0 警告。
+文档 docs/learn/57（新）+ BUGS.md B48/B49（+ B50 登记 open）+ ROADMAP §0.1 批 0-1 标 ✅。
+
 **未做（按优先级）**：★ **2026-11-02 起不再在本文件维护待办清单** ——
 统一到 `docs/ROADMAP.md` §0（当前优先级 = 执行序）。本文件只留"已完成"的台账。
-要点：§0.1 批 0（按值返回+拷贝省略 = ★静默算错；~~实例化 5.8 克隆嵌套类~~ ✅ learn/56）→
+要点：§0.1 批 0（~~按值返回+拷贝省略~~ ✅ learn/57；~~实例化 5.8 克隆嵌套类~~ ✅ learn/56；
+**批 0-3 = 全局类对象（B50）** = ★ 段错误，两根因：存储尺寸 + 全局取地址）→
 §0.2 主线 K 模板线六项（别名模板特化的**非法程序拒收** / 偏特化模式的值位 /
 `template<auto V>` 偏特化 / 模板模板形参的形参包·默认实参·嵌套 /
 类外定义特化成员 / 函数模板显式 NTTP 实参）→ §0.3 降级区（语法面 17 条）→

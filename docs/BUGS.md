@@ -60,6 +60,9 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B35](#b35-语句层前瞻只认固定-token-顺序限定名模板-id-与全变量比较链双双被拒收) | parseStatement 2245 前瞻是 parseType 语法的【残缺复制品】：`<` 跳过只认第一个标识符后的位置 ⇒ `N::B<Box> x;`（限定名+模板 id）漏跳被拒收；无任何"是不是模板名"的判据 ⇒ `a < b > c;` 全变量比较链被误判成声明 `a<b> c`（B31 的语句层兄弟） | `src/parser.cpp` parseStatement 类名前瞻分支（2245-2323 手写 token 跳过人） | 中（罕见写法 ×2，但都是拒收合法程序 + 语法复制品是维护隐患） | ✅ 已修 |
 | [B36](#b36-限定模板名-nb-误绑全局模板-bsema-尾剥无作用域裁决) | Sema 限定名归一只取 `::` 末段查【全局】蓝图表：N::B 真存在时正确，真不存在而全局有同名模板 B 时误绑（方向性错） | `src/semantic_analyzer.cpp` resolveType 模板 id 分支（B35 尾剥） | 中（静默走错路，报错指向派生类型） | ✅ 已修 |
 | [B47](#b47-类模板里的嵌套类不支持蓝图不克隆成员合法程序被拒) | 类模板实例化只搬"顶层四样"（字段/方法/别名/static），**嵌套类没克隆** ⇒ `Box<int>::Inner` 报 no type named 'Inner'（合法程序被拒） | `src/sema/template_instantiation.cpp` 实例化步骤 5.8 + `src/sema/semantic_analyzer.cpp` forEachClassMethod | 中（合法程序被拒；连带链接期 undefined reference） | ✅ 已修 |
+| [B48](#b48-成员赋值右值求值踩掉对象地址写字段写到了错的地址静默算错) | 成员赋值把对象地址暂存 `%rcx`，**右值求值会踩 %rcx** ⇒ `movl %eax,0(%rcx)` 写到错的地址（`s.v = s.v + 4` ⇒ SIGSEGV） | `src/codegen/codegen.cpp` `visit(AssignStmt)` 成员分支 | 中（段错误；rc 恰是合法地址时静默踩内存） | ✅ 已修 |
+| [B49](#b49-按值返回类对象初始化式被丢弃对象退化成默认构造静默算错) | `S x = f();` 的初始化式被丢弃 ⇒ 对象按默认构造生成 ⇒ `x.v` 恒 0（clang 7 / minicc 0） | `src/sema/semantic_analyzer.cpp` 变量声明处理 + `src/codegen/codegen.cpp` sret 形态 | **大**（类对象按值返回全族；静默算错） | ✅ 已修 |
+| [B50](#b50-全局类对象存储只按-8-字节分配--类值的地址约定未在全局路径生效段错误未修) | 全局类对象按 `.quad 0` 只分 8 字节 + 全局路径按标量加载（拿到字段值而非地址）⇒ `g.v = 11` SIGSEGV | `src/codegen/codegen.cpp` 全局变量发射 + `visit(VarExpr)` | **大**（`g.v = 11` 这种基本写法就崩） | ⬜ 未修 |
 
 > ★ **索引欠账（历史遗留）**：B37~B46 六条**未补进上表**（条目正文都在，
 > 只是索引没跟上）—— 本表自 B36 之后断档，B47 是补上的第一行新条目。
@@ -3429,3 +3432,164 @@ clang rc=0（`Box<int>::Inner` 是合法类型）。
 ★ 本批真正的收获是两条可复用判据：
 **"成员表"是递归结构，遍历它就必须递归**；
 **"只算一次，别处只引用"**（登记名前缀化只有一处，不给"两处各算一遍"留缝）。
+
+---
+
+## B48. 成员赋值：右值求值踩掉对象地址 ⇒ 写字段写到了错的地址（★ 静默算错）
+
+- severity: high ｜ status: fixed ｜ related: src/codegen/codegen.cpp, docs/learn/57
+
+**现象**
+
+```cpp
+struct S { int v; };
+int main() {
+    S s;
+    s.v = 3;
+    s.v = s.v + 4;      // ★ clang rc=7；修前 minicc SIGSEGV（rc=139）
+    return s.v;
+}
+```
+
+**性质**：**静默算错 / 段错误** —— 二元表达式把右操作数挪进 `%rcx`（常量 4），
+于是 `movl %eax, 0(%rcx)` 写到地址 `0x4` ⇒ 段错误；
+若 `%rcx` 恰是别的合法地址 ⇒ **静默踩坏别人的内存**（无任何症状）。
+
+**根因**：`visit(AssignStmt)` 的成员分支（`NodeKind::Member`）是这条顺序：
+
+```
+emitExpr(mem->object);              // 对象地址 → rax
+emit("movq %rax, %rcx");             // 暂存到 %rcx
+emitExpr(stmt.value);                // ★ 右值求值 —— 会踩 %rcx
+... emit("movl %eax, 0(%rcx)");      // ★ 用 %rcx 里的（已被冲掉的）地址写入
+```
+
+★ `%rcx` 是本实现的**临时周转寄存器**（二元表达式拿它放右操作数；
+函数调用按约定可踩 caller-saved 寄存器，含 `%rcx`）⇒
+"算一次地址"的前提"地址活到写下去"不成立。
+⚠ 与"右值求值两次"那个老简化**不是一回事**：那是**求值次数**问题，
+这是**寄存器存活期**问题 —— 两者都在同一条语句上，极易混为一谈。
+
+**修法**：对象地址先 `pushq %rcx`，右值求完再 `popq %rcx` 取回：
+
+```cpp
+emitExpr(mem->object);
+emit("movq %rax, %rcx");        // 对象地址存入 rcx
+emit("pushq %rcx");             // ★ 保护对象地址（右值求值会踩 rcx）
+emitExpr(stmt.value);
+emit("popq %rcx");              // ★ 对象地址回 rcx
+```
+
+**回归**：单测 `MemberAssignClobber.*` 3 例（二元值 / 调用值 / 常量值 ——
+第三条钉住"保护是无条件加的"，不靠"这个右值恰好不踩 rcx"蒙对）
++ 集成 `tests/lang/test_basics_37_return_class_by_value.cpp` 检查点 ②。
+
+**教训**：★ **"只算一次"不等于"算的值活得久"** —— 寄存器分配之外，
+凡是"跨表达式求值保存东西"的地方，都要问一句"这中间 %rcx 会不会被踩"。
+★ 本条是**做 sret 特性时撞出来的**：要写"拿到返回的对象再改它的字段"，
+就必然走到这条路径 —— 特性与缺陷常在同一条语句上相遇。
+
+---
+
+## B49. 按值返回类对象：初始化式被丢弃 ⇒ 对象退化成默认构造（★ 静默算错）
+
+- severity: high ｜ status: fixed ｜ related: src/codegen/codegen.cpp, src/sema/semantic_analyzer.cpp, include/ast.h, docs/learn/57
+
+**现象**
+
+```cpp
+struct S { int v; };
+S f() { S s; s.v = 7; return s; }
+int main() { S x = f(); return x.v; }   // ★ clang rc=7；修前 minicc rc=0
+```
+
+**性质**：**静默算错** —— 编译全绿、链接全绿，运行给出**别的数**（0）。
+★ 这是 ROADMAP §0.1 批 0-1 点名的头号缺口（"按值返回 + 拷贝省略"）。
+
+**根因（两层，缺一不可）**：
+
+1. **语义层**：变量声明处理只认三种初始化形态 —— 构造调用升级 / 平凡拷贝 /
+   直接初始化。"**调用表达式返回类对象**"这一形态没被认出来 ⇒
+   落到"无初始化的类声明"分支 ⇒ **初始化式被丢弃**，对象按默认构造生成。
+2. **代码生成层**：即便认出了形态，也没有"返回缓冲"这回事 ——
+   **类对象没有标量值表示**（首 8 字节可能是 vptr、可能是字段），
+   按值返回它不能用 rax 装值 ⇒ 必须走 sret（调用者给缓冲、被调者拷进去）。
+   ★ 本实现早有一条约定"**类值在表达式里 = 地址**"（`emitClassAddress`），
+   它与 sret 互为因果：正因为值是地址，返回时才必须给一块缓冲。
+
+**修法（三处，缺一不可）**：
+
+1. **语义层落标志**：`VarDeclStmt::initIsSretCall`（`include/ast.h`）——
+   判据是"调用的 `resolvedType` 剥掉 const 后是不是类"，落点唯一。
+2. **代码生成走 sret**：
+   · 定义点（`emitFunction`）：序言 spill 隐藏的第 0 参数（rdi）⇒
+     显式实参整体右移一位（成员方法的 this 再右移一位，走 rsi）；
+   · 返回路径（`visit(ReturnStmt)`）：把对象表示**逐字节拷进缓冲**
+     （`rep movsb`），rax 回填缓冲地址；★ 拷贝必须在局部对象析构**之前**；
+   · 调用点（`visit(CallExpr)`）：备缓冲（拷贝省略时 = 变量槽，
+     否则 = 帧临时区）⇒ 装进 rdi；虚调用同款（`emitVirtualCall` 的 sret 形态）；
+   · 帧大小要把那块缓冲算进去（`countSretBytes`，与构造临时对象**分开计数**
+     ⇒ 现存程序帧大小逐字节不变）。
+3. **拷贝省略**（[class.copy.elision]/8）：`S x = f();` 的返回缓冲
+   **就是 x 的槽** ⇒ 不清零、不装 vptr、不调构造函数 ——
+   返回值本身就是那个完整对象（含它自己的 vptr）。
+
+**回归**：单测 `SretReturn.*` 7 例（定义点 spill / 调用点装 rdi /
+**拷贝省略的缓冲 = 变量槽** / 寄存器位移 / 成员 this 让位 /
+**返回引用不走 sret** / 帧盖住缓冲）
++ 集成 `tests/lang/test_basics_37_return_class_by_value.cpp`（九个检查点：
+自由函数 / 改字段 / 多字段类 / 成员方法 / 虚方法 / 多态类 / 类模板实例 /
+嵌套调用 / 返回值直接进表达式），全部与 clang++-18 对拍一致。
+
+**教训**：★ **判据单点在 ABI 层的应用**：调用点与定义点必须读**同一个 `Type`**
+（"返回类型是不是类"）⇒ 两侧天然一致，不会失配。
+⚠ 两处各判一次必漂 —— 这是 B10 → B20 → B22 → B45 同一个坑的**第五次**现形。
+★ **哨兵不能用"偏移 >= 0"**：rbp 偏移全是负数 ⇒ 真槽位会被当成"没指定"
+（本批踩了两次：`m_sretTargetSlot` 与 `emitVirtualCall` 的 `sretBuf`）⇒
+"没有"与"某个负偏移"必须能区分（用 `INT_MIN` 哨兵）。
+
+---
+
+## B50. 全局类对象：存储只按 8 字节分配 + 类值的地址约定未在全局路径生效（★ 段错误，未修）
+
+- severity: high ｜ status: open ｜ related: src/codegen/codegen.cpp, docs/learn/57 §7
+
+**现象**
+
+```cpp
+struct S { int v; };
+S g;                       // ★ 全局类对象
+int main() { g.v = 11; return g.v; }   // ★ clang rc=11；minicc SIGSEGV
+```
+
+按引用返回类对象同样中招：
+
+```cpp
+S g;
+S& pick() { return g; }
+int main() { g.v = 11; return pick().v; }   // ★ clang rc=11；minicc SIGSEGV
+```
+
+**性质**：段错误（响亮）—— 但 `g.v = 11` 这么基本的写法就崩，
+**影响面比看上去大**。⚠ 若 `%rax` 恰是别的合法地址，就是静默踩内存。
+
+**根因（两处，缺一不可）**：
+
+1. **存储尺寸**：全局变量发射时，除数组外一律 `.quad 0`（8 字节）⇒
+   类对象的真实尺寸（`classLayout.totalSize`）没算进去 ⇒ 存储本身就偏小。
+2. **地址约定**：本实现约定"**类值在表达式里 = 对象地址**"，
+   但它只在**局部**类对象路径（`m_classLocals` ⇒ `leaq`）生效；
+   **全局**路径仍走通用量加载（`movq gref(%rip), %rax`）⇒ 拿到的是
+   对象首 8 字节（字段值/vptr）而不是地址 ⇒ 随后的 `movl 0(%rax)`
+   解引用的是那个值 ⇒ 段错误。
+
+**为什么本批没修**：① 两处根因要一起改（只改地址约定 ⇒ 存储仍然偏小）；
+② 改全局存储布局会影响所有带全局变量的程序 ⇒ 需要单独一批 + 重刷基线；
+③ 与本批（按值返回）**不是同一条线** —— 它是"类对象作为全局变量"的缺口。
+
+**回归（修后要补）**：全局类对象的字段读写 / 全局类对象按值返回 /
+按引用返回类对象 —— 三条都要与 clang 对拍。
+
+**教训**：★ **一条约定要覆盖【所有】载体**：局部类对象按地址、全局类对象按值
+⇒ 同一个"类值"有两套表示。约定写在**产生值的地方**（`visit(VarExpr)`）
+才不会有第二份。
