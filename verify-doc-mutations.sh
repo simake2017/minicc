@@ -289,13 +289,32 @@ report "⑤ 行数低于基线" "⑤严格时" "1" "$got" "（红：命中 $(hit
 got=$(run_guard "asset")
 report "⑤ 行数低于基线" "⑤放松后" "0" "$got" "（绿：命中 $(hit)）"
 
+# ── 判据⑥ 引用可达 ─────────────────────────────────────────────────────────
+echo ""
+echo "  ▸ 判据⑥ 引用可达（引用了不存在的源码文件）"
+reset_probe
+tech_skeleton "见 src/zz_does_not_exist.cpp:42 这一处的实现" > "$PROBE_DIR/tech/c1.md"
+got=$(run_guard "")
+report "⑥ 引用不存在的文件" "⑥严格时" "1" "$got" "（红：命中 $(hit)）"
+got=$(run_guard "cite")
+report "⑥ 引用不存在的文件" "⑥放松后" "0" "$got" "（绿：命中 $(hit)）"
+
+echo ""
+echo "  ▸ 判据⑥ 引用可达（行号越界）"
+reset_probe
+tech_skeleton "见 src/parse/parser.cpp:999999 这一处的实现" > "$PROBE_DIR/tech/c2.md"
+got=$(run_guard "")
+report "⑥ 行号越界" "⑥严格时" "1" "$got" "（红：命中 $(hit)）"
+got=$(run_guard "cite")
+report "⑥ 行号越界" "⑥放松后" "0" "$got" "（绿：命中 $(hit)）"
+
 # ── 收官：全放松必须绿；不放松必须红 ───────────────────────────────────────
 echo ""
 echo "  ▸ 收官：判据全部放松 / 全部严格"
 reset_probe
 tech_skeleton "这里有一个没写完的洞：xx_placeholder" > "$PROBE_DIR/tech/z1.md"
-got=$(run_guard "header,skeleton,meta,placeholder,asset")
-report "收官" "全放松" "0" "$got" "（绿：五条判据全关 ⇒ 不可能再报）"
+got=$(run_guard "header,skeleton,meta,placeholder,asset,cite")
+report "收官" "全放松" "0" "$got" "（绿：六条判据全关 ⇒ 不可能再报）"
 got=$(run_guard "")
 report "收官" "全严格" "1" "$got" "（红：探针违规必须被抓到）"
 

@@ -242,6 +242,64 @@ for p in TECH_DOCS + DEV_SPECS + DEV_DESIGNS + DEV_CONST + DEV_ARCH + LEARN_DOCS
         check(cur >= b, '⑤资产', p, f'行数 {cur} < git 基线 {b}（内容被删）')
 stats['⑤ 资产'] = (n, len([x for x in problems if x[0] == '⑤资产']))
 
+# ── 判据⑥ 引用可达：文档里引用的源码文件必须真的存在（行号也不得越界）────────
+#   ★ 为什么加这条：判据①②③⑤ 管的是"骨架与体量"，管不了"文档说的和代码对不对"。
+#     一次实测就抓出 38 处不可达引用 —— 全部是 2026-10-29「src 按 clang 分域搬移」
+#     之后的旧路径（src/codegen.cpp / src/parser.cpp / src/semantic_analyzer.cpp …）。
+#   ★ 别名表：搬移是**已发生的既成事实**（commit 1d7551e），旧路径在历史文档里
+#     （BUGS.md / NOTES / learn）大量存在且是有意保留的"成文时的路径"。
+#     直接把它们判红 = 要求重写历史文档；所以按别名解析后再判存在性 ——
+#     这样"搬移前写的路径"仍可被检出为"指向了搬移后的文件"，而真正写错的路径无处遁形。
+ALIAS = {
+    'src/codegen.cpp':              'src/codegen/codegen.cpp',
+    'src/lexer.cpp':                'src/lex/lexer.cpp',
+    'src/parser.cpp':               'src/parse/parser.cpp',
+    'src/preprocessor.cpp':         'src/lex/preprocessor.cpp',
+    'src/semantic_analyzer.cpp':    'src/sema/semantic_analyzer.cpp',
+    'src/template_deduction.cpp':   'src/sema/template_deduction.cpp',
+    'src/template_instantiation.cpp':'src/sema/template_instantiation.cpp',
+    'src/type.cpp':                 'src/ast/type.cpp',
+    'src/linker.cpp':               'src/link/linker.cpp',
+    'src/main.cpp':                 'src/driver/main.cpp',
+    'include/codegen.h':            'src/codegen/codegen.h',
+    'include/preprocessor.h':       'src/lex/preprocessor.h',
+}
+CLANG_CORPUS = os.path.expanduser('~/cppproject/llvm-project/clang')
+CITE = re.compile(r'((?:src|include|tests)/[A-Za-z0-9_/.-]+\.(?:cpp|h)):(\d+)')
+
+def file_lines(path):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return None
+
+n = 0
+for p in TECH_DOCS + DEV_SPECS + DEV_DESIGNS + DEV_CONST + DEV_ARCH + LINE_DOCS \
+       + LEARN_DOCS + POSTMORTEM:
+    txt = read(p)
+    if not txt:
+        continue
+    n += 1
+    if 'cite' in RELAX:
+        continue
+    for f, num in set(CITE.findall(txt)):
+        num = int(num)
+        if f.startswith('include/clang/'):
+            # clang 语料路径（相对 clang 仓库根）：语料不在本机时跳过
+            real = os.path.join(CLANG_CORPUS, f)
+        else:
+            real = ALIAS.get(f, f)
+        if not os.path.isfile(real):
+            check(False, '⑥引用可达', p,
+                  f'引用的源码文件 `{f}` 不存在（别名表也解析不到）')
+            continue
+        total = file_lines(real)
+        if total is not None and num > total:
+            check(False, '⑥引用可达', p,
+                  f'引用 `{f}:{num}`，但该文件只有 {total} 行')
+stats['⑥ 引用可达'] = (n, len([x for x in problems if x[0] == '⑥引用可达']))
+
 # ── 报告 ───────────────────────────────────────────────────────────────────
 print("=" * 70)
 print("  文档骨架合规检查（docs/constraints/06-文档骨架规范.md）")

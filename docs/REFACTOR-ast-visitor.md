@@ -210,7 +210,7 @@ done
 - `include/ast_visitor.h` —— 访问者基类 + 32 个 `visit` 重载
 - `include/ast.h:97` —— `ASTNode::accept` 纯虚挂钩；各节点类内 `inline` 定义
 - `src/main.cpp` —— `AstDumper`（`--dump-ast` 的树形打印）
-- `include/codegen.h:76` —— `class CodeGen : public AstVisitor`
+- `src/codegen/codegen.h:61` —— `class CodeGen : public AstVisitor`（★ 原写 `include/codegen.h:76`，是 2026-10-29 按 clang 分域搬移前的路径）
 - `logdiff.sh` —— 基线护栏
 - `docs/learn/29-ast-dispatch-two-idioms.md` —— 两种分派手法的判据、clang 对照、零 RTTI
 - `docs/NOTES-阅读笔记.md` —— 通读源码时的笔记（原先散落在源码里的 `// wangyang`）

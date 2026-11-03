@@ -114,4 +114,4 @@
 | 日期 | 完成项 |
 |---|---|
 | 2026-10-23 | 本文档建立；基线快照：362 单测 / 155 集成基线 / learn 01..47 |
-| 2026-11-02 | **文档标准一批**：按 `constraints/05`（族→技能归属 + 14 条冲突裁决）与 `constraints/06`（骨架规范）把全仓文档归族补骨架；新增 `check-doc-standard.sh`（5 条判据）+ `verify-doc-mutations.sh`（22 项突变验证）；`docs/arch/` 出首张架构图（archify）。基线快照刷新：376 单测 / 160 集成基线 / learn 01..50 |
+| 2026-11-02 | **文档标准一批**：按 `constraints/05`（族→技能归属 + 14 条冲突裁决）与 `constraints/06`（骨架规范）把全仓文档归族补骨架；新增 `check-doc-standard.sh`（6 条判据）+ `verify-doc-mutations.sh`（26 项突变验证）；`docs/arch/` 出首张架构图（archify）。基线快照刷新：376 单测 / 160 集成基线 / learn 01..50 |
