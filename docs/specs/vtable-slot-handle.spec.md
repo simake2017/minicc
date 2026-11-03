@@ -3,6 +3,7 @@
 状态：已签字（2026-11-02）
 签字：2026-11-02（用户拍板"可以，按照你的建议去做"——ROADMAP 主线 I 行 7-4）
 来源：docs/ROADMAP.md **7-4**（vtable 槽 → `FuncDeclPtr` 句柄）＋ docs/BUGS.md **B45** / **B46**
+契约变更点：`src/ast/type.h` 的 `VTableEntry`（**槽位形状**：符号串 ⇒ `shared_ptr<FunctionDecl>` 句柄）＋ `include/ast.h` 的 `vtableEntrySymbol()`（槽 → 符号的**唯一定名点**，`registerFunction` 写在 `decl->mangledName` 上）
 
 > 阶段：**Stage 3 批 5**（承批 4 的嵌套类 —— docs/learn/53）
 > 关联缺陷：BUGS.md **B45**（vtable 槽的符号在两处各算一遍 ⇒ 链接期错配）/ **B46**（析构槽靠符号子串判定 ⇒ 误判）

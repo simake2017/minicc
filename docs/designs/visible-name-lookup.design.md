@@ -5,6 +5,7 @@
 > **本项目按 clang 目录组织，不采用 skill 的"1 设计 = 1 flow 文件"**
 > —— 用户 2026-10-23 拍板，见 `docs/constraints/00-全局约束.md` 头部。
 > 来源：`../specs/visible-name-lookup.spec.md`
+> 契约变更点：Sema 可见性裁决窄接口（`lookupVisibleType`）＋ `include/ast.h` 的 `EmptyStmt::typeName` 槽 ＋ 诊断文案契约
 > （= 仓库内 `docs/specs/visible-name-lookup.spec.md`，2026-11-02 签字）。
 > 标准：不看 spec 也能照本文实现。
 > 审法：**每个消费点问的是同一个问题吗？** 答案必须是"是，且都走同一个函数"。

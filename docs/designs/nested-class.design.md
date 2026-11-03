@@ -6,6 +6,7 @@
 > **本项目按 clang 目录组织，不采用 skill 的"1 设计 = 1 flow 文件"**
 > —— 用户 2026-10-23 拍板，见 `docs/constraints/00-全局约束.md` 头部。
 > 来源：`../specs/nested-class.spec.md`
+> 契约变更点：`include/ast.h`（嵌套类的登记面与限定名可达性）＋ Sema 类作用域链窄接口 ＋ 诊断文案契约
 > （= 仓库内 `docs/specs/nested-class.spec.md`，2026-11-02 签字）。
 > 标准：不看 spec 也能照本文实现。
 > 审法：嵌套类是不是**用同一张作用域链的通用查询**答出来的？必须是「是」。

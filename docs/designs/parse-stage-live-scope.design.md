@@ -5,7 +5,8 @@
 > `src/driver/main.cpp`（构造顺序）。
 > **本项目按 clang 目录组织，不采用 skill 的"1 设计 = 1 flow 文件"** —— 用户 2026-10-23 拍板，
 > 见 `docs/constraints/00-全局约束.md` 头部。
-> 来源：`../specs/parse-stage-live-scope.spec.md`（2026-11-02 签字）。
+> 来源：`../specs/parse-stage-live-scope.spec.md`
+> 契约变更点：`include/name_scope.h`（ScopeKind / ScopeBit 跨域契约）＋ Sema 六条窄查询接口（2026-11-02 签字）。
 > 标准：不看 spec 也能照本文实现。
 > 审法：**表住在 Sema、判据只写一处、Parser 不持任何作用域数据** —— 三条任破即缺陷。
 > 读者：改 Parser / Sema 的名字查找、消歧、作用域的人。

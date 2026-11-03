@@ -3,6 +3,7 @@
 状态：已实施（2026-11-02）
 签字：2026-11-02（本批以「实施完成即验收」代替人工签字；落库提交 c79656d「docs: 源码注释对齐「四段式」标准（审计四批次 + 守卫脚本 + 突变验证）」；验收数据见 §8 与文末「附：实施记录」）
 来源：`~/wiki/common/docs/design-standard/comment-standard.md`（上游规范原文）＋ docs/ROADMAP.md 主线 I 第 4 项（个人阅读注释出源码）＋ docs/NOTES-阅读笔记.md
+契约变更点：`docs/constraints/04-注释规范.md`（**注释即契约**：源码注释的写法被立成项目级规则）＋ `check-comment-style.sh`（守卫契约：块长 ≤25 / 私人笔记黑名单 / 锚点比例 / 裸锚点四条可机检条款）
 
 > 依据：`~/wiki/common/docs/design-standard/comment-standard.md`
 > 状态：**已实施**（本文件同时充当本批次的实施计划；实施结果见 docs/learn/50）

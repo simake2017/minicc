@@ -27,7 +27,7 @@ import os, re, subprocess, sys
 
 REPORT_ONLY = int(sys.argv[1])
 
-# ★ 突变验证开关：CHECK_DOC_RELAX=header,skeleton,meta,placeholder,asset
+# ★ 突变验证开关：CHECK_DOC_RELAX=header,skeleton,meta,placeholder,asset,contract
 #   列出要【放松】的判据（英文代号）。只供 verify-doc-mutations.sh 使用 ——
 #   判据本身不因此变弱，只是被旁路；脚本会用"引入违规后是否变红"来证明它承重。
 RELAX = set(x for x in os.environ.get('CHECK_DOC_RELAX', '').split(',') if x)
@@ -66,6 +66,8 @@ def collect(pattern_roots, suffix=None, name_filter=None):
 #     <探针>/tech/*.md    ⇒ 走技术文档判据
 #     <探针>/learn/*.md   ⇒ 走 learn 文档判据（文件名须以数字开头）
 #     <探针>/post/*.md    ⇒ 走复盘文档判据（YAML frontmatter）
+#     <探针>/spec/*.spec.md  ⇒ 走 spec 判据（含判据⑦ 契约变更点）
+#     <探针>/design/*.design.md ⇒ 走 design 判据（含判据⑦）
 #     <探针>/bugs.md      ⇒ 走 BUGS 条目级元数据判据
 #   ★ 为什么要有这个模式：突变验证要证"判据承重"，必须在【干净的底子】上
 #     注入一条违规。若连真实文档一起判，底子本身的几百处违规会淹没结果 ——
@@ -76,8 +78,8 @@ PROBE = os.environ.get('CHECK_DOC_PROBE', '')
 
 if PROBE:
     TECH_DOCS  = collect([os.path.join(PROBE, 'tech')])
-    DEV_SPECS  = []
-    DEV_DESIGNS= []
+    DEV_SPECS  = [p for p in collect([os.path.join(PROBE, 'spec')]) if p.endswith('.spec.md')]
+    DEV_DESIGNS= [p for p in collect([os.path.join(PROBE, 'design')]) if p.endswith('.design.md')]
     DEV_CONST  = []
     DEV_ARCH   = []
     LINE_DOCS  = []
@@ -299,6 +301,25 @@ for p in TECH_DOCS + DEV_SPECS + DEV_DESIGNS + DEV_CONST + DEV_ARCH + LINE_DOCS 
             check(False, '⑥引用可达', p,
                   f'引用 `{f}:{num}`，但该文件只有 {total} 行')
 stats['⑥ 引用可达'] = (n, len([x for x in problems if x[0] == '⑥引用可达']))
+
+# ── 判据⑦ 契约变更点：spec/design 必须声明"哪一个契约变了" ───────────────────
+#   ★ 为什么加这条：06 §2.0 把"spec/design 只在接口/契约变更时才写"立成规则，
+#     但规则写在纸上没人查就会腐化 —— 本项目一轮主线动辄十几份文档，
+#     与代码不同步的文档是负债。
+#   ★ 判据只查"有没有声明"，不查"声明得对不对"：
+#     声明的**内容**是否成立，要靠人读（与判据⑥ 同理：它只挡"没声明"，不挡"声明错了"）。
+#   ★ 没有豁免通道：要留痕就写契约；确实没有契约变更就别写 spec/design（去写 learn）。
+n = 0
+for p in DEV_SPECS + DEV_DESIGNS:
+    txt = read(p)
+    if not txt:
+        continue
+    n += 1
+    if 'contract' not in RELAX:
+        check('契约变更点' in txt, '⑦契约变更点', p,
+              '缺「契约变更点」行 —— spec/design 只在接口/契约变更时才写'
+              '（docs/constraints/06-文档骨架规范.md §2.0）')
+stats['⑦ 契约变更点'] = (n, len([x for x in problems if x[0] == '⑦契约变更点']))
 
 # ── 报告 ───────────────────────────────────────────────────────────────────
 print("=" * 70)

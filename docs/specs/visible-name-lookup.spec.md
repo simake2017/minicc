@@ -3,6 +3,7 @@
 状态：已签字（2026-11-02）
 签字：2026-11-02（用户在会话中拍板"按推荐方式走，尽量贴切 clang"；三项拍定见文末「拍板记录」）
 来源：需求原文「能否改成类似 clang 的正规模式，或者一边 parser 一边进行简单语义识别，不需要像后面那么复杂的语义识别」＋ docs/BUGS.md B37（裸类型名声明的可见性无人裁决）＋ 上游技能 biz-dev-pipeline（spec 骨架）
+契约变更点：Sema 的**可见性裁决窄接口**（`lookupVisibleType`：类作用域 → 命名空间链逐级外层 → 全局）＋ `include/ast.h` 的 `EmptyStmt::typeName` 槽（裸名从语法层带到语义期）＋ 诊断文案契约（`use of undeclared identifier 'S'`）
 
 > 场景类型：**合成判定型**（一个判据的多处消费点收敛，判定结果可观测）。
 > 关联：docs/specs/parser-stage-name-recognition.spec.md（2026-10-23 签字，

@@ -19,9 +19,9 @@
 | 指标 | 数值 |
 |---|---|
 | 核心代码（include + src） | 约 2.4 万行 C++20，全阶段中文日志 |
-| 单测 | **376** 例（googletest，断言不变量而非具体符号名） |
-| 集成测试 | **160** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
-| 学习文档 | docs/learn/ 01..50（每篇点名标准章节 + clang 源码对照表） |
+| 单测 | **396** 例（googletest，断言不变量而非具体符号名） |
+| 集成测试 | **165** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
+| 学习文档 | docs/learn/ 01..55（每篇点名标准章节 + clang 源码对照表） |
 | 配套标准库 | ministl：vector / list / map / set（红黑树）/ 智能指针 / function / algorithm / ranges，与 std 随机对拍 |
 | 外部依赖 | 编译期零依赖；运行期借系统 `as` 产 .o，链接与运行时（_start + bump malloc）自研，**不依赖 libc/crt** |
 
@@ -178,7 +178,7 @@ tests/
 docs/
   00-项目章程.md      立项需求原文（项目定位与六大阶段要求的原话）
   business/00..08     ★ 业务流水线文档（每个业务一份：定位/判据/代码地图/测试/学习索引）
-  learn/01..50        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
+  learn/01..55        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
   specs/ designs/     业务流水线产物（spec 签字 → 设计 → 代码）
   specs/legacy/       早期 spec/design（保留作档案，不参与现行流程）
   constraints/        项目约束唯一权威（00..06，含文档标准与冲突裁决）
@@ -189,7 +189,7 @@ docs/
 logdiff.sh  build.sh  CMakeLists.txt
 check-comment-style.sh       # 注释四段式守卫（判据①②③④）
 verify-comment-mutations.sh  # 守卫脚本的突变验证（判据是否承重）
-check-doc-standard.sh        # 文档骨架守卫（判据①②③④⑤）
+check-doc-standard.sh        # 文档骨架守卫（判据①..⑦：骨架/体量/元数据/引用可达/契约变更点）
 verify-doc-mutations.sh      # 守卫脚本的突变验证（判据是否承重）
 ```
 
@@ -209,12 +209,16 @@ verify-doc-mutations.sh      # 守卫脚本的突变验证（判据是否承重�
 | 名字可见性（作用域链裁决） | learn/48、BUGS.md B37 |
 | 作用域即身份（模板/命名空间的名字带作用域） | learn/49、BUGS.md B38 |
 | 注释四段式标准（审计 + 守卫脚本） | learn/50、specs/comment-standard-conformance.spec.md |
-| 文档骨架标准与技能冲突裁决 | constraints/05（冲突裁决 C1..C14）、constraints/06（骨架规范） |
+| 文档骨架标准与技能冲突裁决 | constraints/05（冲突裁决 C1..C14）、constraints/06（骨架规范 + §2.0 文档线收敛规则） |
+| 解析期活作用域表 / C++20 UndeclaredTemplate | learn/51、52、BUGS.md B40/B41 |
+| 嵌套类（同一张作用域链，不开特判） | learn/53、BUGS.md B43 |
+| 虚表槽挂声明句柄（符号唯一定名点） | learn/54、BUGS.md B45/B46 |
+| 路线图重排 + 文档线收敛（下一批做什么 / spec 何时才写） | **ROADMAP.md §0**、learn/55、constraints/06 §2.0 |
 | 编译流水线全景（一张可交互图） | arch/compile-pipeline.html（源：arch/compile-pipeline.dataflow.json） |
 | 端到端调用链 | lines/（一条线 = 一条跑出来的子流程） |
 | 项目定位与六大阶段要求（需求原文） | 00-项目章程.md |
 | 上游标准库与头文件搜索机制 | upstream/clang-stdlib-and-header-search.md |
-| 所有踩坑复盘 | BUGS.md（B01..B38）、PITFALLS.md |
+| 所有踩坑复盘 | BUGS.md（B01..B46）、PITFALLS.md |
 
 ## 未来计划
 

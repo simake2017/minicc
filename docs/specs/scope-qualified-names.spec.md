@@ -3,6 +3,8 @@
 状态：已签字（2026-11-02）
 签字：2026-11-02（用户拍板；Stage 1 拍板表第 1 条「阶段 1 → 阶段 2（登记表退场）」，拍板记录见 docs/learn/48）
 来源：docs/BUGS.md **B38**（跨命名空间同名模板撞实例 / 限定名绑错模板）＋ docs/learn/48 Stage 1 拍板表 ＋ 上游技能 biz-dev-pipeline（spec 骨架）
+契约变更点：**名字与符号的形状** —— 注册键 / 实例名 / 缓存键 / mangling **全部派生自作用域**
+（`include/ast.h` 的实例"出身"记录 ＋ `src/sema/semantic_analyzer.cpp` 的注册表键形状 ＋ `src/sema/template_instantiation.cpp` 的 mangling 净化）＋ 诊断文案契约（`no template named 'B' in namespace 'N'`）
 
 > 阶段：**Stage 2**（承 Stage 1 的红线 1 改写 —— docs/learn/48）
 > 关联缺陷：BUGS.md **B38**（跨命名空间同名模板撞实例 / 限定名绑错模板）

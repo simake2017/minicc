@@ -2,6 +2,7 @@
 
 状态：已签字（2026-11-02）
 规格：docs/specs/vtable-slot-handle.spec.md
+契约变更点：`src/ast/type.h` 的 `VTableEntry`（槽位形状：符号串 ⇒ 声明句柄）＋ `include/ast.h` 的 `vtableEntrySymbol()`
 关联：docs/learn/54-vtable-slot-handle.md
 
 - 读者：改 vtable 槽位、虚函数分派、符号定名的人

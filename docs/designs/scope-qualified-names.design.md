@@ -5,6 +5,7 @@
 > **本项目按 clang 目录组织，不采用 skill 的"1 设计 = 1 flow 文件"**
 > —— 用户 2026-10-23 拍板，见 `docs/constraints/00-全局约束.md` 头部。
 > 来源：`../specs/scope-qualified-names.spec.md`
+> 契约变更点：名字与符号的形状（注册键 / 实例名 / 缓存键 / mangling 全部派生自作用域）
 > （= 仓库内 `docs/specs/scope-qualified-names.spec.md`，2026-11-02 签字）。
 > 标准：不看 spec 也能照本文实现。
 > 审法：**同一个名字的"作用域"是不是只写了一遍？** 答案必须是"是，只写一遍，其余全是派生"。

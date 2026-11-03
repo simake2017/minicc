@@ -119,9 +119,38 @@ learn_skeleton() {
 EOF
 }
 
+# 一份【除目标缺陷外全部合规】的 spec 骨架（判据① 要三行头部 + 变更记录表）。
+# $1 = 契约变更点那一行（空串 = 故意缺失，用来测判据⑦）
+spec_skeleton() {
+    cat <<'EOF'
+# 探针规格
+
+读者：突变验证探针
+审法：突变验证探针
+名词版本：v0
+
+## 变更记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v0 | 2026-11-02 | 探针初始版本 |
+
+EOF
+    if [ -n "$1" ]; then
+        printf '%s\n' "$1"
+        echo ""
+    fi
+    cat <<'EOF'
+## 1. 概念
+
+探针专用，不表达任何真实设计意图。
+EOF
+}
+
 reset_probe() {
     rm -rf "$PROBE_DIR"
-    mkdir -p "$PROBE_DIR/tech" "$PROBE_DIR/learn" "$PROBE_DIR/post"
+    mkdir -p "$PROBE_DIR/tech" "$PROBE_DIR/learn" "$PROBE_DIR/post" \
+             "$PROBE_DIR/spec" "$PROBE_DIR/design"
 }
 
 report() {
@@ -145,7 +174,7 @@ run_guard() {
 
 # 只看命中的判据名（写进日志便于排查）
 hit() {
-    grep -o '\[①头部\]\|\[②骨架节\]\|\[③元数据\]\|\[④占位符\]\|\[⑤资产\]' \
+    grep -o '\[①头部\]\|\[②骨架节\]\|\[③元数据\]\|\[④占位符\]\|\[⑤资产\]\|\[⑦契约变更点\]' \
         "$TMPDIR_MUT/guard.log" | sort -u | tr '\n' ' '
 }
 
@@ -308,13 +337,33 @@ report "⑥ 行号越界" "⑥严格时" "1" "$got" "（红：命中 $(hit)）"
 got=$(run_guard "cite")
 report "⑥ 行号越界" "⑥放松后" "0" "$got" "（绿：命中 $(hit)）"
 
+# ── 判据⑦ 契约变更点 ───────────────────────────────────────────────────────
+echo ""
+echo "  ▸ 判据⑦ 契约变更点（spec 缺「契约变更点」行）"
+reset_probe
+spec_skeleton "" > "$PROBE_DIR/spec/p1.spec.md"
+got=$(run_guard "")
+report "⑦ spec 缺契约变更点" "⑦严格时" "1" "$got" "（红：命中 $(hit)）"
+got=$(run_guard "contract")
+report "⑦ spec 缺契约变更点" "⑦放松后" "0" "$got" "（绿：命中 $(hit)）"
+
+echo ""
+echo "  ▸ 判据⑦ 契约变更点（design 缺「契约变更点」行）"
+reset_probe
+spec_skeleton "" > "$PROBE_DIR/design/p1.design.md"
+got=$(run_guard "")
+report "⑦ design 缺契约变更点" "⑦严格时" "1" "$got" "（红：命中 $(hit)）"
+got=$(run_guard "contract")
+report "⑦ design 缺契约变更点" "⑦放松后" "0" "$got" "（绿：命中 $(hit)）"
+
 # ── 收官：全放松必须绿；不放松必须红 ───────────────────────────────────────
 echo ""
 echo "  ▸ 收官：判据全部放松 / 全部严格"
 reset_probe
 tech_skeleton "这里有一个没写完的洞：xx_placeholder" > "$PROBE_DIR/tech/z1.md"
-got=$(run_guard "header,skeleton,meta,placeholder,asset,cite")
-report "收官" "全放松" "0" "$got" "（绿：六条判据全关 ⇒ 不可能再报）"
+spec_skeleton "" > "$PROBE_DIR/spec/z1.spec.md"
+got=$(run_guard "header,skeleton,meta,placeholder,asset,cite,contract")
+report "收官" "全放松" "0" "$got" "（绿：七条判据全关 ⇒ 不可能再报）"
 got=$(run_guard "")
 report "收官" "全严格" "1" "$got" "（红：探针违规必须被抓到）"
 

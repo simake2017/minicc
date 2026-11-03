@@ -5,6 +5,7 @@
 > （`src/main.cpp`）。**本项目按 clang 目录组织，不采用 skill 的"1 设计 = 1 flow 文件"**
 > —— 用户 2026-10-23 拍板，见 `docs/constraints/00-全局约束.md` 头部。
 > 来源：`../specs/parser-stage-name-recognition.spec.md`
+> 契约变更点：`include/name_registry.h`（NameRegistry 收集器与查询面 —— ★ 该契约已于 Stage 3 批 2+3 整类撤销，见 docs/learn/52）
 > （= 仓库内 `docs/specs/parser-stage-name-recognition.spec.md`，已签字 2026-10-23）。
 > 标准：不看 spec 也能照本文实现。
 > 审法：每个消费点问一句——「查不到时走哪条支，会不会静默」。
