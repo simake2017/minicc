@@ -770,6 +770,18 @@ struct FunctionDecl : Declaration {
 };
 using FuncDeclPtr = std::shared_ptr<FunctionDecl>;
 
+// ─── 槽 → 符号：vtable 槽的符号由它指向的【声明】给出 ──────────────────────
+// ★ 判据单点：符号名的唯一定名点是 SemanticAnalyzer::registerFunction
+//   （写在 decl->mangledName 上）。槽里不再存第二份符号串 ⇒ 派生类覆写时
+//   换句柄即可，符号不可能与定义点漂移（docs/BUGS.md B45）。
+//   本函数放在 ast.h（而非 type.h）：此处 FunctionDecl 才是完整类型 ——
+//   type.h 只前置声明它，依赖保持单向（ast.h → type.h）。
+// demo：槽指向 <Outer::f(Outer::Inner)> ⇒ "Outer_f_1_OuterCCInner"
+//   （与该定义点的 .globl 逐字相同 ⇒ .quad 能命中）
+inline std::string vtableEntrySymbol(const VTableEntry& entry) {
+    return entry.method ? entry.method->mangledName : std::string();
+}
+
 // ─── 构造函数初始化器 ─────────────────────────────────────────────────────────
 // 对应 [class.base.init]；clang: CXXCtorInitializer。
 // demo：Point(int x, int y) : m_x(x), m_y(y) {} 中的 m_x(x)

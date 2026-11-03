@@ -2017,23 +2017,24 @@ void SemanticAnalyzer::processTypeAliasDecl(TypeAliasDeclPtr decl) {
 }
 
 // ─── 成员方法符号名的【单点】判据（BUGS.md B20）──────────────────────────────
-// ① 定位：谁在用 —— ① 定义点 SemanticAnalyzer::registerFunction（Pass 2 给
-//    decl->mangledName 定名）② vtable 条目点 processClassDecl（Pass 1 写
-//    entry.mangledName，三个落点）。两边共用 memberMethodSymbolName 这一个函数。
+// ① 定位：谁在用 —— **只有定义点** SemanticAnalyzer::registerFunction（Pass 2 给
+//    decl->mangledName 定名）。vtable 槽不再自己算符号：槽挂【声明句柄】，
+//    符号由 ast.h 的 vtableEntrySymbol(entry) 从句柄上取（BUGS.md B45）。
 // ② 锚点：clang/include/clang/AST/Mangle.h:AbstractManglingParser::mangleName — clang 靠
 //    ManglingContext 统一记账，本项目用"名字 + 形参类型链"这条更土的规则。
-// ③ 动机：两处的产物最后会被**链接器按裸字符串比对**（vtable 槽 `.quad X` 必须命中
-//    某个 `.globl X`），任何一边漂一点就是 undefined reference。B10 已经栽过一次
-//    （调用点硬拼 vs 定义点加后缀），B20 是同一个坑的第二次现形 —— 承项目铁律
-//    「同一判据不许写两份」。
-// ④ 规则（与 registerFunction 逐字相同，勿改）：
+// ③ 动机：产物最后会被**链接器按裸字符串比对**（vtable 槽 `.quad X` 必须命中
+//    某个 `.globl X`），任何一边漂一点就是 undefined reference。B10 栽过一次，
+//    B20 是同一个坑的第二次现形 —— 承项目铁律「同一判据不许写两份」。
+//    ★ 第三次现形（B45）：两边【共用函数】仍会漂（跑在不同时刻、看到不同状态的
+//    形参类型：Pass 1 未解析 / Pass 2 已解析）⇒ 治本是"只算一次、别处只引用"。
+// ④ 规则（唯一定名点，勿改）：
 //    析构            → "<类名>_dtor"（不带参数个数后缀）
 //    普通/构造/方法  → "<类名>_<方法名>"，若 (同类中已有先注册的同名方法) 或 (带形参)
 //                     再追加 "_<形参个数>"
 //    ⚠ earlierSameNameCount 是**声明顺序敏感**的（registerFunction 扫 m_functions 只能
-//    看见已注册的前者），故调用方必须传"排在当前方法之前的同名方法数"，不能传
-//    "同类同名总数" —— 否则 `struct X { virtual int f(); virtual int f(int); }` 里 f()
-//    会被定成 X_f_0，而定义点是 X_f，又是一个链接期才炸的错配。
+//    看见已注册的前者），故调用方必须传"排在当前方法之前的同名方法数"而不是"同类同名
+//    总数" —— 否则 `struct X { virtual int f(); virtual int f(int); }` 里 f() 会被定成
+//    X_f_0（定义点是 X_f）⇒ 又一个链接期才炸的错配。
 // ┌─ DEMO ─────────────────────────────────────────────────────────────────────
 // │ 输入  owner="Dog", name="speak", paramCount=0, earlier=0
 // │ 输出  "Dog_speak"          （vtable 槽 .quad Dog_speak ↔ 定义点 .globl Dog_speak ✓）
@@ -2068,6 +2069,13 @@ static size_t countSameNameSameArity(const std::vector<FuncDeclPtr>& methods,
         if (m->name == name && m->parameters.size() == arity) ++n;
     }
     return n;
+}
+
+// 槽位名：析构统一记作 "dtor"（vtable 里不区分是哪个类的析构）。
+// ★ 判据单点：覆写检测、新槽登记、句柄回查三处都用它，析构名不许各写一遍。
+// demo：method->name="~Outer" ⇒ "dtor"；"speak" ⇒ "speak"
+static std::string vtableSlotName(const std::string& methodName) {
+    return methodName.starts_with("~") ? "dtor" : methodName;
 }
 
 static std::string memberMethodSymbolName(const std::string& owner,
@@ -2275,10 +2283,11 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
                 //   真覆写发生在下面第二个循环：那时才把槽改指本类实现。
                 for (auto& baseEntry : baseType->classLayout.vtableEntries) { // 次基类的vtable entry 不是放到 classLayout里面的
                     VTableEntry secEntry = baseEntry;
-                    // 兜底：baseFunctionName 是权威裸名，正常路径上由条目创建点写入，必非空。
-                    if (secEntry.baseFunctionName.empty()) {
-                        secEntry.baseFunctionName =
-                            secEntry.mangledName.substr(secEntry.mangledName.find('_') + 1);
+                    // 兜底：baseFunctionName 是权威裸名，正常路径上由条目创建点写入，必非空；
+                    // 万一为空则从【句柄】回查（★ 不再从符号串反推名字 —— 那是把
+                    // "给人看的串"当"机器用的键"，见 docs/learn/23 的同族教训）。
+                    if (secEntry.baseFunctionName.empty() && secEntry.method) {
+                        secEntry.baseFunctionName = vtableSlotName(secEntry.method->name);
                     }
                     secSub.entries.push_back(secEntry);
                 }
@@ -2581,20 +2590,15 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
         auto& method = decl->methods[mi];
         method->ownerClassName = decl->name;
 
-        std::string methodNameInVTable = method->name.starts_with("~") ? "dtor" : method->name;
+        std::string methodNameInVTable = vtableSlotName(method->name);
 
-        // ★ vtable 槽里的符号名与定义点（registerFunction）必须逐字相同 —— 走同一份判据。
-        //   earlierSameNameCount 只数【排在当前方法之前】的同名方法：Pass 2 按同一
-        //   decl->methods 顺序注册，那一刻扫 m_functions 也只看得见前者，两处口径由此对齐。
-        size_t earlierSameNameCount = 0;
-        for (size_t mj = 0; mj < mi; ++mj) {
-            if (decl->methods[mj]->name == method->name) ++earlierSameNameCount;
-        }
-        bool needsTypeTag = countSameNameSameArity(decl->methods, method->name,
-                                                   method->parameters.size()) > 1;
-        std::string selfSymbol = memberMethodSymbolName(decl->name, method->name,
-                                                        method->parameters, earlierSameNameCount,
-                                                        needsTypeTag);
+        // ★ 槽里存【声明句柄】而不是符号串（BUGS.md B45）。
+        //   符号名由唯一定名点 registerFunction 写在 decl->mangledName 上；
+        //   此处【不再算一遍】—— 两处各算一遍就必然漂：此刻（Pass 1）形参类型
+        //   还没解析（"Inner"），Pass 2 算定义时已解析（"Outer::Inner"）⇒
+        //   同一方法两个符号 ⇒ .quad 命中不到 .globl ⇒ 链接期 undefined reference。
+        //   槽只负责"指向哪一个声明"；派生类覆写时换句柄即可（下方三个落点）。
+        //
         // ★ 槽位身份 = 裸名 + 形参类型链（BUGS.md B20 缺陷 c）。
         //   只比裸名 ⇒ `virtual int f(); int f(int);` 里后者认领前者的槽并被误标 virtual，
         //   编译期全绿、运行静默算错。对照 [class.virtual]/2：覆写判据本就含形参类型。
@@ -2608,10 +2612,10 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
         // 查主表
         for (auto& entry : classType->classLayout.vtableEntries) {
             std::string entryFuncName = entry.baseFunctionName.empty()
-                ? entry.mangledName.substr(entry.mangledName.find('_') + 1)
+                ? (entry.method ? vtableSlotName(entry.method->name) : std::string())
                 : entry.baseFunctionName;
             if (entryFuncName == methodNameInVTable && entry.signature == selfSignature) {
-                entry.mangledName = selfSymbol;   // 覆写 ⇒ 槽位改指本类的实现（索引不变，[class.virtual]/1）
+                entry.method = method;   // 覆写 ⇒ 槽位改指本类的实现（索引不变，[class.virtual]/1）
                 entry.baseFunctionName = methodNameInVTable;
                 entry.isOverridden = true;
                 overriddenInPrimary = true;
@@ -2627,10 +2631,10 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
             if (base.isPrimary || !base.hasVTable) continue;
             for (auto& entry : base.entries) {
                 std::string entryFuncName = entry.baseFunctionName.empty()
-                    ? entry.mangledName.substr(entry.mangledName.find('_') + 1)
+                    ? (entry.method ? vtableSlotName(entry.method->name) : std::string())
                     : entry.baseFunctionName;
                 if (entryFuncName == methodNameInVTable && entry.signature == selfSignature) {
-                    entry.mangledName = selfSymbol;   // 次表里的覆写：同样改指本类实现（thunk 负责 this 调整）
+                    entry.method = method;   // 次表里的覆写：同样改指本类实现（thunk 负责 this 调整）
                     entry.baseFunctionName = methodNameInVTable;
                     entry.isOverridden = true;
                     overriddenInSecondary = true; // 覆写了，那么下面就不用在写了
@@ -2656,7 +2660,7 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
 
             if (!overriddenInPrimary && !overriddenInSecondary) { // 既没有覆盖主虚函数 又没有覆盖次虚函数
                 VTableEntry entry;
-                entry.mangledName = selfSymbol;   // 本类新引入的虚函数：新占一个槽位
+                entry.method = method;       // 本类新引入的虚函数：新占一个槽位（符号由句柄给出）
                 entry.baseFunctionName = methodNameInVTable;
                 entry.signature = selfSignature;  // 槽位身份的另一半：形参类型链
                 entry.index = static_cast<uint32_t>(
@@ -6748,7 +6752,7 @@ void SemanticAnalyzer::dumpHierarchy(
             std::cout << "  │  虚函数   :\n";
             for (auto& entry : layout.vtableEntries) {
                 std::cout << std::format("  │    [{}] {} {}",
-                    entry.index, entry.mangledName,
+                    entry.index, vtableEntrySymbol(entry),
                     entry.isOverridden ? "(override)" : "");
                 if (entry.thunkAdjust != 0)
                     std::cout << std::format("  thunk={}", entry.thunkAdjust);
@@ -6826,7 +6830,7 @@ void SemanticAnalyzer::dumpLayout(
         std::cout << std::format("  │  ── ↑ vptr 指向此处 ───────── │ ──\n");
         for (auto& entry : layout.vtableEntries) {
             std::cout << std::format("  │  [{:<2}]  {}{}\n",
-                entry.index, entry.mangledName,
+                entry.index, vtableEntrySymbol(entry),
                 entry.isOverridden ? "  (override)" : "");
         }
         std::cout << std::format("  └────────────────────────────── │ ──────────────────────────┘\n");

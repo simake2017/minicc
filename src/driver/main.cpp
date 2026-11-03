@@ -710,7 +710,7 @@ int main(int argc, char* argv[]) {
                 std::cout << std::format("    _vptr at offset 0 (8 bytes, hidden)\n");
                 for (auto& entry : type->classLayout.vtableEntries) {
                     std::cout << std::format(
-                        "    vtable[{}]: {}\n", entry.index, entry.mangledName);
+                        "    vtable[{}]: {}\n", entry.index, vtableEntrySymbol(entry));
                 }
                 std::cout << std::format("    RTTI: {} (at vtable[-1])\n",
                     type->classLayout.rttiMangledName);

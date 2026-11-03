@@ -40,6 +40,9 @@ using TypePtr = std::shared_ptr<Type>;
 //   互相 include 会成环。只存指针，不需要完整类型。
 struct Expression;
 using DecltypeExprPtr = std::shared_ptr<Expression>;
+// 函数声明节点（ast.h 定义 FunctionDecl）—— vtable 槽要挂它的句柄。
+// ★ 同样只前置声明：依赖保持单向（ast.h → type.h），shared_ptr 允许不完整类型。
+struct FunctionDecl;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TypeKind：类型的种类
@@ -150,15 +153,26 @@ struct FieldInfo {
 // ─────────────────────────────────────────────────────────────────────────────
 // VTableEntry：虚函数表中的一个槽位
 // ─────────────────────────────────────────────────────────────────────────────
-// 对应 clang 的 vtable 布局计算（clang/lib/CodeGen/VTables.cpp）。
+// 对应 clang 的 vtable 布局计算（clang/lib/CodeGen/CGVTables.cpp）。
 // 含虚函数的类，对象头部藏一个 vptr 指向 vtable；vtable 本质是函数指针数组。
+//
+// ★ 槽里挂的是【声明句柄】而不是符号串（clang/include/clang/AST/VTableBuilder.h:
+//   VTableComponent 挂 CXXMethodDecl*，槽里同样没有第二份符号串）：符号名由
+//   唯一定名点 registerFunction 产出，槽只负责"指向哪一个声明"。
+//   ⇒ 派生类覆写时换的是【句柄】，符号不必（也不许）在这里另算一遍 ——
+//     两处各算一遍就必然漂：Pass 1 算槽时形参类型还没解析（"Inner"），
+//     Pass 2 算定义时已解析（"Outer::Inner"）⇒ 同一方法两个符号 ⇒ 链接期
+//     undefined reference（docs/BUGS.md B45）。
 // demo：class Base { virtual void foo(); };
-//   vtableEntries = [ VTableEntry{mangledName="_ZN4Base3fooEv", index=0} ]
+//   vtableEntries = [ VTableEntry{method=<Base::foo 的声明>, index=0} ]
 struct VTableEntry {
-    std::string mangledName;     // 经过 name mangling 的函数符号名
+    // 槽指向的声明（唯一定名点 = registerFunction 写在 decl->mangledName 上）。
+    // ★ 前置声明即可：ast.h 定义 FunctionDecl 且 include 本文件 ⇒ 依赖单向
+    //   （type.h 不回头 include ast.h）。shared_ptr 允许不完整类型。
+    std::shared_ptr<FunctionDecl> method;
     uint32_t    index   = 0;     // 在 vtable 中的索引（0-based）
     bool        isOverridden = false;
-    std::string baseFunctionName; // 原始方法名（override 检测用，不受 mangledName 更新影响）
+    std::string baseFunctionName; // 原始方法名（override 检测用；析构统一记作 "dtor"）
     // 形参类型链（逐位类型的可读名，如 "int" / "S_intP"；零参为 ""）。
     // ★ 槽位身份 = baseFunctionName + signature（[class.virtual]/2：同签名才叫覆写）。
     //   只比裸名会让 `virtual int f(); int f(int);` 里的第二个 f 认领第一个的槽，

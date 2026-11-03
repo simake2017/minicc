@@ -3275,3 +3275,101 @@ minicc 的类作用域查找只问"类里有没有叫这个名字的**类型别�
 **教训**：**一条查找判据要覆盖名字在一个作用域里的【全部形态】** ——
 类型别名 / 嵌套类 / 类自身 / 枚举项 / static 成员，各是各的形态；
 少问一种，落在那种形态上的合法程序就会被拒。
+
+## B45. vtable 槽的符号在两处各算一遍：同一方法两个符号（链接期错配）
+
+- severity: high ｜ status: fixed ｜ related: src/ast/type.h, src/sema/semantic_analyzer.cpp, src/codegen/codegen.cpp, include/ast.h, docs/learn/54, docs/specs/vtable-slot-handle.spec.md
+
+**现象**
+
+```cpp
+struct Outer {
+    struct Inner { int v; };
+    virtual int f(Inner i) { }   // 形参类型 = 嵌套类
+    virtual int f(int i) { }     // 同名同个数 ⇒ 符号要挂形参类型链
+};
+int main() { Outer o; return 0; }
+```
+
+★ 修前的产物（探针实测）：
+
+```asm
+    .globl Outer_f_1_OuterCCInner      # 定义点（Pass 2，形参类型已解析）
+    .quad Outer_f_1_Inner              # vtable 槽（Pass 1，形参类型未解析）
+```
+
+⇒ `[LINK ERROR] undefined reference to 'Outer_f_1_Inner'`（rc=1，链接期）。
+
+**性质**：**链接期才炸的错配**（编译期全程绿灯）。clang rc=0（合法程序）。
+
+**根因**：vtable 槽里存的是**符号串**，而那个串在 **Pass 1**（`processClassDecl`）
+与 **Pass 2**（`registerFunction`）**各算了一遍**。两处虽共用
+`memberMethodSymbolName`（B20 的收拢），但看到的世界不同：
+
+| 时刻 | 形参类型节点 | `toString()` |
+|---|---|---|
+| Pass 1 | 未解析的 `Class("Inner")` | `Inner` |
+| Pass 2 | 已解析的 `ClassType("Outer::Inner")` | `Outer::Inner` |
+
+★ 只有**同名同个数**的重载才会用到形参类型链（B22）⇒ 触发条件窄，
+此前无人写过这种用例 ⇒ 一直没暴露。
+
+**修法**：**槽里不再存符号串，改存声明句柄**（`VTableEntry::method`）——
+符号由唯一定名点 `registerFunction` 写在 `decl->mangledName` 上，
+槽发射时从句柄取（`vtableEntrySymbol()`）。三个填槽落点（新槽 / 主表覆写 /
+次表覆写）只写句柄。★ 对照 clang：`VTableComponent::getFunctionDecl()`
+返回的正是 `CXXMethodDecl *` —— 槽里本来就该是声明，不是名字。
+
+**回归**：tests/lang/test_basics_34（正例含本现场）
++ 单测 `tests/unit/test_vtable_handle.cpp`（6 例 `VTableHandle.*`，
+断言"槽 → 声明 → 符号三者同源"）+ 突变验证 5/5。
+
+**教训**：★ **"两处共用同一个函数"不等于"消除了重复"** —— 两处调用发生在
+不同时刻、看到的状态不同，就还是会漂（B10 → B20 → B22 → B45 是同一个坑的
+第四次现形）。治本只有一条：**只算一次，别处只引用**。
+★ 另一条：**自指式断言测不出这类缺陷** —— 第一版单测把期望值取自
+被测的 accessor 本身（"自己验自己"），突变 m5 因此全绿；
+期望值必须来自与被测物【无关】的来源（这里取"声明自己的 mangledName"）。
+
+## B46. 析构槽靠符号子串判定：`my_dtor_helper` 被误认成析构（静默少调一次）
+
+- severity: medium ｜ status: fixed ｜ related: src/codegen/codegen.cpp, docs/learn/54
+
+**现象**
+
+```cpp
+int g_dtorCalls = 0;
+struct Widget {
+    virtual int my_dtor_helper() { return 7; }   // ★ 名字含 "dtor" 但不是析构
+    virtual ~Widget() { g_dtorCalls = g_dtorCalls + 1; }
+};
+int main() {
+    { Widget w; int r = w.my_dtor_helper(); if (r != 7) return 1; }
+    return g_dtorCalls == 1 ? 0 : 2;              // ★ 修前返回 2（析构没跑）
+}
+```
+
+★ 修前：作用域结束时的析构调用打在**槽 0**（`my_dtor_helper`）而不是槽 1
+（析构）⇒ 真正的析构函数**根本没被调用** ⇒ `g_dtorCalls` 恒为 0。
+**静默少调一次析构**：程序不报错、不崩，只是资源没释放。
+
+**性质**：**静默算错**（子串匹配的经典误判）。
+
+**根因**：析构槽的判定写成了"符号串里有没有 `dtor` 子串"
+（`entry.mangledName.find("dtor") != npos`）。★ 槽里存符号串时，
+"这个槽是不是析构"只能靠猜；句柄化之后**看声明名**即可
+（`name.starts_with("~")`）⇒ 假阳性从根上消失。
+★ 对照 clang：`VTableComponent::isDestructorKind()` 看的是**声明的种类**
+（`CXXDestructorDecl`），同样不是看名字。
+
+**修法**：`isDtorSlot(entry)` = `entry.method->name.starts_with("~")`
+（`src/codegen/codegen.cpp`），两个消费点（栈对象析构 / `delete`）共用。
+
+**回归**：tests/lang/test_basics_34（第 ② 组：`g_dtorCalls == 1`）
++ 单测 `VTableHandle.VirtualDtorCallTargetsTheDtorSlot`
+（断言析构的虚调用打在 vtable[1]，不是 vtable[0]）。
+
+**教训**：★ **"用符号串反推语义"是本项目的头号反模式**（B10/B13~B15/B22/B45
+同族）—— 符号串是**给人看的**，语义判定要落在**声明**上。
+★ 附带一条：子串匹配的错误方向往往是**静默**的（少调一次函数没人会发现），
+⇒ 这类判据必须有"钉住可观测后果"的用例，而不是只断言"没有报错"。

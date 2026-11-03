@@ -122,6 +122,14 @@ static std::string asmSymbol(const std::string& name) {
     return out;
 }
 
+// 这个 vtable 槽是不是【析构】槽？判据看它指向的声明的名字（"~X"）。
+// ★ 旧实现是在符号串里找 "dtor" 子串 —— 子串匹配会把叫 my_dtor_helper 的
+//   普通虚函数误认成析构 ⇒ 多发一次错的虚调用。声明句柄化之后看名字即可。
+// demo：method->name="~Outer" ⇒ true；"my_dtor_helper" ⇒ false
+static bool isDtorSlot(const VTableEntry& entry) {
+    return entry.method && entry.method->name.starts_with("~");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 主入口：生成整个编译单元的汇编
 // ─────────────────────────────────────────────────────────────────────────────
@@ -320,9 +328,11 @@ void CodeGen::emitVTable(const std::string& className, TypePtr classType) {
         rttiLabel));
 
     // 主表虚函数条目
+    // ★ 符号取自槽指向的【声明】（vtableEntrySymbol）—— 槽里不再存第二份符号串，
+    //   定义点与 .quad 共用同一份 mangledName ⇒ 不可能错配（BUGS.md B45）。
     for (auto& entry : classType->classLayout.vtableEntries) {
         emitData(std::format("    .quad {}   # vtable[{}]: 虚函数 {}",
-            asmSymbol(entry.mangledName), entry.index, entry.mangledName));
+            asmSymbol(vtableEntrySymbol(entry)), entry.index, vtableEntrySymbol(entry)));
     }
 
     // ── 次表段（secondary vtable segments）──
@@ -340,17 +350,18 @@ void CodeGen::emitVTable(const std::string& className, TypePtr classType) {
         // 次表虚函数条目（覆写项填 thunk 地址，非覆写项填基类函数地址）
         for (size_t i = 0; i < base.entries.size(); ++i) {
             auto& entry = base.entries[i];
+            const std::string sym = vtableEntrySymbol(entry);
             if (entry.isOverridden && entry.thunkAdjust != 0) {
                 // 发射 thunk 跳板（简化 mangling：类名_函数名_thunk偏移）
                 std::string thunkLabel = asmSymbol(std::format("{}_{}_thunk{}",
                     className, entry.baseFunctionName, -entry.thunkAdjust));
-                emitThunk(thunkLabel, asmSymbol(entry.mangledName), entry.thunkAdjust);
+                emitThunk(thunkLabel, asmSymbol(sym), entry.thunkAdjust);
                 emitData(std::format("    .quad {}   # secondary[{}]: {}（经 thunk 跳板，this 调整量={}）",
-                    thunkLabel, i, entry.mangledName, entry.thunkAdjust));
+                    thunkLabel, i, sym, entry.thunkAdjust));
             } else {
                 // 未覆写：直接填基类函数地址（调用方传基类 this，无需调整）
                 emitData(std::format("    .quad {}   # secondary[{}]: {}（直接引用基类函数）",
-                    asmSymbol(entry.mangledName), i, entry.mangledName));
+                    asmSymbol(sym), i, sym));
             }
         }
     }
@@ -817,12 +828,14 @@ void CodeGen::visit(BlockStmt& block) {
 void CodeGen::emitClassDtorCall(const std::string& className, int rbpOffset) {
     emit(std::format("leaq {}(%rbp), %rdi       # this = 栈上对象地址（直接取址，无指针变量）", rbpOffset));
 
-    // 虚析构？查 vtable 条目（同 emitDelete 的子串匹配约定）
+    // 虚析构？查 vtable 条目（判据：槽指向的声明是不是析构 —— 看名字 "~X"，
+    // 不再在符号串里找 "dtor" 子串：后者会把叫 my_dtor_helper 的普通虚函数
+    // 误认成析构 ⇒ 发出一次错的虚调用（子串匹配的经典误判，BUGS.md B45 附带修）。
     if (m_classTypes) {
         auto it = m_classTypes->find(className);
         if (it != m_classTypes->end()) {
             for (auto& entry : it->second->classLayout.vtableEntries) {
-                if (entry.mangledName.find("dtor") != std::string::npos) {
+                if (isDtorSlot(entry)) {
                     emitVirtualCall(className, "dtor", {}, entry.index);
                     return;
                 }
@@ -1851,7 +1864,7 @@ void CodeGen::visit(DeleteStmt& stmt) {
                 bool hasVirtualDtor = false;
                 uint32_t dtorIndex = 0;
                 for (auto& entry : layout.vtableEntries) {
-                    if (entry.mangledName.find("dtor") != std::string::npos) {
+                    if (isDtorSlot(entry)) {
                         hasVirtualDtor = true;
                         dtorIndex = entry.index;
                         break;
@@ -2560,10 +2573,12 @@ void CodeGen::visit(CallExpr& expr) {
                     //   实测返回 255（静默算错）。Sema 早已把选中的方法符号回填进
                     //   resolvedCalleeSymbol（承 B10 的机制），按它精确比对即可。
                     //   回填为空时退回旧的名字启发式（教学简化，保持既有行为）。
+                    //   ★ 槽的符号取自声明句柄（vtableEntrySymbol）⇒ 与定义点同源。
                     for (auto& entry : layout.vtableEntries) {
+                        const std::string slotSym = vtableEntrySymbol(entry);
                         bool hit = !mem->resolvedCalleeSymbol.empty()
-                            ? entry.mangledName == mem->resolvedCalleeSymbol
-                            : entry.mangledName.find(mem->memberName) != std::string::npos;
+                            ? slotSym == mem->resolvedCalleeSymbol
+                            : slotSym.find(mem->memberName) != std::string::npos;
                         if (hit) {
                             // 这是虚函数调用！
                             // ★ 喂入 this：emitVirtualCall 约定"入口时对象

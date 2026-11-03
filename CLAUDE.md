@@ -971,6 +971,39 @@ build 0 警告；check-doc-standard.sh 六判据全绿；突变验证 **5/5** �
 文档 docs/learn/53（新）+ specs/nested-class.spec.md + designs/…design.md；
 BUGS.md 新增 **B42**（构造函数符号硬拼）/ **B43**（嵌套类不支持）/ **B44**（类自身名字不可见）。
 
+✅ **Stage 3 批 5（vtable 槽 → 声明句柄）已完成（docs/learn/54 + specs/designs）** ——
+★ 起点是 ROADMAP 行 7-4「主线 G 的第一笔债」：**槽里放的是符号串 ⇒ 规则在多处各写一遍**。
+① **槽里改挂声明句柄**：`VTableEntry::method`（`shared_ptr<FunctionDecl>`）——
+   `type.h` 只前置声明（依赖单向 ast.h → type.h），取符号的桥接函数
+   `vtableEntrySymbol()` 放 **ast.h**（那里 FunctionDecl 才完整）。
+② **符号只有一个来源**：唯一定名点仍是 `registerFunction`（写 `decl->mangledName`）；
+   三个填槽落点（**新槽 / 主表覆写 / 次表覆写**）只写句柄、**不再算符号**。
+③ **覆写 = 换句柄**（基类自己的表不动 ⇒ A 的对象不会调到 B 的实现）。
+④ **析构槽看声明名**（`~X`）而不是猜符号子串 ⇒ 修掉 **B46**。
+⑤ **CodeGen 四个消费点**（主表 `.quad` / 次表 + thunk / 虚调用命中 / 析构判定）
+   + Sema 两个 dump + main.cpp 布局 dump 统一走取符号入口。
+★ **修掉 B45（真链接期错配）**：嵌套类作虚函数**重载**的形参类型时，
+Pass 1 算的槽符号（未解析的 "Inner"）与 Pass 2 算的定义符号（已解析的
+"Outer::Inner"）**不同** ⇒ `.quad Outer_f_1_Inner` 指向没人定义的符号 ⇒
+`undefined reference`（clang rc=0）。★ 机理值得单独记：
+**"两处共用同一个函数"只治了"写错"，治不了"算两次"** —— 两处调用发生在
+不同时刻、看到的状态不同就还是会漂（B10 → B20 → B22 → B45 同一个坑的第四次现形）；
+治本只有一条：**只算一次，别处只引用**。
+★ 对照 clang：`VTableComponent::getFunctionDecl()` 返回 `CXXMethodDecl *`
+（槽里本来就是声明，不是名字）；`isDestructorKind()` 看声明**种类**（同款思路）。
+★ **本批零既有漂移**：既有 **164** 份集成日志逐字节一致（新文件 1 份）；
+全量 ctest **396/396**（+6 `VTableHandle.*`）；build 0 警告；
+check-doc-standard.sh 六判据全绿；突变验证 **5/5** 实跑变红
+（脚本 `tools/verify-vtable-handle-mutations.sh`）。
+★ **教训（值得单独记）**：**自指式断言测不出这类缺陷** —— 第一版单测把期望值
+取自被测的 accessor 自己（"自己验自己"）⇒ 突变 m5 全绿；期望值必须来自
+与被测物【无关】的来源（这里取"声明自己的 mangledName"）才抓住。
+★ **边界（本批未做）**：槽位身份仍用形参类型链近似签名（B22 的老边界）／
+析构按名字前缀而非声明种类（`FunctionDecl` 无"种类"字段）／
+Itanium 真 mangling 与 `CK_VCallOffset`（教学版口径不变）。
+文档 docs/learn/54（新）+ specs/vtable-slot-handle.spec.md + designs/…design.md；
+BUGS.md 新增 **B45**（槽的符号两处各算）/ **B46**（析构槽靠子串判定）。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、
@@ -989,10 +1022,11 @@ NTTP：**任意常量表达式** `Buf<2+2>` / `Buf<k>`（主线 D）、字面量
 Stage 3 = **批 1** 活表就位（行为不变）+ **批 2+3**（✅，见上条：value 位落地 /
 C++20 `UndeclaredTemplate` 规则 / 三处消歧点切活表 / `NameRegistry` 整类退场）
 + **批 4 嵌套类** ✅（见上条：类作用域链 + 登记名带作用域 + 查找顺序由内向外 +
-构造函数符号回填；docs/learn/53）；
+构造函数符号回填；docs/learn/53）+ **批 5 虚表槽句柄化** ✅（见上条：槽挂声明 +
+符号唯一定名点；docs/learn/54）；
 ★ 三阶段走完后，Parser 侧**不再有任何自建的名字/作用域事实**，
 剩下的是"作用域链能表达的东西"（类作用域成员 / using 声明 / 嵌套类已在批 4 完成）；
-**B37 查实、到 Stage 3 批 4 仍未修的一处缺口**：命名空间变量在块作用域不可见
+**B37 查实、到 Stage 3 批 5 仍未修的一处缺口**：命名空间变量在块作用域不可见
 （`namespace N { int g; }` 裸用 g 不可见）。
 ⏭ 后续计划见 **docs/ROADMAP.md**（主线 C 控制流 → D 常量折叠 → E 数组/高级类型 → F 深水区选做，
 每条含理论点/clang 参照/任务分解/验收）。新会话接手：先读本文件与 ROADMAP，选定主线再开工。
