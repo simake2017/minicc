@@ -928,6 +928,49 @@ check-doc-standard.sh 六判据全绿。
 须用**同一条作用域链查询**回答，不许为"嵌套"开特判；
 交接三条见 docs/learn/51 §8.1（不建第二张表 / 不开特判 / 先把源码现场对着 clang 写）。
 
+✅ **Stage 3 批 4（嵌套类）已完成（docs/learn/53 + specs/designs）** ——
+★ 这是用户最初那个提问（"class A 里面有个 B，然后外面还有个 class B"）的落地 ——
+三阶段走完后（Stage 1 可见性 / Stage 2 作用域即身份 / Stage 3 活作用域链），
+嵌套类**成为作用域链的自然结果**，而不是一条特判（红线：不建第二张表 / 不开特判）。
+① **Parser**：`parseClassDecl` 成员循环遇 `class`/`struct` ⇒ 递归解析，
+收进 `decl->nestedClasses`（名字进的是**当前类作用域**，不建第二张表）。
+② **登记名带作用域**（learn/49 的"作用域即身份"）：`processClassDecl` 在
+**字段解析之前**把嵌套类前缀化（登记名 = 外层类登记名 + `::` + 裸名 ⇒ "A::B"）
+并递归处理 ⇒ 类表键/符号表键/mangling/汇编符号（`A__B`）全部派生。
+★ **位置即语义**：必须先于字段解析 —— 嵌套类的名字在本类作用域内可见
+（`struct A { struct B{}; B b; };` 的 `B` 指 `A::B`）。
+③ **类作用域链**：`lookupVisibleType` 的 ① 分支从"一张别名表"扩成**一条链**
+（①0 类自身 → ①a 类内别名 → ①b 嵌套类 → 沿 `ownerClassName` 外溯一级）。
+④ **查找顺序改为由内向外**（[basic.lookup.unqual]）：**类作用域 → 命名空间链 → 全局**
+—— 原先是全局符号表先命中 ⇒ 嵌套类 `A::B` 与全局 `B` 并存时，
+A 的成员函数里的裸名 `B` 被绑到**全局 B** ⇒ **不报错，只是算错**
+（症状 `No member 'v' in class 'B'`）。
+⑤ **构造函数符号改由 Sema 选定并回填**（clang `BuildCXXConstructExpr` 同构）：
+`VarDeclStmt::ctorSymbol` / `NewExpr::ctorSymbol` 两槽，CodeGen 优先用回填值。
+★ 顺带修一个**四次同款**的老坑（B42）：`namespace N{struct S{S(){};};} N::S s;`
+此前链接期 `undefined reference to 'N__S_N__S'`（定义点与调用点各算一套符号名），
+现 rc=0。
+⑥ **`new` 收限定名**（`new A::B(6)`，[dcl.type.elab]/2 的 type-id 可以是限定名）。
+⑦ **限定名调用按登记名查表**（`B::sm()` 的限定者按可见性解析 ⇒ "A::B::sm"）。
+⑧ **类自身的名字在本类作用域内可见**（[basic.scope.class]/2.1）——
+`struct A { A* p; };` 此前**拒收合法程序**（自引用指针，B44）。
+⑨ **嵌套类看得见外层类的 static 成员**（类链与基类链并列推进 owner）。
+⑩ **诊断对齐 clang**：`A::C`（C 不存在）⇒ `no type named 'C' in 'A'`（逐字）。
+★ **本批零既有漂移**：既有 **162** 份集成日志逐字节一致（新判据只在有嵌套类
+或类作用域命中时才触发）；全量 ctest **389/389**（+7 `NestedClass.*`）；
+build 0 警告；check-doc-standard.sh 六判据全绿；突变验证 **5/5** 实跑变红
+（脚本 `tools/verify-nested-mutations.sh`）。
+★ **教训（值得单独记）**：**"作用域"不是一张表，是一条链** —— 把它当表实现，
+每加一层作用域（命名空间 → 类 → 嵌套类）就要重做一遍；把它当链实现，
+加一层只是链上多一环。嵌套类这个"新特性"因此**没有写一行特判**。
+★ **边界（本批未做，已登记）**：嵌套类在**类模板**里（蓝图不克隆嵌套类 ⇒
+`unknown type name 'Inner'`，响亮拒收；修法 = 实例化步骤 5.8，ROADMAP 行 7-5）／
+类外定义嵌套类成员（Parser 未支持任何类外成员定义）／嵌套类**按值返回**
+（★ 与普通类同款的老缺口：`S x = f();` 的初始化式被丢弃 ⇒ 静默算错，
+已记入 ROADMAP 主线 A 的遗留缺口行）。
+文档 docs/learn/53（新）+ specs/nested-class.spec.md + designs/…design.md；
+BUGS.md 新增 **B42**（构造函数符号硬拼）/ **B43**（嵌套类不支持）/ **B44**（类自身名字不可见）。
+
 **未做（按优先级）**：④[stmt.ambig] 完整裁决 → ⑥后置 const 的重载区分与 const 正确性检查 →
 ⑥三元 `?:`（ROADMAP 主线 C）→ **`T[N]` 数组类型偏特化**（需新开 `TypeKind::Array`，
 属 ROADMAP 主线 E 整条，不是顺手项）→ 类外成员定义 `int C::f() const {}`、函数默认实参、
@@ -944,12 +987,13 @@ NTTP：**任意常量表达式** `Buf<2+2>` / `Buf<k>`（主线 D）、字面量
 **名字可见性三阶段（红线 1 改写后的路线，B37 起）**：Stage 1 = 可见性裁决下沉 Sema
 ✅（B37/learn/48）；Stage 2 = 作用域即身份 + 登记表退场一处 ✅（B38/learn/49）；
 Stage 3 = **批 1** 活表就位（行为不变）+ **批 2+3**（✅，见上条：value 位落地 /
-C++20 `UndeclaredTemplate` 规则 / 三处消歧点切活表 / `NameRegistry` 整类退场）；
-**批 4 = 嵌套类** ⬜（ROADMAP 主线 I 行 7-3，交接见 docs/learn/51 §8.1）——
+C++20 `UndeclaredTemplate` 规则 / 三处消歧点切活表 / `NameRegistry` 整类退场）
++ **批 4 嵌套类** ✅（见上条：类作用域链 + 登记名带作用域 + 查找顺序由内向外 +
+构造函数符号回填；docs/learn/53）；
 ★ 三阶段走完后，Parser 侧**不再有任何自建的名字/作用域事实**，
-剩下的是"作用域链能表达的东西"（嵌套类 / 类作用域成员 / using 声明）；
-**B37 查实、到 Stage 3 批 3 仍未修的两处缺口**：命名空间变量在块作用域不可见
-（`namespace N { int g; }` 裸用 g 不可见）/ 嵌套类不支持。
+剩下的是"作用域链能表达的东西"（类作用域成员 / using 声明 / 嵌套类已在批 4 完成）；
+**B37 查实、到 Stage 3 批 4 仍未修的一处缺口**：命名空间变量在块作用域不可见
+（`namespace N { int g; }` 裸用 g 不可见）。
 ⏭ 后续计划见 **docs/ROADMAP.md**（主线 C 控制流 → D 常量折叠 → E 数组/高级类型 → F 深水区选做，
 每条含理论点/clang 参照/任务分解/验收）。新会话接手：先读本文件与 ROADMAP，选定主线再开工。
 ★ 文档**内容侧**欠账（骨架已齐、内容待补）：lines 扩到 10 条 / business「观测点」节

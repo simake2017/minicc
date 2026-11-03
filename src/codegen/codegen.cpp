@@ -1356,9 +1356,13 @@ void CodeGen::visit(VarDeclStmt& decl) {
             }
 
             // ③ 调用构造函数：this = 栈上对象地址（leaq 取址）
-            //    零参：约定符号名 类名_类名（与 emitNew、registerFunction 一致）；
-            //    带参：用 Sema 选定并回填的 ctorSymbol —— mangling 是有状态的
-            //    （同名多参会追加参数个数后缀），CodeGen 自己拼不出来。
+            //    ★ 符号由【Sema 选定并回填】（decl.ctorSymbol）—— CodeGen 不再
+            //      自己拼 "类名_类名"：那是对命名规则的第二份拷贝，B10 / B20 /
+            //      B22 三次栽在同一个坑上（调用点拼的 ≠ 定义点定的），
+            //      限定名类（命名空间 N::S / 嵌套类 A::B）一撞就错配 ⇒ 链接期炸。
+            //      取的是定义点自己定下的名字（memberMethodSymbolName 的产物），
+            //      两端口径天然同源。
+            //    空 = Sema 没选到（错误路径）⇒ 退回旧约定，不静默改语义。
             //    实参传递与 emitNew 同一套：先逐个求值压栈暂存，再逆序弹出
             //    到 rsi/rdx/rcx/r8/r9（rdi 被 this 占用）。
             if (!decl.ctorArgs.empty() && !decl.ctorSymbol.empty()) {
@@ -1377,10 +1381,13 @@ void CodeGen::visit(VarDeclStmt& decl) {
                 return;
             }
 
+            const std::string ctorSym = decl.ctorSymbol.empty()
+                ? cit->second->name + "_" + cit->second->name   // 兜底（旧约定）
+                : decl.ctorSymbol;
             emit(std::format("leaq {}(%rbp), %rdi       # this = 栈对象地址 &{}",
                 offset, decl.name));
             emit(std::format("callq {}               # 调用构造函数",
-                asmSymbol(cit->second->name + "_" + cit->second->name)));
+                asmSymbol(ctorSym)));
             return;
         }
     }
@@ -2989,14 +2996,19 @@ void CodeGen::visit(NewExpr& expr) {
 
     // 从栈顶取回 objPtr 传给 rdi
     emit("movq (%rsp), %rdi             # this = 已分配对象指针（栈顶取出）");
-    // 构造函数名：与 registerFunction 的 mangling 对齐——
-    // 0 参 → ClassName_ClassName，N 参 → ClassName_ClassName_N
-    std::string ctorName = expr.className + "_" + expr.className;
-    if (!expr.constructorArgs.empty()) {
-        ctorName += "_" + std::to_string(expr.constructorArgs.size());
-    }
+    // 构造函数符号：★ 由 Sema 选定并回填（expr.ctorSymbol）—— CodeGen 不再
+    //   自己按 "类名_类名[_N]" 拼：那是命名规则的第二份拷贝，限定名类
+    //   （命名空间 N::S / 嵌套类 A::B）一撞就与定义点错配 ⇒ 链接期炸（B42）。
+    //   空 = Sema 没选到（错误路径）⇒ 退回旧约定。
     // 命名空间内的类（N::S）名字里带 "::" —— 符号标签必须净化，
     // 且要与函数定义端（emitFunction 里对 mangledName 走的同一个 asmSymbol）一致
+    std::string ctorName = expr.ctorSymbol;
+    if (ctorName.empty()) {
+        ctorName = expr.className + "_" + expr.className;   // 兜底（旧约定）
+        if (!expr.constructorArgs.empty()) {
+            ctorName += "_" + std::to_string(expr.constructorArgs.size());
+        }
+    }
     ctorName = asmSymbol(ctorName);
     emit(std::format("callq {}                 # 调用构造函数 {}", ctorName, ctorName));
 

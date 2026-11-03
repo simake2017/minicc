@@ -1849,6 +1849,28 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             continue;
         }
 
+        // ── 嵌套类（[class.nest]）──────────────────────────────────────────
+        //   struct A { struct B { int v; }; };
+        // 【它是什么】类作用域里声明的类 —— 名字属于【类作用域】而不是全局，
+        //   故 `A::B` 与 `::B` 是两个类型、互不干扰。
+        // 【为什么不用另开一张表】parseClassDecl 里那句 openScope(ScopeKind::Class, …)
+        //   把类名登记进【当前】作用域 —— 当前正是外层类的作用域 ⇒ 嵌套类的名字
+        //   天然落在类作用域里（Stage 3 批 1 的活作用域表，无需第二份事实）。
+        //   路径也随之自洽："A::B::"（限定名 `A::B` 由同一条链式查询答出）。
+        // 【判据来源】行首是 class/struct ⇒ 这条成员只能是【类声明】——
+        //   来自声明本身而非位置（对照 clang 的 ParseCXXMemberSpecification）。
+        // 对照 clang：clang/lib/Parse/ParseDeclCXX.cpp:Parser::ParseCXXMemberSpecification
+        //   的类体循环收 tok::class/tok::struct ⇒ 走 ParseClassDeclaration；
+        //   clang/lib/Sema/SemaDecl.cpp:Sema::ActOnTagStartDefinition 把 DeclContext
+        //   设成外层类（PushDeclContext），名字由 PushOnScopeChains 挂进类作用域。
+        if (check(TokenType::KwClass) || check(TokenType::KwStruct)) {
+            auto nested = parseClassDecl();
+            decl->nestedClasses.push_back(nested);
+            logParse("  [parse:member] ★ '{}' 是嵌套类（名字属于类作用域 [class.nest]）\n",
+                nested->name);
+            continue;
+        }
+
         // ── 成员类型别名（[dcl.typedef]）──
         //   using type = T;  │  typedef T type;   ← 语义完全等价，产出同一条
         //   ClassDecl::typeAliases 条目。
@@ -3219,8 +3241,17 @@ ExprPtr Parser::parsePrimaryExpr() {
     // new 表达式
     if (check(TokenType::KwNew) || (check(TokenType::Identifier) && current().text == "new")) {
         advance(); // 消费 new
-        const Token& className = expect(TokenType::Identifier, "Expected class name after 'new'");
-        auto expr = std::make_shared<NewExpr>(className.text);
+        // ★ 限定名（[dcl.type.elab]/2：new 后面跟的是 type-id，type-id 可以是限定名）：
+        //   `new A::B(6)` —— 嵌套类只能这样 new（裸 `new B(6)` 指全局 B）。
+        //   收集成 "A::B" 交给语义期按登记名查（嵌套类的登记名就是限定名）。
+        std::string classNameText =
+            expect(TokenType::Identifier, "Expected class name after 'new'").text;
+        while (check(TokenType::ColonColon)) {
+            advance();
+            classNameText += "::"
+                + expect(TokenType::Identifier, "Expected identifier after '::'").text;
+        }
+        auto expr = std::make_shared<NewExpr>(classNameText);
         expr->location = loc;
 
         // P3 —— 可选模板实参表：new Box<int>() / new Buf<4>()。

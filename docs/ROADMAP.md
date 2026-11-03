@@ -30,6 +30,16 @@
 
 **验收/产物**：tests/test_ctor_01..NN（含初始化顺序陷阱用例、多态 delete 用例）+ docs/learn/08
 
+**遗留缺口（★ 静默算错，响亮拒收反而更好）**：
+`S x = f();`（函数返回**类对象**）的初始化式被**丢弃** —— 对象退化成默认构造，
+运行期读到未初始化字段。当前**不报错**（编译全绿、结果错）。
+根因：`visit(VarDeclStmt)` 的平凡拷贝分支只接 `Var`/`Member` 两种左值形态
+（源码注释里写着"函数返回同类对象不涉及"），调用表达式落进"无初始化的类声明"。
+修法需要**按值返回 + 拷贝省略**（sret 风格的返回缓冲 + 逐字节拷贝），
+属主线 A 的延伸，**单独立批**（与嵌套类无关 —— 普通类同样中招）。
+探针：`struct S{int v;}; S f(){S s; s.v=7; return s;} int main(){S x=f(); return x.v;}`
+⇒ clang 7 / minicc **0**（字段没被拷过去）。
+
 ## ✅ 主线 B：自动链接出可执行文件（已完成 2026-09-03）
 
 **实际落地方案**（摸底后调整，见 docs/learn/15）：不调用系统 `ld`，
@@ -328,7 +338,9 @@ SFINAE 探测不命中时**静默回退**而非报错；与 clang oracle 对拍�
 | 7 🔶 | **Stage 3**：边解析边 `ActOn*` 登记（clang 的 Actions 模式）+ 登记表整体退场（含 value 位） | 路线终点 | Parser 通过窄的只读接口向 Sema 提问（`Parser.h:639` 的 `Sema &Actions;` + `Parser.cpp:1696` 的 `Actions.ClassifyName(...)`）；"名字是不是模板"由活符号表回答，语法试探（`isTemplateArgumentList` + `RevertingTentativeParsingAction`）只做未声明名的兜底 | `a<b>(c)` 由 Sema 判定（变量遮蔽）而非登记表近似；`unknown<x>(y)` 按 C++20 当 template-id（clang：报 undeclared 'x'）；登记表类整体删除 |
 | 7-1 ✅ | **Stage 3 批 1**：活作用域表 + Actions 句柄 + 登记点铺满（**行为中立**） | docs/learn/51 | 新模块 `include/name_scope.h`（`ScopeKind`/`ScopeBit` 跨域契约）+ `src/sema/parse_scope.h/.cpp`（活链 + 持久上下文）；Sema 持有表并开六条窄接口；Parser 持 `SemanticAnalyzer*`（前向声明、空句柄空转）并铺 11 类登记点；★ 模板形参作用域对名字登记**透明**；★ 可见性（活链）与限定可达（持久上下文）分两张结构 | build 0 警告；ctest 376 → **388**；**160 份集成日志逐字节零漂移**（消歧点仍读旧表 ⇒ 行为中立）；tests/unit/test_parse_scope.cpp（12 例）；docs/learn/51 + specs/designs |
 | 7-2 ✅ | **Stage 3 批 2+3（合并）**：value 位落地 + C++20 `UndeclaredTemplate` 规则 + 三个消歧点切表 + `NameRegistry` 整类删除 | `SemaDecl.cpp:995-1003` + B31/B37 的收口 | ① 三个消歧点（语句层裸名判定 / 语句层模板 id 链闸 / 表达式模板闸）改问活作用域表；② 名字查不到且下一个 token 是 `<` ⇒ 按 C++20 假定它是模板名（复核仍在试探实参表那一步）；③ **value 位不再是占位** —— "是不是值"参与语句层分流（变量遮蔽同名类型 ⇒ `S;` 是表达式，clang 同）；④ `NameRegistry` 三文件（头/实现/单测）整类删除，Parser 自带 Sema（clang `Sema &Actions` 是构造前提） | 登记表类删除；`unknown<int>(y)` ⇒ rc=1 `use of undeclared identifier 'y'`（与 clang 逐字**含列号**）；裸 `q;` ⇒ 同款文案（旧：Undefined variable）；`Box;`（可见的模板名）⇒ rc=0（**修掉拒收合法程序**）；tests/lang/test_basics_30..31 + tests/unit/test_parse_scope.cpp（16 例）；★ **有意漂移 2 处**（basics_23/25：遮蔽终于在 Parser 层可见）；docs/learn/52 |
-| 7-3 ⬜ | **Stage 3 批 4**：嵌套类（用户拍板：用同一张作用域链的通用查询解决，**不做特判**） | 用户原始问题（`class A{ B; }` 与全局 `B`） | 嵌套类登记为外层类作用域的成员；查找走作用域链的通用查询（不再有 `findClassScopeType` 一类特判） | `A::B` 与全局 `B` 并存不串；`A::B` 限定名可达；rc=0 与 clang 对拍 |
+| 7-3 ✅ | **Stage 3 批 4**：嵌套类（用户拍板：用同一张作用域链的通用查询解决，**不做特判**） | 用户原始问题（`class A{ B; }` 与全局 `B`） | 嵌套类登记为外层类作用域的成员（登记名带作用域 `A::B`）；类作用域从"一张别名表"升级成**一条链**（类自身 → 别名 → 嵌套类 → 外层类）；查找顺序改为 **类作用域 → 命名空间链 → 全局**（由内向外）；构造函数符号改由 Sema 选定并回填（CodeGen 不再硬拼） | `A::B` 与全局 `B` 并存不串；`A::B` 限定名可达；rc=0 与 clang 对拍；tests/lang/test_basics_32..33 + tests/unit/test_nested_class.cpp（7 例，突变验证 5/5）；docs/learn/53 + specs/designs |
+| 7-4 ⬜ | **Stage 3 批 5**：vtable 槽 → `FuncDeclPtr` 句柄（主线 G 的第一笔债） | B20/B22 的根因（槽里放的是**字符串符号**，规则在多处各写一遍） | 虚表槽存**声明句柄**而非符号串 ⇒ 符号名由唯一的定名函数产出；CodeGen 只发句柄给出的符号 | 槽位认领与调用派发由同一份声明决定；带参虚函数的链接期错配从根上消失；单测断言"槽 → 声明 → 符号"三者同源 |
+| 7-5 ⬜ | 实例化步骤 5.8：克隆嵌套类（类模板里的嵌套类） | docs/learn/53 §7 边界 1 | 类模板实例化时把蓝图的嵌套类克隆进实例（字段/方法随形参替换），登记名 `Box_int::Inner` | `template<class T> struct Box { struct Inner { T v; }; };` rc=0 与 clang 对拍 |
 
 **原则**：每项独立成批、三绿（build 0 警告 / ctest 全绿 / logdiff 零差异）再进下一项；
 批次间互不阻塞，可与特性主线穿插。完成一条就在 BUGS.md 转 ✅ 并记回归用例。

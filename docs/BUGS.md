@@ -3159,3 +3159,119 @@ int main() {
 **教训**：**"X 不是 Y"不等于"X 什么都不是"** —— 一条判据只问了"是不是类型"，
 就把"是模板名"这一类合法输入漏在了门外。判据要覆盖**问题的完整分类**，
 而不是覆盖"最常见的那一类"。
+
+## B42. 构造函数符号在 CodeGen 硬拼：限定名类一撞就错配（链接期才炸）
+
+- severity: high ｜ status: fixed ｜ related: src/codegen/codegen.cpp, src/sema/semantic_analyzer.cpp, docs/learn/53, docs/specs/nested-class.spec.md
+
+**现象**
+
+```cpp
+namespace N {
+struct S { int v; S() { v = 3; } };
+}
+int main() {
+    N::S s;        // ★ 修前：undefined reference to 'N__S_N__S'（rc=1，链接期）
+    return s.v;
+}
+```
+
+**性质**：**编译期全绿、链接期炸** —— 语义判定写在两处且不一致：
+定义点（Sema `registerFunction`）给成员方法名追加"参数个数"后缀，
+调用点（CodeGen）硬拼 `类名_类名`。限定名类（命名空间 / 嵌套类）两边算出的
+符号不一样 ⇒ 链接期 undefined reference。★ 与 B10 / B20 / B22 **同款**——
+这是第四次为"名字的规则"付学费。
+
+**根因**：**"该调哪个构造函数"是语义信息，却让 CodeGen 自己按名字猜**。
+构造函数的定名是**有状态**的（同名多参追加 `_N` 后缀），
+调用点不可能只靠"类名 + 实参个数"重算出来。
+
+**修法**：照 clang `Sema::BuildCXXConstructExpr` —— **Sema 选定并回填**，
+CodeGen 只发被选中的符号：
+① `VarDeclStmt::ctorSymbol` / `NewExpr::ctorSymbol` 两个回填槽；
+② `inferNew` 与 `visit(VarDeclStmt)` 在选定构造函数时写入 `method->mangledName`；
+③ CodeGen 两处构造调用点优先用回填值，空则退回旧硬拼（兜底，不是主路径）。
+
+**回归**：tests/lang/test_basics_32（正例含 `A::B b1;` / `new A::B(6)`）；
+探针 `namespace N{struct S{S(){};};} N::S s;` 由 rc=1（链接错配）变 rc=0（取值 3）。
+
+**教训**：**"名字的规则"每多一处作用域就多付一次学费** ——
+本条与 B10/B20/B22 构成同一个模式：**同一处语义判断写了两份**。
+★ 修法不该是"再写一份对得上"（那只是把两份错成一致），
+而是**让规则的持有者唯一**（Sema 选，CodeGen 发）。
+
+## B43. 嵌套类完全不支持（合法程序被拒）
+
+- severity: medium ｜ status: fixed ｜ related: src/parse/parser.cpp, src/sema/semantic_analyzer.cpp, docs/learn/53, docs/specs/nested-class.spec.md
+
+**现象**
+
+```cpp
+struct A {
+    struct B { int v; };     // ★ 修前：Parse Error "Expected type name"（rc=1）
+};
+int main() { A::B b; return 0; }
+```
+
+**性质**：**拒收合法程序**（clang rc=0）。用户的原始提问
+（"class A 里面有个 B，然后外面还有个 class B，感觉有问题"）在
+Stage 1~3 批 1~3 之后仍未落地。
+
+**根因**：类作用域只实现了"当前类的一张**类型别名**表"
+（`ClassDecl::typeAliases`），**类作用域链**本身不存在 ⇒
+嵌套类既无处登记、也无处查找。
+
+**修法**（Stage 3 批 4，四处落点）：
+① **Parser**：`parseClassDecl` 的成员循环遇 `class`/`struct` ⇒ 递归解析，
+收进 `decl->nestedClasses`（不建第二张作用域表 —— 名字进的是当前类作用域）；
+② **Sema 登记**：`processClassDecl` 在**字段解析之前**把嵌套类前缀化
+（登记名 = 外层类登记名 + `::` + 裸名）并递归处理；
+③ **类作用域链**：`lookupVisibleType` 的 ① 分支扩成链
+（类自身 → 类内别名 → 嵌套类 → 沿 `ownerClassName` 外溯一级）；
+④ **查找顺序**：`resolveType` 改为 **类作用域 → 命名空间链 → 全局**
+（原为全局符号表优先 ⇒ 嵌套类 `A::B` 与全局 `B` 并存时，
+A 的成员函数里的裸名 `B` 被绑到**全局 B** —— 不报错，只是算错）。
+
+**回归**：tests/lang/test_basics_32（正例 12 个检查点，rc=0，与 clang 逐点一致）
++ tests/lang/test_basics_33（负例 rc=1，文案与 clang 逐字）
++ 单测 tests/unit/test_nested_class.cpp（`NestedClass.*` 7 例）。
+
+**教训**：**"作用域"不是一张表，是一条链** —— 把它当表实现，
+每加一层作用域（命名空间 → 类 → 嵌套类）就要重做一遍；
+把它当链实现，加一层只是链上多一环。
+★ 本条的真正价值不在"支持了嵌套类"，而在**它把三批（Stage 1/2/3）攒下的
+作用域基础设施一次收口**：可见性、作用域身份、活作用域链，三者合起来
+才让嵌套类成为自然结果，而不是一个孤立的特判。
+
+## B44. 类自身的名字在本类作用域内不可见（自引用指针被拒）
+
+- severity: medium ｜ status: fixed ｜ related: src/sema/semantic_analyzer.cpp, docs/learn/53
+
+**现象**
+
+```cpp
+struct A {
+    A* p;              // ★ 修前：unknown type name 'A'（rc=1）；修后：rc=0
+    int v;
+};
+int main() { A a; a.v = 1; return 0; }
+```
+
+**性质**：**拒收合法程序**（clang rc=0）。自引用指针是链表 / 树的
+**极常见**惯用法。
+
+**根因**：[basic.scope.class]/2.1 —— "类名被插入到本类作用域里" ——
+minicc 的类作用域查找只问"类里有没有叫这个名字的**类型别名**"
+（`typeAliases`），**没问"这个类自己叫什么"**。
+★ 判据只覆盖了问题的**一部分**（与 B41 同款根子：只问了"是不是类型"）。
+
+**修法**：`lookupVisibleType` 的类作用域链上，每个位置先问一句
+"可见名 == 名字吗"（可见名 = 登记名的最后一段：`N::A::B` 的可见名是 `B`）⇒ 命中即本类。
+★ 连带让"嵌套类在自己的作用域里能用裸名指自己"成立。
+
+**回归**：tests/lang/test_basics_32（正例含 `Node { Node* next; };`）
++ 单测 `NestedClass.ClassNameVisibleInOwnScope`。
+
+**教训**：**一条查找判据要覆盖名字在一个作用域里的【全部形态】** ——
+类型别名 / 嵌套类 / 类自身 / 枚举项 / static 成员，各是各的形态；
+少问一种，落在那种形态上的合法程序就会被拒。

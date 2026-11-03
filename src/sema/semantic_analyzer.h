@@ -543,6 +543,8 @@ private:
         TypePtr    raw;        // 命中的原始条目（类作用域别名 = 未解糖的目标；其余同 type）
         int        level = 0;  // 1=类作用域 2=命名空间 3=全局；0=未命中
         std::string scope;     // 命中的作用域（类名 / 命名空间名；全局为空）
+        bool isNestedClass = false;  // 命中的是【嵌套类】而非别名（日志分流用）
+        bool isSelfClass = false;    // 命中的是【类自身的名字】（[basic.scope.class]/2.1）
     };
     VisibleType lookupVisibleType(const std::string& name);
     // 这个名字声明过吗（任意 kind：变量/函数/类型）——裸名声明裁决的第二问。

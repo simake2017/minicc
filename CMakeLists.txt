@@ -94,6 +94,7 @@ add_executable(unit_tests
     tests/unit/test_parse_scope.cpp
     tests/unit/test_name_visibility.cpp
     tests/unit/test_scope_qualified_names.cpp
+    tests/unit/test_nested_class.cpp
     src/lex/preprocessor.cpp
     src/sema/sfinae.cpp
     src/ast/constant_folder.cpp

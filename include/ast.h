@@ -384,6 +384,14 @@ struct NewExpr : Expression {
     // 语义阶段实例化后把 className 改写为实例名，CodeGen 只看改写后的名字）。
     // 用 TemplateArg（tagged）：同时容纳类型实参与 NTTP 值实参。
     std::vector<TemplateArg> templateArgs;
+    // ── 构造函数的【符号】（Sema 选定并回填）──────────────────────────────
+    // ★ 为什么要有这一槽：`new A(...)` 要发 callq，而"调哪个构造、它的符号叫什么"
+    //   是【语义】信息（clang：Sema::BuildCXXConstructExpr 选好后，
+    //   CodeGen 只发它选中的那个符号）。此前 CodeGen 只能按"类名_类名[_N]"
+    //   自己拼 ⇒ 与定义点的定名规则是两份拷贝 ⇒ 限定名类（命名空间/嵌套类）
+    //   一撞就错配（B42）。
+    //   为空 = Sema 没选到（此时 CodeGen 退回旧约定；通常是错误路径）。
+    std::string            ctorSymbol;
     explicit NewExpr(std::string cls)
         : Expression(NodeKind::New), className(std::move(cls)) {}
 
@@ -896,6 +904,10 @@ struct StaticDataMember {
     bool        isConstexpr = false;
 };
 
+// 前置声明：ClassDecl 内部要持有嵌套类的 shared_ptr（见下方 nestedClasses）。
+struct ClassDecl;
+using ClassDeclPtr = std::shared_ptr<ClassDecl>;
+
 struct ClassDecl : Declaration {
     std::string              name;
     std::vector<std::string> baseClassNames; // 基类名列表（空 = 无继承；
@@ -949,6 +961,22 @@ struct ClassDecl : Declaration {
     // 调用点用同一套合一算法推导，只是实例化出来的函数带 ownerClassName。
     std::vector<std::shared_ptr<TemplateDecl>> memberTemplates;
 
+    // ── 嵌套类（[class.nest]）──────────────────────────────────────────────
+    // 类作用域里声明的类：`struct A { struct B { int v; }; };`
+    // 【它是什么】名字属于【类作用域】而非全局 ⇒ `A::B` 与 `::B` 是两个类型，
+    //   互不干扰（这正是"作用域即身份"在类层的体现）。
+    // 【理论】[class.nest]/1：嵌套类是其外层类的成员，没有特殊地位。
+    // 【对照 clang】clang/lib/Parse/ParseDeclCXX.cpp:Parser::ParseCXXMemberSpecification
+    //   的类体循环收 'class'/'struct' 关键字；嵌套类的 DeclContext 是外层
+    //   CXXRecordDecl（clang/lib/Sema/SemaDecl.cpp:Sema::ActOnTagStartDefinition
+    //   的 PushDeclContext），名字由 PushOnScopeChains 挂进外层类的作用域。
+    std::vector<ClassDeclPtr> nestedClasses;
+
+    // ── 外层类的【限定名】（"A" / "N::A"）；空 = 顶层类 ────────────────────
+    // ★ 它是【类作用域链】的一环：类作用域的名字查找沿它逐级外溯
+    //   （B 里的成员函数能看见 A 的成员 ⇒ 与 clang 的 DeclContext 父链同形）。
+    std::string ownerClassName;
+
     ClassDecl() : Declaration(NodeKind::Class) {}
 
     // 便捷访问：第一个基类（无继承时返回空串）
@@ -958,7 +986,6 @@ struct ClassDecl : Declaration {
 
     void accept(AstVisitor& v) override { v.visit(*this); }
 };
-using ClassDeclPtr = std::shared_ptr<ClassDecl>;
 
 // ─── 模板声明（代码蓝图） ─────────────────────────────────────────────────────
 // Parser 遇 `template<typename T> class MyPtr {...}` 或 `template<typename T>

@@ -316,8 +316,16 @@ TypePtr SemanticAnalyzer::findMemberType(const TypePtr& qual, const std::string&
     auto cit = m_classDecls.find(qual->name);
     if (cit == m_classDecls.end()) return nullptr;
     auto ait = cit->second->typeAliases.find(member);
-    if (ait == cit->second->typeAliases.end() || !ait->second) return nullptr;
-    return ait->second;
+    if (ait != cit->second->typeAliases.end() && ait->second) return ait->second;
+    // ★ 嵌套类（[class.nest]）：类作用域里的【类名】也是该类的成员类型 ——
+    //   `A::B` 里的 B 指 A 的嵌套类 B（与类内类型别名同属"类作用域里的类型名"）。
+    //   登记名是限定名（"A::B"）⇒ 按 "限定者::成员名" 配。
+    for (auto& nested : cit->second->nestedClasses) {
+        if (nested->name == qual->name + "::" + member && nested->classType) {
+            return nested->classType;
+        }
+    }
+    return nullptr;
 }
 
 TypePtr SemanticAnalyzer::resolveMemberType(const TypePtr& qualifier,
@@ -846,21 +854,57 @@ SemanticAnalyzer::VisibleType
 SemanticAnalyzer::lookupVisibleType(const std::string& name) {
     VisibleType hit;
 
-    // ── ① 当前类作用域：类内类型别名（using X = T; / typedef T X;）──
+    // ── ① 当前类作用域链：类作用域的成员（类型别名 + 嵌套类）──
     // ★ 走 m_classDecls 而不是符号表：类模板【实例】的别名只克隆进了实例类的
     //   typeAliases（template_instantiation.cpp:499），没进符号表 —— 走符号表会
     //   漏掉 `Box<int>::type` 在成员函数体内的非限定用法。
+    // ★ 沿【类作用域链】逐级外溯（当前类 → 外层类 → …）：嵌套类 B 的成员函数
+    //   能看见外层类 A 的成员 —— 与 clang 的 DeclContext 父链同形
+    //   （clang/lib/Sema/SemaDecl.cpp:Sema::PushDeclContext 逐层建父链）。
+    //   链的每一环由 ClassDecl::ownerClassName 给出（Sema 前缀化时写入）。
     if (!m_currentClassName.empty()) {
-        auto cit = m_classDecls.find(m_currentClassName);
-        if (cit != m_classDecls.end()) {
+        std::string cls = m_currentClassName;
+        while (!cls.empty()) {
+            auto cit = m_classDecls.find(cls);
+            if (cit == m_classDecls.end()) break;
+            // ①0 类自身的名字在【本类作用域】内可见（[basic.scope.class]/2.1：
+            //   "the name of the class is inserted into the scope of the class itself"）——
+            //   `struct A { A* p; };` 里的 A 指本类（自引用指针，常见惯用法）。
+            //   类的【可见名】= 登记名的最后一段（"N::A" ⇒ "A"，"A::B" ⇒ "B"）。
+            //   ★ 这一条同时让"嵌套类在自己的作用域里能用裸名指自己"成立。
+            const size_t selfSep = cls.rfind("::");
+            const std::string selfVisible = (selfSep == std::string::npos)
+                ? cls : cls.substr(selfSep + 2);
+            if (selfVisible == name && cit->second->classType) {
+                hit.type = cit->second->classType;
+                hit.level = 1;
+                hit.scope = cls;
+                hit.isSelfClass = true;
+                return hit;
+            }
+            // ①a 类内类型别名（using X = T; / typedef T X;）
             auto ait = cit->second->typeAliases.find(name);
             if (ait != cit->second->typeAliases.end() && ait->second) {
                 hit.type = resolveType(ait->second);
                 hit.raw = ait->second;      // 未解糖的别名目标（日志逐字用）
                 hit.level = 1;
-                hit.scope = m_currentClassName;
+                hit.scope = cls;
                 return hit;
             }
+            // ①b 嵌套类（[class.nest]）：类作用域里的【类名】也是可见的类型 ——
+            //   `A` 的成员函数里写 `B b;` 里的 B 指 A::B，不是全局 B。
+            //   嵌套类的登记名是【限定名】（"A::B"）⇒ 按 "本类限定名::名字" 配。
+            const std::string qualified = cls + "::" + name;
+            for (auto& nested : cit->second->nestedClasses) {
+                if (nested->name == qualified && nested->classType) {
+                    hit.type = nested->classType;
+                    hit.level = 1;
+                    hit.scope = cls;
+                    hit.isNestedClass = true;
+                    return hit;
+                }
+            }
+            cls = cit->second->ownerClassName;   // 沿类作用域链外溯一级
         }
     }
 
@@ -1206,6 +1250,42 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
                               isAlias ? "alias" : "class",
                               type->name), SourceLocation{});
         }
+        // ── ★ 名字查找：由内向外（[basic.lookup.unqual]）—— 类作用域 → 命名空间链 → 全局 ──
+        // ★★ 类作用域/命名空间链必须【先于】全局符号表：
+        //   嵌套类 A::B 与全局 B 并存时，A 的成员函数里的 `B` 必须是 A::B（clang 同款）。
+        //   此前全局符号表先命中 ⇒ 静默绑到全局 B —— 不报错，只是算错
+        //   （"No member 'v' in class 'B'"，B 指全局那个）。
+        //   可见性判据收敛到 lookupVisibleType 一处（红线 3 判据单点）。
+        VisibleType hit = lookupVisibleType(type->name);
+        if (hit.level == 1) {
+            if (hit.isSelfClass) {
+                // 类自身的名字（[basic.scope.class]/2.1）：`struct A { A* p; };`
+                std::cout << std::format(
+                    "  [sema:self] {} 在类 '{}' 作用域内 ⇒ {}（类自身的名字在本类作用域内可见）\n",
+                    type->name, hit.scope, hit.type->toString());
+            } else if (hit.isNestedClass) {
+                // 嵌套类命中（[class.nest]）：类作用域里的类名，登记名带作用域
+                std::cout << std::format(
+                    "  [sema:nested] {} 在类 '{}' 作用域内 ⇒ {}\n",
+                    type->name, hit.scope, hit.type->toString());
+            } else {
+                // 类作用域别名命中：打印【未解糖】的别名目标（既有日志行逐字不变）
+                std::cout << std::format(
+                    "  [sema:alias] {} 在类 '{}' 作用域内 ⇒ {}\n",
+                    type->name, hit.scope,
+                    hit.raw ? hit.raw->toString() : hit.type->toString());
+            }
+            return hit.type;
+        }
+        if (hit.level == 2) {
+            // 命名空间命中：沿用既有日志行（逐字不变，基线契约）
+            std::cout << std::format(
+                "  [resolve] '{}' 在命名空间 '{}' 内 ⇒ {}\n",
+                type->name, hit.scope, hit.scope + "::" + type->name);
+            return hit.type;
+        }
+
+        // 全局：符号表的作用域链（函数/块/全局）
         Symbol* sym = m_symbolTable.lookup(type->name);
         // Parser 遇到 `Dog*` 这类书写名时会临时 new 一个 Class("Dog")，其 classLayout
         // 是空的；真正带字段/偏移/虚表布局的类型在 processClassDecl 阶段已登记进符号表
@@ -1214,6 +1294,29 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
         if (sym && sym->kind == SymbolKind::Type && sym->type &&
             sym->type != type) { // 指针不相同说明指向的不是同一个对象
             return sym->type;
+        }
+        if (hit.type) return hit.type;   // level 3 = 全局（lookupVisibleType 的兜底）
+
+        // ── 限定名类型 `Q::member`（嵌套类 / 类内类型别名）──
+        //   限定者先解析成【类型】，再在它的成员表里查成员类型（findMemberType）。
+        //   查不到 ⇒ clang 的 "no type named 'member' in 'Q'"（逐字对齐）。
+        //   ★ 放在符号表查找【之后】：登记名（"A::B"）已在符号表里，走符号表更快；
+        //     只有"限定名存在但成员不存在"才落到这里 —— 诊断因此指向根因。
+        if (auto sep = type->name.rfind("::"); sep != std::string::npos) {
+            const std::string qualifier = type->name.substr(0, sep);
+            const std::string member    = type->name.substr(sep + 2);
+            VisibleType q = lookupVisibleType(qualifier);
+            if (q.type && q.type->isClass()) {
+                TypePtr m = findMemberType(q.type, member);
+                if (m) {
+                    TypePtr target = resolveType(m);
+                    std::cout << std::format("  [sema:nested] {}::{} ⇒ {}\n",
+                        qualifier, member, target ? target->toString() : "?");
+                    return target;
+                }
+                error(std::format("no type named '{}' in '{}'", member, qualifier),
+                      SourceLocation{});
+            }
         }
 
         // ── ★ 兜底：这个名字【从未被声明过】──
@@ -1224,25 +1327,6 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
         //   能【静默编译】。对照 clang：error: unknown type name 'Undeclared'
         // 注：Parser 只为【书写名】建 Class 节点；模板形参走 TemplateParam 节点、模板 id
         //   走上面的实例化分支，都不会落到这里。
-        // ★★ B37：这段三段手写兜底（全局 → 命名空间一层 → 当前类）收敛到
-        //   lookupVisibleType 一处（红线 3 判据单点），且命名空间改为【逐级外层】
-        //   （clang 的 DeclContext 链语义）。裸名声明 `S;` 的可见性裁决也走同一处。
-        VisibleType hit = lookupVisibleType(type->name);
-        if (hit.type) {
-            if (hit.level == 2) {
-                // 命名空间命中：沿用既有日志行（逐字不变，基线契约）
-                std::cout << std::format(
-                    "  [resolve] '{}' 在命名空间 '{}' 内 ⇒ {}\n",
-                    type->name, hit.scope, hit.scope + "::" + type->name);
-            } else if (hit.level == 1) {
-                // 类作用域别名命中：打印【未解糖】的别名目标（既有日志行逐字不变）
-                std::cout << std::format(
-                    "  [sema:alias] {} 在类 '{}' 作用域内 ⇒ {}\n",
-                    type->name, hit.scope,
-                    hit.raw ? hit.raw->toString() : hit.type->toString());
-            }
-            return hit.type;
-        }
         error(std::format(
             "unknown type name '{}' —— 该名字没有作为类/类型被声明过。"
             "（语句层的声明/表达式歧义（`a < b > c;`、裸 `S;`）由语义期的"
@@ -1462,6 +1546,19 @@ std::string SemanticAnalyzer::inferIndent() const {
 // │ 日志  （无）—— 本函数只做分发，活交给各自的 processXxx
 // │ 输出  无返回值；就地改动声明节点，并写进 m_classTypes / m_symbolTable
 // └────────────────────────────────────────────────────────────────────────────
+// ─── forEachClassMethod：类的【方法 + 嵌套类的方法】递归走查 ───────────────────
+// ★ 嵌套类（[class.nest]）的方法不在外层类的 methods 表里 —— 不递归进去 ⇒
+//   Pass 2 不注册、Pass 3 不分析 ⇒ CodeGen 从没收到那些方法 ⇒ 链接期
+//   undefined reference（与命名空间递归同款：DeclContext 树本身就是递归的）。
+// 对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::PushDeclContext 把嵌套类的
+//   DeclContext 设成外层类 ⇒ 遍历 DeclContext 树自然覆盖到。
+static void forEachClassMethod(const ClassDeclPtr& cls,
+                               const std::function<void(FuncDeclPtr)>& action) {
+    if (!cls) return;
+    for (auto& method : cls->methods) action(method);
+    for (auto& nested : cls->nestedClasses) forEachClassMethod(nested, action);
+}
+
 // ─── forEachFunctionDecl：对每个函数声明执行 action ──────────────────────────
 // 顶层函数、类内方法，并【递归进命名空间】—— 命名空间里的类与函数不在
 //   unit.declarations 顶层，扁平遍历会整个漏掉它们的方法（症状：Sema 侧一切正常，
@@ -1478,7 +1575,7 @@ void SemanticAnalyzer::forEachFunctionDecl(
                 break;
             case NodeKind::Class: {
                 auto cls = std::static_pointer_cast<ClassDecl>(decl);
-                for (auto& method : cls->methods) action(method);
+                forEachClassMethod(cls, action);
                 break;
             }
             case NodeKind::Namespace: {
@@ -2074,6 +2171,19 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
     // 的话，类体内的别名一律查不到（`Int a;` 报 unknown type name）。
     m_classDecls[decl->name] = decl;
 
+    // ── 嵌套类（[class.nest]）：先登记、再处理本类的字段/方法 ──
+    // ★ 位置即语义：嵌套类的【名字】在本类作用域内可见（`struct A { struct B{};
+    //   B b; };` 里的 B 指 A::B），所以它必须在本类字段类型解析【之前】完成登记 ——
+    //   否则 `B b;` 报 unknown type name 'B'（字段类型解析时查不到尚未登记的嵌套类）。
+    // ★ 名字前缀化：嵌套类的登记名 = 外层类的登记名 + "::" + 裸名（"A::B"）——
+    //   作用域是身份的一部分（learn/49）：登记名、实例名、缓存键、mangling 全用它。
+    //   外层类名带命名空间时是 "N::A::B"（逐层前缀，与 B38 的命名空间前缀化同一条规则）。
+    for (auto& nested : decl->nestedClasses) {
+        nested->ownerClassName = decl->name;      // 类作用域链的一环（外溯用）
+        nested->name = decl->name + "::" + nested->name;
+        processClassDecl(nested);
+    }
+
     // ── 处理继承（多继承：[class.mi] Itanium 主基类优化模型）──
     // 第一个多态基类 = 主基类（共享主表 + 字段无限定），其余多态基类 = 次基类（独立次表
     // entries，字段带 "BaseName." 前缀）。非多态基类的字段也带前缀（避免多基类同名冲突）。
@@ -2606,6 +2716,11 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
         }
     }
 
+    // ── 嵌套类（[class.nest]）已在【本类登记之后、字段解析之前】处理完毕 ──
+    // （见本函数开头：名字前缀化 + 递归 processClassDecl。）放在那里的理由：
+    //   ① 名字在本类作用域内必须【先】可见 —— 否则 `struct A { struct B{}; B b; };`
+    //      的字段类型解析查不到尚未登记的 B；
+    //   ② 嵌套类里可以引用外层类（`struct B { A* p; };`）—— 此时外层类已登记。
     m_currentClassName = savedClassScope;
 
     // ── 打印内存布局 ──
@@ -2829,10 +2944,17 @@ uint32_t SemanticAnalyzer::alignOf(const TypePtr& type) {
 // │       这正是 inferCall 必须先用"对象类 → 方法表"查成员调用的原因。
 // └────────────────────────────────────────────────────────────────────────────
 void SemanticAnalyzer::registerFunction(FuncDeclPtr decl) {
+    // ★ 类作用域对【签名】同样可见（[basic.lookup.unqual]）：成员函数的返回类型 /
+    //   形参类型可以写外层类的嵌套类或类内别名 —— `struct A { struct B{}; B make(); };`
+    //   的返回类型 B 指 A::B。Pass 2 解析签名时必须带上类作用域上下文，
+    //   否则这里解析不出 B（Pass 3 的函数体解析已经带上了，见 analyzeFunctionBody）。
+    const std::string savedClassScope = m_currentClassName;
+    m_currentClassName = decl->ownerClassName;
     decl->returnType = resolveType(decl->returnType);
     for (auto& param : decl->parameters) {
         param.type = resolveType(param.type);
     }
+    m_currentClassName = savedClassScope;
 
     std::string fullName = decl->ownerClassName.empty()
         ? decl->name
@@ -3520,6 +3642,25 @@ void SemanticAnalyzer::visit(VarDeclStmt& decl) {
         std::cout << std::format("  [ctor] ★ {} : {}({} 个实参) ⇒ 选定构造函数符号 {}\n",
             decl.name, type->toString(), decl.ctorArgs.size(), decl.ctorSymbol);
     } else {
+        // ── 零参构造 `A a;`：默认构造函数的符号由 Sema 选定并回填 ──
+        // ★ 调用点【不再硬拼】"类名_类名"：那是对命名规则的第二份副本 ——
+        //   B10 / B20 / B22 三次栽在同一个坑上（调用点拼的名字 ≠ 定义点定的名），
+        //   这里就是第 4 次的现场：`namespace N{struct S{S();}}` 的显式构造函数
+        //   名字是裸名 "S" ⇒ 定义点 "N::S_S"，而调用点硬拼 "N::S_N::S" ⇒ 链接期炸。
+        //   候选唯一（形参个数为 0 的构造只有一个）⇒ 无需重载决议，直接取它的定名。
+        //   取的是【定义点自己定的名】（mangledName，Pass 2 由 memberMethodSymbolName
+        //   定下）⇒ 两端口径天然同源，不存在"写两份"的问题。
+        if (bareForClass(type)->isClass()) {
+            auto cit = m_classDecls.find(bareForClass(type)->name);
+            if (cit != m_classDecls.end()) {
+                for (auto& method : cit->second->methods) {
+                    if (method->kind != NodeKind::Constructor) continue;
+                    if (!method->parameters.empty()) continue;
+                    decl.ctorSymbol = method->mangledName;
+                    break;
+                }
+            }
+        }
         std::cout << std::format("  [var decl] {} : {} (no initializer)\n",
             decl.name, type->toString());
     }
@@ -4165,6 +4306,13 @@ TypePtr SemanticAnalyzer::inferVar(VarExpr& expr) {
                 auto it = m_classDecls.find(cur);
                 if (it == m_classDecls.end()) continue;
                 for (auto& bn : it->second->baseClassNames) work.push_back(bn);
+                // ★ 外层类（类作用域链的上一环，嵌套类用）：嵌套类是外层类的成员，
+                //   它的作用域包含外层类的作用域 ⇒ 嵌套类里能看见外层类的 static 成员
+                //   （[class.nest]/1 + [class.member.lookup]）。与基类链【并列】推进 ——
+                //   两条链都是"名字查找要走的路"，但含义不同（继承 vs 嵌套）。
+                if (!it->second->ownerClassName.empty()) {
+                    work.push_back(it->second->ownerClassName);
+                }
             }
         }
     }
@@ -4370,6 +4518,28 @@ TypePtr SemanticAnalyzer::inferCall(CallExpr& expr) {
         m_inferDepth++;
         inferType(mem);
         m_inferDepth--;
+    }
+
+    // ── 限定名调用 `Q::f(...)`：限定者按【可见性】解析（[basic.lookup.qual]）──
+    //   嵌套类的【可见名】与【登记名】不同：类 A 里的嵌套类 B 登记名是 "A::B"，
+    //   但在 A 的成员函数里写作 `B::sm()` ⇒ 要查的键是 "A::B::sm"，
+    //   按源码名 "B::sm" 查 m_functionMap 必然落空（键是登记名）。
+    //   判据单点：限定者先当【类型名】解析（lookupVisibleType），取它的登记名。
+    //   ★ 全局类 "C::sm()" 走同一段但不改写（登记名 == 可见名）⇒ 零漂移。
+    if (auto sep = funcName.rfind("::"); sep != std::string::npos) {
+        const std::string qualifier = funcName.substr(0, sep);
+        const std::string member    = funcName.substr(sep + 2);
+        VisibleType qt = lookupVisibleType(qualifier);
+        if (qt.type && qt.type->isClass()) {
+            const std::string registered = qt.type->name + "::" + member;
+            if (registered != funcName) {
+                std::cout << std::format(
+                    "{}[call] 限定名 '{}' ⇒ 登记名 '{}'（嵌套类的可见名 ≠ 登记名）\n",
+                    inferIndent(), funcName, registered);
+                funcName = registered;
+                if (calleeVar) calleeVar->name = registered;
+            }
+        }
     }
 
     // ── 主线 H 内建：std::declval<T>() → T&& ──────────────────────────────
@@ -6238,6 +6408,11 @@ TypePtr SemanticAnalyzer::inferNew(NewExpr& expr) {
                 }
                 if (match) {
                     foundMatch = true;
+                    // ★ 回填构造函数的符号（clang：BuildCXXConstructExpr 选好后，
+                    //   CodeGen 只发它选中的那个符号）—— CodeGen 此前自己按
+                    //   "类名_类名[_N]" 拼 ⇒ 与定义点的定名规则是两份拷贝 ⇒
+                    //   限定名类（命名空间/嵌套类）一撞就错配（B42）。
+                    expr.ctorSymbol = method->mangledName;
                     break;
                 }
             }
