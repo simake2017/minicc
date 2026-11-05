@@ -63,6 +63,8 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B48](#b48-成员赋值右值求值踩掉对象地址写字段写到了错的地址静默算错) | 成员赋值把对象地址暂存 `%rcx`，**右值求值会踩 %rcx** ⇒ `movl %eax,0(%rcx)` 写到错的地址（`s.v = s.v + 4` ⇒ SIGSEGV） | `src/codegen/codegen.cpp` `visit(AssignStmt)` 成员分支 | 中（段错误；rc 恰是合法地址时静默踩内存） | ✅ 已修 |
 | [B49](#b49-按值返回类对象初始化式被丢弃对象退化成默认构造静默算错) | `S x = f();` 的初始化式被丢弃 ⇒ 对象按默认构造生成 ⇒ `x.v` 恒 0（clang 7 / minicc 0） | `src/sema/semantic_analyzer.cpp` 变量声明处理 + `src/codegen/codegen.cpp` sret 形态 | **大**（类对象按值返回全族；静默算错） | ✅ 已修 |
 | [B50](#b50-全局类对象存储只按-8-字节分配--类值的地址约定未在全局路径生效段错误未修) | 全局类对象按 `.quad 0` 只分 8 字节 + 全局路径按标量加载（拿到字段值而非地址）⇒ `g.v = 11` SIGSEGV | `src/codegen/codegen.cpp` 全局变量发射 + `visit(VarExpr)` | **大**（`g.v = 11` 这种基本写法就崩） | ⬜ 未修 |
+| [B51](#b51-模板id成员-语句被无声明符声明分支整个吞掉-静默接受非法程序未修) | `模板id::成员;` 只查"有模板 id 语法"不查链尾名字种类 ⇒ 静态成员语句被 EmptyStmt 吞、`Box<int>::typo;` **静默接受**（clang 报 no member named） | `src/parse/parser.cpp` B16 分支（~2427） | 中（静默接受非法程序；表达式被吞） | ⬜ 未修 |
+| [B52](#b52-macos-本机端到端验证被堵apple-as-拒收汇编注释里的全角标点未修) | Apple as（clang-1700）拒收汇编注释的全角标点 ⇒ macOS 端到端必败；ctest 全单元测试不经过 as 所以一直绿 | `src/driver/main.cpp` 汇编步骤 | 低（只影响 macOS 本机验证） | ⬜ 未修 |
 
 > ★ **索引欠账（历史遗留）**：B37~B46 六条**未补进上表**（条目正文都在，
 > 只是索引没跟上）—— 本表自 B36 之后断档，B47 是补上的第一行新条目。
@@ -3593,3 +3595,64 @@ int main() { g.v = 11; return pick().v; }   // ★ clang rc=11；minicc SIGSEGV
 **教训**：★ **一条约定要覆盖【所有】载体**：局部类对象按地址、全局类对象按值
 ⇒ 同一个"类值"有两套表示。约定写在**产生值的地方**（`visit(VarExpr)`）
 才不会有第二份。
+
+---
+
+## B51. `模板id::成员;` 语句被无声明符声明分支整个吞掉（★ 静默接受非法程序，未修）
+
+- severity: medium ｜ status: open ｜ related: `src/parse/parser.cpp` B16 分支（~2427-2431）
+
+**来源**：代码审查语句层前瞻的 B16 分支（"`模板id;` ⇒ 无声明符声明"）时确认的判据缺一半——
+**裸名路径（B37）已经问过"是值吗"，嵌套名路径没问**。
+
+**复现**
+
+```cpp
+template<class T> struct Box { static const int count = 7; using type = T; };
+int main() {
+    Box<int>::count;      // 静态【数据】成员访问——是表达式语句
+    return 0;
+}
+```
+
+| 程序 | minicc | clang++-18 |
+|---|---|---|
+| `Box<int>::count;` | rc=0，但 parse 日志显示被当成**类型**解析（`nested name: Box<int>::count` → `final type`）→ B16 分支判为无声明符声明 → **EmptyStmt 整个吞掉**，表达式语句被静默消除 | rc=0（真按表达式处理） |
+| `Box<int>::typo;`（拼错成员名） | **rc=0 静默接受非法程序** | ❌ `no member named 'typo' in 'Box<int>'` |
+
+**性质**：`Box<int>::后面跟任何名字;` 都被吞——B16 分支**不验证链尾名字是否真是类型成员**。
+静态成员读取无副作用所以第一条"恰好没算错"，第二条（typo）是实锤危害。
+非模板限定名 `S::typo;` 同病（落到裸名分支后查的也是末段名，类内 static 成员名若未
+进作用域表则 Value 位查不到，同样被吞）。
+
+**根因**：判据只查"语法上有模板 id"（`hasTemplIdSyntax`），缺"链尾成员名是类型还是值"
+这另一半。parseType 的 `::` 循环把 `Box<int>::count` 无条件建成嵌套**类型**名
+（它无法知道 count 是别名还是静态数据成员），而 B16 分支对这个形态照单全收。
+
+**修法方向**（Stage 3 之后更顺）：嵌套名的链尾同样查 `nameBits(末段) & ScopeBit::Value`
+——活作用域表已有 Value 位（`include/name_scope.h`），类体在语句之前解析、
+static 成员声明时应已 `declareName`（★ 需顺带确认/补上登记）。挂了值位 ⇒ 不是声明
+⇒ 回卷走表达式分支，由 Sema 的限定名静态成员路径（B21/B33）接住。
+这与 B37 裸名分支"不是值 ⇒ 才按声明"的判据**对称**——同一份语义判据的两条消费路径
+不应一有一无。
+
+**状态**：⬜ 未修
+
+---
+
+## B52. macOS 本机端到端验证被堵：Apple `as` 拒收汇编注释里的全角标点（未修）
+
+- severity: low（只影响 macOS 本机验证，不影响 Linux 主线）｜ status: open ｜ related: `src/driver/main.cpp` 汇编步骤（`as -o …`）
+
+**现象**：macOS 上 `minicc` 借系统 `as`（/usr/bin/as，clang-1700）汇编时，
+**任何程序**（含 `int main(){return 0;}`）都在含全角标点（`，` `（` `）`）的
+注释行报 `unexpected token / invalid character`，汇编步必败。
+ctest 339 个测试全绿掩盖了它——它们全是单元测试，**不经过 `as`**；
+minicc 集成测试只在 Linux（logdiff 基线）跑。
+⇒ macOS 本机只能 `-S` 看汇编/日志，无法端到端验证。
+
+**修法方向**（三选一）：① CodeGen 注释只留 ASCII（改动会漂 Linux 基线，需重刷）；
+② 汇编注释里的非 ASCII 字符做转义/剥离（发射前过滤，不改源码注释）；
+③ 驱动改用 `clang -c` 当汇编器（注释语义由 clang 前端消化）。
+
+**状态**：⬜ 未修
