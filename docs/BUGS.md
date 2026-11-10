@@ -65,6 +65,7 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B50](#b50-全局类对象存储只按-8-字节分配--类值的地址约定未在全局路径生效段错误未修) | 全局类对象按 `.quad 0` 只分 8 字节 + 全局路径按标量加载（拿到字段值而非地址）⇒ `g.v = 11` SIGSEGV | `src/codegen/codegen.cpp` 全局变量发射 + `visit(VarExpr)` | **大**（`g.v = 11` 这种基本写法就崩） | ⬜ 未修 |
 | [B51](#b51-模板id成员-语句被无声明符声明分支整个吞掉-静默接受非法程序未修) | `模板id::成员;` 只查"有模板 id 语法"不查链尾名字种类 ⇒ 静态成员语句被 EmptyStmt 吞、`Box<int>::typo;` **静默接受**（clang 报 no member named） | `src/parse/parser.cpp` B16 分支（~2427） | 中（静默接受非法程序；表达式被吞） | ⬜ 未修 |
 | [B52](#b52-macos-本机端到端验证被堵apple-as-拒收汇编注释里的全角标点未修) | Apple as（clang-1700）拒收汇编注释的全角标点 ⇒ macOS 端到端必败；ctest 全单元测试不经过 as 所以一直绿 | `src/driver/main.cpp` 汇编步骤 | 低（只影响 macOS 本机验证） | ⬜ 未修 |
+| [B53](#b53-非静态数据成员的类内初始化式nsdmi未实现int-x--5-类内被拒未修) | NSDMI（`int x = 5;` 类内成员默认值，[class.mem]）未实现 ⇒ 拒收合法程序；clang Parser.h 自身 19 处使用、llvm 千行级 | `src/parse/parser.cpp` 类体字段分支 | 中（拒收合法程序；修法三件套机制现成） | ⬜ 未修 |
 
 > ★ **索引欠账（历史遗留）**：B37~B46 六条**未补进上表**（条目正文都在，
 > 只是索引没跟上）—— 本表自 B36 之后断档，B47 是补上的第一行新条目。
@@ -3654,5 +3655,47 @@ minicc 集成测试只在 Linux（logdiff 基线）跑。
 **修法方向**（三选一）：① CodeGen 注释只留 ASCII（改动会漂 Linux 基线，需重刷）；
 ② 汇编注释里的非 ASCII 字符做转义/剥离（发射前过滤，不改源码注释）；
 ③ 驱动改用 `clang -c` 当汇编器（注释语义由 clang 前端消化）。
+
+**状态**：⬜ 未修
+
+---
+
+## B53. 非静态数据成员的类内初始化式（NSDMI）未实现：`int x = 5;` 类内被拒（未修）
+
+- severity: medium（拒收合法程序）｜ status: open ｜ related: `src/parse/parser.cpp` 类体字段分支（~2150），docs/learn/08 ctor 主线
+
+**来源**：代码审查类体循环字段分支（字段文法收窄为 `type name [array] ;`）时确认。
+静态数据成员分支有 `= expr`（[class.static.data]/3，const 整型族类内初值，B33），
+**非 static 字段没有**——C++11 NSDMI（non-static data member initializer，
+[class.mem]）整条缺失。
+
+**复现**
+
+```cpp
+struct S { int x = 5; };           // C++11 起标准写法：成员默认值
+int main() { S s; return s.x; }
+```
+
+| | minicc | clang++-18 |
+|---|---|---|
+| 上例 | ❌ rc=1 `[Parse Error] 1:18 at '=': Expected ';' after field declaration` | ✅ rc=0，运行 exit=5 |
+| `int x, y;`（多声明符）/ `int : 3;`（位域） | ❌ 同一 expect(Semicolon) 一并拒收 | ✅ |
+
+**实际使用极广**：C++11 后给成员设默认值的标准写法。本项目最常引用的对照文件
+`clang/include/clang/Parse/Parser.h` 就有 **19 处**（`bool OpenMPDirectiveParsing = false;`
+这类）；clang/lib/Parse + llvm/ADT 粗略统计 **1200+ 行**同风格。
+未做的原因不是复杂：① ctor 批次（learn/08）聚焦显式初始化列表，之后主线在模板/
+消歧，排期没轮到；② ministl 双栖桩刻意避开 NSDMI ⇒ 飞轮没传来痛感（对比
+initializer_list / throw 是 ministl 真缺口才排上的）。
+
+**修法方向**（中等批次，三件套，机制全部现成）：
+1. Parser：`FieldInfo`/`FieldDecl` 加 `initializer` 槽——`match(Assign) + parseExpression()`
+   抄 static 分支（~2141）即可；数组成员需补 `{}` 形态；
+2. Sema：ctor 成员初始化序列合成加回退规则——"显式初始化列表提到该成员 ⇒ 覆盖；
+   没提到 ⇒ 用 NSDMI"（[class.mem] 语义的另一半），合成默认构造同样走此路；
+3. CodeGen：零新机制——初始化列表发射路径照走，只是初值**来源**多一种。
+边角需小心：声明序约束、数组/引用成员的 NSDMI 形态。
+建议与"多声明符 `int x, y;` + 函数默认实参"合一个 **ctor 增强批**（同属"声明式
+默认值"家族），已登记 ROADMAP §0.3 降级区。
 
 **状态**：⬜ 未修
