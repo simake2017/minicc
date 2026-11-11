@@ -2358,7 +2358,7 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
             }
             // noPrimary：没有【动态】主基类可摆（anyPoly 假）而本类自身多态
             //   ⇒ vptr 自己占 offset 0、基类子对象从 8 起（BUGS.md B11 的真 miscompile）
-            bool noPrimary = (!anyPoly && selfPoly);
+            bool noPrimary = (!anyPoly && selfPoly); // 如果是true 表示没有主机类，但是自己有多态
 
             for (size_t i = 0; i < classType->classLayout.bases.size(); ++i)
                 classType->classLayout.bases[i].isPrimary = (!noPrimary && i == primaryIdx);
