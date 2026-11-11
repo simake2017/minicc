@@ -7,9 +7,6 @@
 > 非虚继承的菱形在标准下合法；该文件已改写为私有继承错误用例）。
 > 构建：`cmake -S . -B build-linux -DCMAKE_CXX_COMPILER=clang++-18 && cmake --build build-linux -j`
 >
-> ★ **2026-11-03**：§0.1 批 0-1（**按值返回 + 拷贝省略**）已完成
-> （docs/learn/57 + BUGS.md B48/B49；连带登记 B50 全局类对象缺口）
-> ⇒ §0.1 批 0 的三项全部收口，**下一批 = 批 0-3（B50）**，之后按 §0.2 进主线 K 六项。
 >
 > ★ **2026-11-02 重排**：本文件原来按"批次先后"排列（旧的在前面），
 > 下个会话读到顶只看到一堆 ✅ 的已完成主线，看不出**下一批该做什么**。
@@ -71,7 +68,6 @@ clang 的措辞是 `partial specialization of alias templates is not permitted` 
 | ④ [stmt.ambig] 完整裁决 | learn/36 §7 | 语句层只判了"声明 vs 表达式"，完整四选一（表达式/声明/标签/歧义）未做 |
 | ⑥ 后置 const 的重载区分 + const 正确性检查 | learn/36 §7 | 后置 const 不参与重载；`const a.v = 5` 宽松放行（clang 拒收）⇒ **宽方向** |
 | 类外成员定义 `int C::f() const {}` | learn/36 | 类外定义只做了 static 成员（`int C::g = 1;`），方法没有 |
-| **NSDMI 类内成员初值**（`int x = 5;`）+ 多声明符 `int x, y;`（**ctor 增强批**，BUGS.md B53） | learn/08 延伸 | 字段文法收窄为 `type name [array] ;`；clang Parser.h 自身 19 处使用、llvm 千行级 ⇒ 不是冷门语法 |
 | 函数默认实参 | learn/20 | `void f(int x = 0)` 不解析 ⇒ enable_if 惯用法写不出 |
 | 函数形参里的 decltype 依赖表达式 | learn/20 | `f(T t, decltype(t.begin())* g)` 推导期不绑定 t |
 | 限定名调用成员函数 `d.Base::f(2)` | learn/36 §7 | B21 只管数据成员 |
@@ -86,6 +82,7 @@ clang 的措辞是 `partial specialization of alias templates is not permitted` 
 | `T[N]` 数组类型偏特化 | 主线 E 延伸 | 需给 `TypeKind::Array` 开偏特化路径 |
 | 字面量溢出自动升格 / `\x` `\u` 转义 / 非整型 NTTP | learn/35 §5 | — |
 | 纯右值 CTAD / 拷贝推导 / 聚合推导 / 指引参与重载决议 / CTAD 用于 `new` | learn/28 §5 | — |
+| 全局限定名 `::X`（`::g` / `::N::S`） | B54 | Parser 在表达式/类型位置直接拒收 `::`（"Unexpected token '::'"）；即使放行，Scope 表的空段分支也只是**跳过**、不把路径落到全局层（`parse_scope.cpp:167` 注释与实现不符）⇒ 要修得**两处一起**改 |
 
 ### 0.4 暂不开新战线（明写出来，免得"顺手加个功能"）
 

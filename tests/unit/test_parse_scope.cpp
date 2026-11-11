@@ -6,6 +6,8 @@
 //   · 遮蔽：内层同名遮蔽外层（首命中即返回）；
 //   · 可见性：命名空间里的类型在命名空间外【不可见】（裸名查不到）；
 //   · 限定名：限定者逐段定位，末段只在限定者那层查（不外溢到全局）；
+//   · 逐段绑定：同名两段（"Ns::Ns::A"）靠【路径】区分，不靠名字 ——
+//     第 1 段是无限定查找（内→外首命中即止），后续段被限定在上一段那层；
 //   · 持久：离开命名空间/类之后，`N::T` 仍要查得到（clang 的 DeclContext 持久）；
 //   · 透明：模板形参作用域对【名字登记】透明（模板名属外层，形参名属形参域）；
 //   · 局部：函数/块里的局部类不持久（`f::Local` 不是合法限定名）。
@@ -221,6 +223,44 @@ TEST(ParseScopeRetirement, NamespaceScopeStackIsRestoredOnPop) {
     EXPECT_EQ(t.classifyQualified("N1::S1"), ScopeBit::Type);
     EXPECT_EQ(t.classifyQualified("N1::N2::S1"), 0u);   // N2 里没有 S1
     EXPECT_EQ(t.classify("S1"), 0u);                     // 裸名都在 N1 之外不可见
+}
+
+// ── 限定名逐段绑定：同名两段靠【路径】区分，不靠名字 ─────────────────────────
+
+TEST(ParseScopeChain, RepeatedQualifierSegmentsBindByPath) {
+    // ★ 第 1 段是【无限定查找】（内→外，首命中即止）；第 2 段被限定在第 1 段
+    //   落到的那【一层】里查（不外溢）⇒ 同一句 "Ns::Ns::A" 在不同位置绑到
+    //   不同实体：靠的是路径（身份），不是名字。
+    ParseScopeTable t;
+    t.openScope(ScopeKind::Namespace, "Ns", ScopeBit::Namespace);  // 全局 Ns → "Ns::"
+    t.openScope(ScopeKind::Namespace, "Ns", ScopeBit::Namespace);  // Ns 里的 Ns → "Ns::Ns::"
+    t.declare("A", ScopeBit::Type);                               // A 在 "Ns::Ns::" 层
+    t.leave();                                                    // 出内层 Ns
+    // ★ 还在【外层 Ns】里：第 1 段命中栈顶那层登记的【内层 Ns】⇒ 第 2 段落空
+    EXPECT_EQ(t.classifyQualified("Ns::Ns::A"), 0u);
+    EXPECT_EQ(t.classifyQualified("Ns::A"), ScopeBit::Type);      // 第 1 段绑内层 ⇒ A 在内层
+    t.leave();                                                    // 出外层 Ns，回到全局
+    // ★ 全局：第 1 段命中【外层 Ns】⇒ 第 2 段在外层里找到内层 ⇒ A 命中
+    EXPECT_EQ(t.classifyQualified("Ns::Ns::A"), ScopeBit::Type);
+    EXPECT_EQ(t.classifyQualified("Ns::A"), 0u);                  // 外层里没有 A（不外溢到内层）
+}
+
+// ── 边界（B55）：同 path 的多层只查最内层 ─────────────────────────────────────
+
+TEST(ParseScopeChain, SamePathLayersResolveToInnermostOnly) {
+    // ★ 【边界】不是契约：`lookupInPath` 按 path 认层 ⇒ 同 path 的多层只查最内层。
+    //   函数作用域与其内部的块作用域共用路径 "f::"（Block 不加路径成分）
+    //   ⇒ 块作用域开着时，"f::" 的查询只看块作用域，函数作用域那份被跳过。
+    // ★ 将来若让块作用域参与路径、或支持 `f::x` 形态的限定名，这里要改成
+    //   "同 path 的各层合并查"（BUGS.md B55）。
+    ParseScopeTable t;
+    t.openScope(ScopeKind::Function, "f", ScopeBit::Value);      // path "f::"
+    t.declare("x", ScopeBit::Value);                              // x 登记在函数作用域
+    EXPECT_EQ(t.classifyQualified("f::x"), ScopeBit::Value);      // 块未开：命中
+    t.openScope(ScopeKind::Block, "", 0u);                        // 块作用域 path 也是 "f::"
+    EXPECT_EQ(t.classifyQualified("f::x"), 0u);                    // 块已开：同 path 只查最内层 ⇒ 落空
+    t.leave();
+    EXPECT_EQ(t.classifyQualified("f::x"), ScopeBit::Value);      // 块关了：又回来
 }
 
 }  // namespace

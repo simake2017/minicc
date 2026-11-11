@@ -19,9 +19,9 @@
 | 指标 | 数值 |
 |---|---|
 | 核心代码（include + src） | 约 2.4 万行 C++20，全阶段中文日志 |
-| 单测 | **396** 例（googletest，断言不变量而非具体符号名） |
-| 集成测试 | **165** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
-| 学习文档 | docs/learn/ 01..55（每篇点名标准章节 + clang 源码对照表） |
+| 单测 | **413** 例（googletest，断言不变量而非具体符号名） |
+| 集成测试 | **168** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
+| 学习文档 | docs/learn/ 01..57（每篇点名标准章节 + clang 源码对照表） |
 | 配套标准库 | ministl：vector / list / map / set（红黑树）/ 智能指针 / function / algorithm / ranges，与 std 随机对拍 |
 | 外部依赖 | 编译期零依赖；运行期借系统 `as` 产 .o，链接与运行时（_start + bump malloc）自研，**不依赖 libc/crt** |
 
@@ -178,13 +178,14 @@ tests/
 docs/
   00-项目章程.md      立项需求原文（项目定位与六大阶段要求的原话）
   business/00..08     ★ 业务流水线文档（每个业务一份：定位/判据/代码地图/测试/学习索引）
-  learn/01..55        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
+  learn/01..57        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
   specs/ designs/     业务流水线产物（spec 签字 → 设计 → 代码）
   specs/legacy/       早期 spec/design（保留作档案，不参与现行流程）
   constraints/        项目约束唯一权威（00..06，含文档标准与冲突裁决）
   lines/              端到端调用链（一条线 = 一条跑出来的子流程）
   arch/               架构图（archify：HTML + 可复现 JSON 源）
   upstream/           上游机制科普（clang 标准库与头文件搜索）
+  工作台账.md          ★ 已完成工作全量台账（51 批：做了什么/为什么/踩了什么坑；CLAUDE.md 只留索引 + 最近 6 批）
   BUGS.md  PITFALLS.md  ROADMAP.md  TODO.md
 logdiff.sh  build.sh  CMakeLists.txt
 check-comment-style.sh       # 注释四段式守卫（判据①②③④）
@@ -218,7 +219,8 @@ verify-doc-mutations.sh      # 守卫脚本的突变验证（判据是否承重�
 | 端到端调用链 | lines/（一条线 = 一条跑出来的子流程） |
 | 项目定位与六大阶段要求（需求原文） | 00-项目章程.md |
 | 上游标准库与头文件搜索机制 | upstream/clang-stdlib-and-header-search.md |
-| 所有踩坑复盘 | BUGS.md（B01..B46）、PITFALLS.md |
+| 所有踩坑复盘 | BUGS.md（B01..B55）、PITFALLS.md |
+| 已完成工作的全量台账（每批做了什么/为什么/踩了什么坑） | **工作台账.md**（51 批；CLAUDE.md 只留索引 + 最近 6 批） |
 
 ## 未来计划
 

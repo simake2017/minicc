@@ -93,7 +93,8 @@ else:
     DEV_DESIGNS= [p for p in collect([os.path.join(DOC_ROOT, 'designs')]) if p.endswith('.design.md')]
     DEV_CONST  = collect([os.path.join(DOC_ROOT, 'constraints')])
     DEV_ARCH   = [os.path.join(DOC_ROOT, 'REFACTOR-ast-visitor.md'),
-                  os.path.join(DOC_ROOT, 'prompt-template-deduction.md')]
+                  os.path.join(DOC_ROOT, 'prompt-template-deduction.md'),
+                  os.path.join(DOC_ROOT, '工作台账.md')]
     LINE_DOCS  = collect([os.path.join(DOC_ROOT, 'lines')])
     LEARN_DOCS = [p for p in collect([os.path.join(DOC_ROOT, 'learn')])
                   if re.match(r'^\d+[-.]', os.path.basename(p))]

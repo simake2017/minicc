@@ -66,6 +66,8 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B51](#b51-模板id成员-语句被无声明符声明分支整个吞掉-静默接受非法程序未修) | `模板id::成员;` 只查"有模板 id 语法"不查链尾名字种类 ⇒ 静态成员语句被 EmptyStmt 吞、`Box<int>::typo;` **静默接受**（clang 报 no member named） | `src/parse/parser.cpp` B16 分支（~2427） | 中（静默接受非法程序；表达式被吞） | ⬜ 未修 |
 | [B52](#b52-macos-本机端到端验证被堵apple-as-拒收汇编注释里的全角标点未修) | Apple as（clang-1700）拒收汇编注释的全角标点 ⇒ macOS 端到端必败；ctest 全单元测试不经过 as 所以一直绿 | `src/driver/main.cpp` 汇编步骤 | 低（只影响 macOS 本机验证） | ⬜ 未修 |
 | [B53](#b53-非静态数据成员的类内初始化式nsdmi未实现int-x--5-类内被拒未修) | NSDMI（`int x = 5;` 类内成员默认值，[class.mem]）未实现 ⇒ 拒收合法程序；clang Parser.h 自身 19 处使用、llvm 千行级 | `src/parse/parser.cpp` 类体字段分支 | 中（拒收合法程序；修法三件套机制现成） | ⬜ 未修 |
+| [B54](#b54-全局限定名-x-不支持-parser-拒收--空段也不落全局层) | 全局限定名 `::X` 不支持：Parser 直接拒收 `::`（"Unexpected token '::'"）；Scope 表的空段分支也只是**跳过**、不把路径落到全局层 | `src/parse/parser.cpp` 表达式/类型位置 + `src/sema/parse_scope.cpp:167` | 低（语法面欠账；clang 支持，minicc 拒收） | ⬜ 未修 |
+| [B55](#b55-按-path-认层时同-path-的多层只查最内层潜伏边界) | `lookupInPath` 按 path 认层 ⇒ 同 path 的多层（函数作用域 + 它的块作用域）只查**最内层**那层，外层那份被跳过 | `src/sema/parse_scope.cpp:197` | 低（潜伏边界，今天不可达） | ⬜ 未修 |
 
 > ★ **索引欠账（历史遗留）**：B37~B46 六条**未补进上表**（条目正文都在，
 > 只是索引没跟上）—— 本表自 B36 之后断档，B47 是补上的第一行新条目。
@@ -3699,3 +3701,86 @@ initializer_list / throw 是 ministl 真缺口才排上的）。
 默认值"家族），已登记 ROADMAP §0.3 降级区。
 
 **状态**：⬜ 未修
+
+## B54. 全局限定名 `::X` 不支持：Parser 拒收 + 空段也不落全局层
+
+- severity: low ｜ status: open ｜ related: src/parse/parser.cpp, src/sema/parse_scope.cpp:167, docs/ROADMAP.md
+
+**现象**
+
+```cpp
+int g = 5;
+int main() { return ::g; }        // ★ clang rc=5；minicc 解析期就拒收
+```
+
+```
+[Parse Error] 2:21 at '::': Unexpected token '::' in expression
+```
+
+**性质**：**语法面缺特性**（不是语义错判）—— clang 支持全局限定名，minicc 在
+表达式/类型位置遇到 `::` 开头没有分支 ⇒ 直接报错。★ 响亮拒收，但拒的是
+**合法程序** ⇒ 归"缺特性"一档（优先级低于静默类）。
+
+**根因（两处，缺一不可）**：
+
+1. **Parser**：表达式与类型的位置没有"全局限定"分支（`::` 开头不是标识符）
+   ⇒ 报 `Unexpected token '::' in expression`。
+2. **Scope 表**：`ParseScopeTable::classifyQualified` 拆段时空段被
+   `if (seg.empty()) continue;` **跳过**，而 `scopePath` 仍停在**当前路径**
+   ⇒ 即便 Parser 放行，`::X` 也会被查成"当前作用域里的 X"（不是全局的 X）。
+   ★ 该行注释写的是"落到全局层"，**与实现不符** —— 注释写的是**意图**，
+   实现是"跳过"（今天靠第 1 条挡在前面，两处都不落地）。
+
+**为什么现在不修**：语法面欠账（不占主线位，见 ROADMAP §0.3）；要修得同时改
+两处 —— Parser 放行 `::X` + `classifyQualified` 把空段处理成"路径落到全局层
+`""`"，后者是**语义修正**，不是一行能了的事。
+
+**回归（修后要补）**：`::g`（全局变量）/ `::N::S`（全局限定的嵌套名）/
+类模板成员函数里写 `::g` —— 三条都要与 clang 对拍。
+
+**教训**：★ **注释也会过期**：`:167` 那句"落到全局层"描述的是**打算怎么做**，
+不是**实际做了什么**；今天靠"Parser 先拒收"把它盖住了 ⇒ **看起来能用的分支
+其实没落地**。判据单点的反面：**两处各有一半**（一处拦、一处按另一套算），
+谁都没实现 ⇒ 只能靠"另一处先炸"才没出事。
+
+---
+
+## B55. 按 path 认层时，同 path 的多层只查最内层（潜伏边界）
+
+- severity: low ｜ status: open ｜ related: src/sema/parse_scope.cpp:197, docs/learn/53
+
+**现象**（活作用域表层，可复现）
+
+```cpp
+ParseScopeTable t;
+t.openScope(ScopeKind::Function, "f", ScopeBit::Value);  // 函数作用域：path "f::"
+t.declare("x", ScopeBit::Value);                          // x 登记在【函数作用域】这一层
+t.classifyQualified("f::x");      // ⇒ 命中
+t.openScope(ScopeKind::Block, "", 0);                     // 块作用域：path 也是 "f::"
+t.classifyQualified("f::x");      // ⇒ 0（同一句，因块作用域开着而翻转）
+```
+
+**性质**：**潜伏边界**（今天**不可达**）—— 限定名只用于 namespace/class 的路径；
+`f::x` 本身不是合法 C++ 限定名（clang 直接报错），且函数作用域**不持久**
+（`isPersistent(Function) = false`）⇒ 持久上下文里没有 `"f::"` ⇒ 文件作用域查
+`f::x` 同样是 0。★ 但这条边界一旦被跨过（支持 `f::x` 形态 / 让块作用域参与
+路径），就会变成**状态依赖**的真缺陷：同一句源码在块内/块外结果不同。
+
+**根因**：`lookupInPath`（`:197`）按 **path** 认层，`rbegin()` 先碰到**最内层**
+同 path 的那层；该层没有这个名字就 `return std::nullopt`（`:201`，不外溢）
+⇒ **同 path 的外层那层被整个跳过**。
+
+同 path 的两个来源：① **Function 作用域与其内部的 Block 作用域**（Block 不加
+路径成分，沿用父层路径）；② **TemplateParam 作用域与它的父层**（模板形参域对
+名字登记透明）。
+
+**为什么现在不修**：不可达 ⇒ 不占主线位；★ 但它与"路径 = 身份"这条设计前提
+直接相关 —— 路径要当身份键，就得**唯一标识一层**，而本实现里路径**不唯一**
+⇒ 认层必须是"同 path 的各层合并查"，而不是"取最内层"。
+
+**回归（修后要补）**：同 path 两层的名字可见性（函数参数 vs 块内同名）。
+
+**教训**：★ **"路径 = 身份"是有前提的**：前提是路径**唯一**。一旦有作用域
+复用父层路径（Block / TemplateParam），"按路径认层"就必须处理"多对一"，
+否则同一路径在不同栈状态下指向不同的层 —— ★ 这与 B10→B20→B22→B45 那个坑
+同源：**同一个键在两处被当成唯一，实际不是**。
