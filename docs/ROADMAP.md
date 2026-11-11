@@ -7,9 +7,17 @@
 > 非虚继承的菱形在标准下合法；该文件已改写为私有继承错误用例）。
 > 构建：`cmake -S . -B build-linux -DCMAKE_CXX_COMPILER=clang++-18 && cmake --build build-linux -j`
 >
+> ★ **2026-11-11**：§0.1 批 0-5（**引用的别名语义**，BUGS.md B6）已完成
+> （docs/learn/59 + BUGS.md B6；连带登记 B58 边界）
+> ⇒ **下一批仍是批 0-3（B50 全局类对象，★ 段错误）**，之后按 §0.2 进主线 K 六项。
+> ★ 本批修的是**静默算错**（引用变量的写回不到被引用对象；引用形参实参按值传）——
+> 两处同款，靠判据单点（`isAliasBinding`）统一。
+> ★ **教训两条**：① "文档里写着这条路是对的"不等于它真的对 ——
+> B6 台账原文"引用形参天生正确"被**实测**推翻；② "作用域"不是一张表，是一条链
+> —— 别名表第一版用平表，自测当场 SIGSEGV（同名变量跨块遮蔽）。
+>
 > ★ **2026-11-10**：§0.1 批 0-4（**成员模板的形参表收口到自由模板那一份**）已完成
 > （docs/learn/58 + BUGS.md B56；连带登记 B57 推导侧两处缺口）
-> ⇒ **下一批仍是批 0-3（B50 全局类对象，★ 段错误）**，之后按 §0.2 进主线 K 六项。
 > ★ 本批是"两处各写一遍"的收口（不是新特性）：形参表现在**只有一份实现**
 > （`parseTemplateParameterList`），成员模板与自由模板形态与能力完全一致。
 > ★ 副作用：主线 K 的 K-4（模板模板形参）现在**只需改自由侧那一处**，成员侧自动跟随。
@@ -45,6 +53,7 @@
 | 0-2 ✅ | **实例化步骤 5.8：克隆嵌套类**（批 4 留的边界） | 边界收口 | `template<class T> struct Box{ struct Inner{T v;}; }; Box<int>::Inner i;` ⇒ clang rc=0 / 修前 minicc rc=1 `no type named 'Inner' in 'Box_int'` | `instantiateClassTemplate` 增步骤 5.8：蓝图嵌套类克隆进实例（字段/方法随形参替换），登记名 `Box_int::Inner` | ✅ **已完成 2026-11-03**：rc=0 与 clang 对拍；ctest 396 → **403**；167 份集成日志逐字节零漂移；docs/learn/56 + BUGS.md B47 |
 | 0-3 | **全局类对象**：存储尺寸 + 地址约定（BUGS.md B50） | ★ **段错误 / 静默踩内存** | `struct S{int v;}; S g; int main(){ g.v = 11; return g.v; }` ⇒ clang rc=**11** / minicc **SIGSEGV**（`g.v = 11` 这种基本写法就崩） | ① 全局变量发射按 `classLayout.totalSize` 分配存储（不再一律 `.quad 0`）；② `visit(VarExpr)` 的全局路径补"类对象 ⇒ 取地址"分支（与局部 `m_classLocals` 同款）；连带修"按引用返回类对象" | 运行期退出码与 clang 一致；三条用例（全局字段读写 / 全局类对象按值返回 / 按引用返回）全绿 |
 | 0-4 ✅ | **成员模板的形参表收口到自由模板那一份** | 规则分叉（合法程序被拒 + 5 项能力缺失） | `template <class T> typename T::type get(T x)` ⇒ clang rc=**5** / 修前 minicc rc=1 `unknown type name 'T::type'`（成员侧另写的形参表没同步帧计数 ⇒ **自己**的形参在方法体里认不出） | 抽 `Parser::parseTemplateParameterList` 为唯一实现（自由 + 成员共用）；连带补齐成员侧 无名形参 / 模板模板形参 / 默认实参 / 默认实参约束 | ✅ **已完成 2026-11-10**：rc=5 与 clang 对拍；集成 tests/tmpl/test_tmpl_78（rc=22）+ 单测 `MemberTemplateParams.*` 6 例；突变验证 5/5；**有意漂移 4 份**（rc/输出/汇编逐字节不变），另 165 份零漂移；docs/learn/58 + BUGS.md B56/B57 |
+| 0-5 ✅ | **引用的别名语义**（BUGS.md B6） | ★ **静默算错** | `int a=5; int& r=a; r=30;` ⇒ clang rc=**30** / 修前 minicc rc=**5**（引用槽里放的是值的拷贝）；`void f(int& x)` 实参**按值传** ⇒ 同款静默算错（★ 台账原文"形参天生正确"是错的，实测推翻） | 判据单点 `isAliasBinding(type, operandHasAddress)`：局部引用变量绑定到初始化式的**地址**（读=间接加载 / 写=间接存储）；引用形参在**调用点传地址**、被调点按别名解释（两侧读同一 Type 对象 ⇒ 不会口径漂移）；别名表改**作用域链**（`m_refScopes`） | ✅ **已完成 2026-11-11**：局部引用 + 引用形参两侧对拍 clang 全绿；单测 `RefAlias.*` 7 例 + 集成 tests/lang/test_basics_38（15 检查点）；突变验证 6/6；ctest 421 → **428**；**有意漂移 8 份**（rc 与运行输出逐字节不变，漂移只在汇编文本/段布局）；docs/learn/59 + BUGS.md B6（连带登记 **B58**：const/右值引用形参按值传） |
 
 ### 0.2 批 1~6：主线 K —— 模板线六项（理论密度最高）
 

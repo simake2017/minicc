@@ -29,7 +29,7 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B3](#b3-字段写入路径-3-硬编码-movl) | 裸字段名赋值写死 `movl` ⇒ 8B 字段高 32 位被截断 | `src/codegen.cpp:1123` | 小（一处指令） | ✅ 已修 |
 | [B4](#b4-带-return-的函数里局部对象析构是死代码) | 析构发射在 `leave; ret` **之后** ⇒ RAII 不执行 | `src/codegen.cpp` emitFunction 尾 | 中（RAII 语义） | ✅ 已修 |
 | [B5](#b5-块注释不跨行) | 多行块注释的后续行被当代码分词 | `src/preprocessor.cpp:88` | **大**（25 个外部用例里 15 个） | ✅ 已修 |
-| [B6](#b6-引用变量没有别名语义) | `int& r = a; r = 30;` 改不到 `a` | `src/codegen.cpp` 局部槽分配 | 中（引用语义） | ⬜ 未修 |
+| [B6](#b6-引用变量没有别名语义) | `int& r = a; r = 30;` 改不到 `a`（引用形参同款） | `src/codegen/codegen.cpp` 局部槽分配 + 引用形参传递 | 高（静默算错；两个方向都中招） | ✅ 已修 |
 | [B7](#b7-自由函数重载根本不做-mangling) | `pick(int)` 与 `pick(S)` 同为裸名 `pick` ⇒ 汇编期符号重复 | `src/semantic_analyzer.cpp:2091` | **大**（全量重刷基线 + main/libc 特例） | ⬜ 未修 |
 | [B8](#b8-mangling-没有替换表--符号与-clang-不逐字符等同) | 缺 Itanium 替换表（`S0_`）⇒ `_Z5twiceIiET_S0_` 缩不成 | `src/template_instantiation.cpp` encodeType | 中（只影响与 clang 逐字符等同） | ⬜ 未修 |
 | [B9](#b9-struct-的默认继承级别被当成-private-处理) | `struct D : Base` 被拒（默认继承级别看错关键字） | `src/parser.cpp` parseClassDecl | 小（一个分支） | ✅ 已修 |
@@ -59,6 +59,17 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B34](#b34-const-类对象端到端缺失成员访问误报--掉标量路径-sigsegv--拷贝静默退化) | const 类对象三层判据不看穿 Const 包壳：成员访问误报（拒收）/ 掉标量路径读成员当指针解引用（SIGSEGV）/ 拷贝初始化静默退化成默认构造（算错） | `src/semantic_analyzer.cpp` inferMember + 拷贝/构造升级；`src/codegen.cpp` 类表查询 7 处 | 高（miscompile + 静默算错 + 拒收，一层包壳三层错） | ✅ 已修 |
 | [B35](#b35-语句层前瞻只认固定-token-顺序限定名模板-id-与全变量比较链双双被拒收) | parseStatement 2245 前瞻是 parseType 语法的【残缺复制品】：`<` 跳过只认第一个标识符后的位置 ⇒ `N::B<Box> x;`（限定名+模板 id）漏跳被拒收；无任何"是不是模板名"的判据 ⇒ `a < b > c;` 全变量比较链被误判成声明 `a<b> c`（B31 的语句层兄弟） | `src/parser.cpp` parseStatement 类名前瞻分支（2245-2323 手写 token 跳过人） | 中（罕见写法 ×2，但都是拒收合法程序 + 语法复制品是维护隐患） | ✅ 已修 |
 | [B36](#b36-限定模板名-nb-误绑全局模板-bsema-尾剥无作用域裁决) | Sema 限定名归一只取 `::` 末段查【全局】蓝图表：N::B 真存在时正确，真不存在而全局有同名模板 B 时误绑（方向性错） | `src/semantic_analyzer.cpp` resolveType 模板 id 分支（B35 尾剥） | 中（静默走错路，报错指向派生类型） | ✅ 已修 |
+| [B33](#b33-static-数据成员整体缺失parser-硬性拒收--无存储模型) | `static` 数据成员整体缺失：Parser 硬性拒收 + 无存储模型 | `src/parse/parser.cpp` 类体成员分支 | 中（合法程序被拒） | ✅ 已修 |
+| [B37](#b37-裸类型名声明的可见性无人裁决非法程序静默通过判据答错了问题) | 裸类型名声明的可见性无人裁决：非法程序静默通过（判据答错了问题） | `src/sema/semantic_analyzer.cpp` 可见性裁决 | 中（静默接受非法程序） | ✅ 已修 |
+| [B38](#b38-作用域不是名字身份的一部分限定名模板绑错同名模板撞实例嵌套命名空间丢外层) | 作用域不是名字身份的一部分：限定名模板绑错、同名模板撞实例、嵌套命名空间丢外层 | `src/sema/semantic_analyzer.cpp` 登记名带作用域 | 高（静默走错路） | ✅ 已修 |
+| [B39](#b39-成员调用点没把符号名过净化命名空间里的类调用其成员方法链接期炸) | 成员调用点没把符号名过净化：命名空间里的类，调用其成员方法链接期炸 | `src/codegen/codegen.cpp` 成员调用点 | 中（链接期 undefined reference） | ✅ 已修 |
+| [B40](#b40-变量遮蔽在-parser-层看不见同名类型被当成可见裸名语句判错) | 变量遮蔽在 Parser 层看不见：同名类型被当成可见，裸名语句判错 | `src/parse/parser.cpp` 名字识别 | 中（判错） | ✅ 已修 |
+| [B41](#b41-模板名不是类型名但仍是可见的名字box-被拒收合法程序被拒) | 模板名不是类型名，但仍是可见的名字：`Box;` 被拒收（合法程序被拒） | `src/sema/semantic_analyzer.cpp` 模板名解析 | 中（合法程序被拒） | ✅ 已修 |
+| [B42](#b42-构造函数符号在-codegen-硬拼限定名类一撞就错配链接期才炸) | 构造函数符号在 CodeGen 硬拼：限定名类一撞就错配（链接期才炸） | `src/codegen/codegen.cpp` + `src/sema/semantic_analyzer.cpp` | 高（链接期 undefined reference） | ✅ 已修 |
+| [B43](#b43-嵌套类完全不支持合法程序被拒) | 嵌套类完全不支持（合法程序被拒） | `src/parse/parser.cpp` + `src/sema/semantic_analyzer.cpp` | 中（合法程序被拒） | ✅ 已修 |
+| [B44](#b44-类自身的名字在本类作用域内不可见自引用指针被拒) | 类自身的名字在本类作用域内不可见（自引用指针被拒） | `src/sema/semantic_analyzer.cpp` 类作用域链 | 中（合法程序被拒） | ✅ 已修 |
+| [B45](#b45-vtable-槽的符号在两处各算一遍同一方法两个符号链接期错配) | vtable 槽的符号在两处各算一遍：同一方法两个符号（链接期错配） | `include/ast.h` + `src/codegen/codegen.cpp` | 高（链接期 undefined reference） | ✅ 已修 |
+| [B46](#b46-析构槽靠符号子串判定my_dtor_helper-被误认成析构静默少调一次) | 析构槽靠符号子串判定：`my_dtor_helper` 被误认成析构（静默少调一次） | `src/codegen/codegen.cpp` 析构判定 | 中（静默少调一次析构） | ✅ 已修 |
 | [B47](#b47-类模板里的嵌套类不支持蓝图不克隆成员合法程序被拒) | 类模板实例化只搬"顶层四样"（字段/方法/别名/static），**嵌套类没克隆** ⇒ `Box<int>::Inner` 报 no type named 'Inner'（合法程序被拒） | `src/sema/template_instantiation.cpp` 实例化步骤 5.8 + `src/sema/semantic_analyzer.cpp` forEachClassMethod | 中（合法程序被拒；连带链接期 undefined reference） | ✅ 已修 |
 | [B48](#b48-成员赋值右值求值踩掉对象地址写字段写到了错的地址静默算错) | 成员赋值把对象地址暂存 `%rcx`，**右值求值会踩 %rcx** ⇒ `movl %eax,0(%rcx)` 写到错的地址（`s.v = s.v + 4` ⇒ SIGSEGV） | `src/codegen/codegen.cpp` `visit(AssignStmt)` 成员分支 | 中（段错误；rc 恰是合法地址时静默踩内存） | ✅ 已修 |
 | [B49](#b49-按值返回类对象初始化式被丢弃对象退化成默认构造静默算错) | `S x = f();` 的初始化式被丢弃 ⇒ 对象按默认构造生成 ⇒ `x.v` 恒 0（clang 7 / minicc 0） | `src/sema/semantic_analyzer.cpp` 变量声明处理 + `src/codegen/codegen.cpp` sret 形态 | **大**（类对象按值返回全族；静默算错） | ✅ 已修 |
@@ -70,9 +81,10 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B55](#b55-按-path-认层时同-path-的多层只查最内层潜伏边界) | `lookupInPath` 按 path 认层 ⇒ 同 path 的多层（函数作用域 + 它的块作用域）只查**最内层**那层，外层那份被跳过 | `src/sema/parse_scope.cpp:197` | 低（潜伏边界，今天不可达） | ⬜ 未修 |
 | [B56](#b56-成员模板的形参表另写一份自己的形参在方法体里认不出依赖限定名直接被拒) | 成员侧另写了一份简化形参表 ⇒ 帧计数没同步 ⇒ 成员模板**自己**的 `T` 建成 Class 节点 ⇒ `typename T::type` 报 `unknown type name` | `src/parse/parser.cpp` 类成员循环的成员模板分支 | 中（合法程序被拒；连带 5 项形参能力缺失） | ✅ 已修 |
 | [B57](#b57-函数模板上的模板模板形参推导--默认实参填充未实现自由与成员同款) | 模板模板实参 `C<T>` 推不出来 + 未推导的形参不用默认实参顶上 ⇒ 两条形态的函数模板都推不出候选 | `src/sema/template_deduction.cpp` deducePair / 收尾检查 | 中（合法程序被拒；**自由与成员同款**，非成员侧独有） | ⬜ 未修 |
+| [B58](#b58-const-引用形参与右值引用形参按值传不跟踪被绑定对象) | `const int&` / `T&&` 形参的实参**可能是右值**（无地址）⇒ 本实现按值传，被调方看不到被绑定对象在调用期间的变化 | `src/codegen/codegen.cpp` 引用形参传递（判据 `isAliasBinding` 的边界） | 低（极窄：只有调用期间对象被改才有差异） | ⬜ 未修 |
 
-> ★ **索引欠账（历史遗留）**：B37~B46 六条**未补进上表**（条目正文都在，
-> 只是索引没跟上）—— 本表自 B36 之后断档，B47 是补上的第一行新条目。
+> ★ **索引欠账（历史遗留，已补）**：B33、B37~B46 一度**未补进上表**（条目正文都在，
+> 只是索引没跟上）—— 本表自 B36 之后断档；2026-11-11 已把缺失行补齐。
 
 > **B11~B15 是同一轮排查的产物**（起点是"多继承下基类字段要不要改名"这个问题）。
 > B13/B14/B15 三条根因相同 —— 见文末[小结](#小结-字符串兼任-id-与路径)。
@@ -298,7 +310,7 @@ struct MyPtr {
 
 ## B6. 引用变量没有别名语义
 
-- severity: high ｜ status: open ｜ related: docs/learn/12, docs/learn/31, tests/tmpl/test_tmpl_55_auto_cv_forms.cpp
+- severity: high ｜ status: fixed ｜ related: docs/learn/12, docs/learn/31, docs/learn/59, tests/tmpl/test_tmpl_55_auto_cv_forms.cpp, tests/unit/test_ref_alias.cpp, tests/lang/test_basics_38_ref_alias.cpp
 
 **位置**：`src/codegen.cpp`（局部变量声明的槽分配 + `visit(VarDeclStmt&)` 发射路径）
 
@@ -324,8 +336,9 @@ int main() {
 
 **教训**
 
-**为什么一直没被发现**：现有用例里引用只出现在两处恰好都正确的位置 ——
-① **函数形参**（`void f(T& x)`，走调用方传地址，天生正确）；
+**为什么一直没被发现**：现有用例里引用只出现在两处**恰好**都正确的位置 ——
+① **函数形参**（`void f(T& x)`）—— ★ 这条**台账原文写着"走调用方传地址，天生正确"，
+是错的**（2026-11-11 实测推翻，见下方"修复"：调用点传的其实是**值**）；
 ② **类型位置**（`Box<int&>` 参与偏特化匹配，不涉及运行期）。
 "局部引用改写被引用对象"这个组合此前没有任何用例。
 
@@ -335,7 +348,7 @@ int main() {
 所以 `tests/tmpl/test_tmpl_55` 只能钉住"能编过 + 值可读"，
 推导结果靠 logdiff 基里的日志行钉住。
 
-**修法**（未做，三步）：
+**修法**（原计划三步，2026-11-11 实做时扩到两处 —— 见下方"修复"）：
 
 1. **声明**：`visit(VarDeclStmt&)` 遇引用类型时不分配槽，而是求出初始化式的
    **地址**（复用 `&a` 那条路径）并记进别名表 `r → 被绑定槽的偏移`；
@@ -343,16 +356,60 @@ int main() {
 3. **写**：赋值左侧同理走间接存储。
 
 ★ 注意与 [B4](#b4-带-return-的函数里局部对象析构是死代码) 的交互：
-栈对象析构取址（`leaq off(%rbp),%rdi`）走的是**对象自身地址**，
+栈对象析构取址（`leaq off(%rbp), %rdi`）走的是**对象自身地址**，
 引用别名不能影响它 —— 即"引用是别名，被引用对象仍在原槽"。
+
+### 修复（2026-11-11，docs/learn/59）
+
+**★ 第一处更正：原文"函数形参……天生正确"是错的，实测推翻了它。**
+
+```cpp
+void bump(int& x) { x = x + 1; }
+int main() { int a = 5; bump(a); return a; }   // clang=6，minicc=5
+```
+
+旧实现里调用点传的是**值**（`emitExpr(arg)` 把 a 的值装进 rdi），
+被调方把形参槽当普通 int 用 ⇒ callee 的写回不到调用方 ⇒ **同款静默算错**。
+⇒ 修法从"局部引用变量"扩到"局部引用变量 + 引用形参"两处。
+
+**修法三件套（判据单点）**：
+
+1. **判据**：`isAliasBinding(type, operandHasAddress)` ——
+   【有没有被绑定对象的地址】。局部侧传"初始化式可寻址吗"的实情；
+   形参侧恒传 `false`（实参**可能是右值**，右值没有地址），
+   只有"可写左值引用"能保证实参必是左值 ⇒ 走别名通道。
+   ★ 调用点与被调点读**同一个 Type 对象**（经 `m_funcBySymbol`：
+   mangledName → FunctionDecl）⇒ 不会"一边传地址、一边当值用"。
+2. **声明/读/写**：局部引用变量的槽放**地址**；读走间接加载，写走间接存储；
+   引用形参在序言登记为别名槽。
+3. **作用域链**：别名表从平表改成**作用域链**（`m_refScopes`）。
+   ★ 第一版实做时用了平表，自测用例当场 SIGSEGV ——
+   同名变量在不同块里各有一种形态（块① `int& s` / 块② `S s`）时，
+   块①的别名盖住了块②的类对象 ⇒ `s.v = 1` 写到别的地址。
+   这正是 docs/learn/53 那条教训的第二次现形：**作用域是链，不是表**。
 
 **回归**
 
-（无）
+- 单测 `tests/unit/test_ref_alias.cpp`（`RefAlias.*` 7 例）：
+  槽里放的是地址 / 读走间接加载 / 写走间接存储 / 形参两侧同口径 /
+  const 形参按值传（边界钉住）/ 三种绑定对象 / 作用域链遮蔽。
+- 集成 `tests/lang/test_basics_38_ref_alias.cpp`（15 个检查点，与 clang 对拍 rc=0）。
+- 突变验证 6 条逐条实跑变红（`tools/verify-ref-alias-mutations.sh`）。
+- 全量 ctest 421 → **428**；既有 169 份集成日志**运行退出码逐字节不变**
+  （漂移只在汇编文本与链接期段布局）。
+
+**遗留边界**：const 引用形参 / 右值引用形参**按值传**（实参可能是右值，
+要按地址传得在调用方物化临时量）⇒ 新登记
+[B58](#b58-const-引用形参与右值引用形参按值传不跟踪被绑定对象)；
+按引用返回仍未做（与 B50 同根因，见 ROADMAP §0.1）。
 
 **教训**
 
-（无）
+- **"文档里写着这条路是对的"不等于它真的对** —— 本条台账里的
+  "为何一直没被发现"那段本身就是错的，是**实测**推翻的。
+  ⇒ 修缺陷前先探针实测，别信旧文档的结论。
+- **"作用域"不是一张表，是一条链**（learn/53）—— 本批第二次现形：
+  新加一种"形态"（别名）时，平表立刻暴露出遮蔽规则缺失。
 
 ---
 
@@ -3880,3 +3937,38 @@ int main(){ return f(1); }
 **教训**：★ **解析侧与推导侧是两层** —— 收口解析侧不会自动补上推导侧的能力。
 本批把成员侧从"解析期就拒收"推进到"解析期收得下、推导期按既有能力办"，
 **与自由路径完全对齐**；剩下的差距是**两侧共有**的，不是这次收口该背的。
+
+---
+
+## B58. const 引用形参与右值引用形参按值传（不跟踪被绑定对象）
+
+- severity: low ｜ status: open ｜ related: docs/learn/59, docs/BUGS.md B6
+
+**现象**
+
+```cpp
+int g = 1;
+void mut() { g = 5; }
+int read(const int& x) { mut(); return x; }   // clang=5，minicc=1
+```
+
+**根因**：`const int&` / `T&&` 形参的实参在合法程序里**可能是右值**
+（`read(6)`），而右值没有地址 ⇒ 要按地址传，调用方必须先**物化一个临时量**
+（自己帧里开一块临时槽，帧估算也得跟着改）。本实现不做这一步 ⇒
+按值传（调用点装值，被调点按普通值解释）。
+
+**影响面**：极小 —— 只有"被调方在调用期间让被绑定对象发生变化"才有可观察差异
+（被调方拿到的是调用前的副本）。
+局部 `const int& r = a;` **不受影响**（本地知道初始化式可寻址 ⇒ 仍是别名，见 B6 的修复记录）。
+
+**修法**（未做）：调用点为不可寻址的引用实参开临时槽（帧估算加一条
+"每个这样的调用点 8 字节"，与 `countCtorTempBytes` 同款）⇒ 被调点即可
+统一按别名解释所有引用形参。
+
+**回归（修后要补）**：单测一例钉住"const 引用形参能看到被绑定对象在调用期间的变化"。
+
+**教训**
+
+- "引用一定是别名"是对的，但**"能不能当别名"取决于有没有地址** ——
+  右值没有地址 ⇒ 要么物化临时量，要么退化成按值（并如实登记为边界）。
+

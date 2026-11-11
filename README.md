@@ -8,7 +8,7 @@
 
 - 每个阶段输出**中文日志**，推导逐对打印（如 `P=T A=int ⇒ T := int ✓`）；
 - 每个新判据先拿 `clang++-18` 当语义 oracle 探针实测，报错文案逐字对齐；
-- **日志即契约**：160 份集成基线逐字节比对，重构不许改变任何可观测行为。
+- **日志即契约**：170 份集成基线逐字节比对，重构不许改变任何可观测行为。
 
 > 难度选择：项目主战场是 C++ 里最难的**模板机制**（实参推导 ≈ 合一算法、
 > 实例化 ≈ 结构化替换、两阶段查找、重载决议、SFINAE、偏序裁决）——
@@ -19,9 +19,9 @@
 | 指标 | 数值 |
 |---|---|
 | 核心代码（include + src） | 约 2.4 万行 C++20，全阶段中文日志 |
-| 单测 | **421** 例（googletest，断言不变量而非具体符号名） |
-| 集成测试 | **169** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
-| 学习文档 | docs/learn/ 01..58（每篇点名标准章节 + clang 源码对照表） |
+| 单测 | **428** 例（googletest，断言不变量而非具体符号名） |
+| 集成测试 | **170** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
+| 学习文档 | docs/learn/ 01..59（每篇点名标准章节 + clang 源码对照表） |
 | 配套标准库 | ministl：vector / list / map / set（红黑树）/ 智能指针 / function / algorithm / ranges，与 std 随机对拍 |
 | 外部依赖 | 编译期零依赖；运行期借系统 `as` 产 .o，链接与运行时（_start + bump malloc）自研，**不依赖 libc/crt** |
 
@@ -118,6 +118,9 @@ Sema 的符号表；Parser 只能通过窄的只读查询接口向 Sema 提问�
 ### 语言基础
 
 - 类型系统：auto / 指针 / 左右值引用 / const（cv 位置精确：[learn/23](docs/learn/23-cv-position-and-type-identity.md)）/ `decltype` / 原生数组 `T[N]`（含下标 SIB 寻址）
+- 引用**别名语义**（[dcl.ref]/1）：引用变量的槽里放的是**被绑定对象的地址**
+  （读 = 间接加载 / 写 = 间接存储）；引用形参在**调用点传地址**、被调点按别名解释
+  （[learn/59](docs/learn/59-ref-alias.md)）★ const / 右值引用形参按值传（边界 B58）
 - 类：构造/析构/初始化列表、虚函数 + vtable + RTTI、public 继承与多继承布局、static 数据成员、类内类型别名
 - 函数：重载（类型链择优）、默认实参之外的常用形态、ADL 与限定名查找
 - 语句：if / while / do-while / for / switch-case-default / break / continue / 三元 `?:` / 逗号表达式
@@ -147,8 +150,8 @@ Sema 的符号表；Parser 只能通过窄的只读查询接口向 Sema 提问�
 
 ```bash
 ./build.sh                          # ① 0 警告
-ctest --test-dir build-linux -j6    # ② 362/362
-./logdiff.sh diff                   # ③ 155 份基线逐字节零漂移
+ctest --test-dir build-linux -j6    # ② 428/428
+./logdiff.sh diff                   # ③ 170 份基线逐字节零漂移
 ```
 
 三件套缺一不算完成。纪律（血泪换的，见 [PITFALLS.md](docs/PITFALLS.md)）：
@@ -178,7 +181,7 @@ tests/
 docs/
   00-项目章程.md      立项需求原文（项目定位与六大阶段要求的原话）
   business/00..08     ★ 业务流水线文档（每个业务一份：定位/判据/代码地图/测试/学习索引）
-  learn/01..58        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
+  learn/01..59        学习文档（理论背景 + 设计决策 + clang 对照 + 可复现实验 + ASCII 图）
   specs/ designs/     业务流水线产物（spec 签字 → 设计 → 代码）
   specs/legacy/       早期 spec/design（保留作档案，不参与现行流程）
   constraints/        项目约束唯一权威（00..06，含文档标准与冲突裁决）

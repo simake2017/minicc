@@ -790,6 +790,44 @@ inline std::string vtableEntrySymbol(const VTableEntry& entry) {
     return entry.method ? entry.method->mangledName : std::string();
 }
 
+// ─── 可寻址性：引用绑定的前提 ────────────────────────────────────────────────
+// 定位：一个表达式能不能【取地址】—— 引用（[dcl.ref]/1）绑定的是对象的别名，
+//   绑定目标必须可寻址（能算出它的地址）。
+// 锚点：clang/lib/Sema/SemaInit.cpp:InitializationSequence::BindReference
+//   （绑定引用 = 取实参左值的地址；右值则先物化临时再取址）。
+// 动机：★ 判据只许有一处 —— 帧估算端（要不要给临时留槽）与发射端（要不要物化
+//   临时）必须问同一个问题，两处各判一次必漂（同 B10 / B45 的老教训）。
+// demo: int a; &a            ⇒ 可寻址（局部变量）
+//       s.v                  ⇒ 可寻址（成员：对象地址 + 字段偏移）
+//       *p                   ⇒ 可寻址（指针值本身就是地址）
+//       v[i]（容器下标）      ⇒ 不可寻址（走 at() 按值返回，没有对象可取址）
+//       5 / f()              ⇒ 不可寻址（右值/临时）
+inline bool isAddressableExpr(const ExprPtr& expr) {
+    if (!expr) return false;
+    switch (expr->kind) {
+        case NodeKind::Var:
+            return true;                      // 局部 / 全局 / 引用变量：都有地址
+        case NodeKind::Member: {
+            auto mem = std::static_pointer_cast<MemberExpr>(expr);
+            return isAddressableExpr(mem->object);
+        }
+        case NodeKind::Unary: {
+            auto un = std::static_pointer_cast<UnaryExpr>(expr);
+            return un->op == UnaryOp::Deref;  // *p：指针值就是地址
+        }
+        case NodeKind::Index: {
+            auto idx = std::static_pointer_cast<IndexExpr>(expr);
+            TypePtr objType = idx->object->resolvedType;
+            if (objType && objType->isReference()) objType = objType->referencedType;
+            // 裸数组 / 指针的下标是真正的对象访问 ⇒ 可寻址；
+            // 容器下标走 at()（按值返回）⇒ 不可寻址。
+            return objType && (objType->isArray() || objType->isPointer());
+        }
+        default:
+            return false;                     // 字面量 / 调用结果 / 算术结果
+    }
+}
+
 // ─── 构造函数初始化器 ─────────────────────────────────────────────────────────
 // 对应 [class.base.init]；clang: CXXCtorInitializer。
 // demo：Point(int x, int y) : m_x(x), m_y(y) {} 中的 m_x(x)

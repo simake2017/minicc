@@ -107,6 +107,25 @@ private:
     std::unordered_map<std::string, int> m_arrayLocals;  // 局部数组 -> 栈偏移
     std::unordered_set<std::string>     m_arrayGlobals; // 全局数组名字
 
+    // ── 引用变量 / 引用形参（[dcl.ref]/1：引用是【别名】，不是副本）────────
+    // 名字 → { 槽偏移, 被引用对象的类型 }
+    // ★ 槽里存的是【被绑定对象的地址】—— 引用自己不存"值的副本"。
+    //   读  = 从该地址间接加载；写 = 往该地址间接存储。
+    //   局部引用变量与引用形参共用这一张表 ⇒ 同一份语义只有一个实现。
+    // ★ 这张表是【作用域链】不是一张平表（docs/learn/53 的教训）：
+    //   同名变量在不同的块里可以各有一种形态（块① `int& s;` 块② `S s;`），
+    //   平表会让"旧的那个别名"盖住"新的那个类对象" ⇒ 查表必须由内向外扫。
+    //   层 0 = 函数作用域（形参 + 函数体顶层声明），每进一层 BlockStmt 压一层。
+    struct RefLocalInfo {
+        int     offset = 0;      // 相对 %rbp 的负偏移（槽里放的是地址）
+        TypePtr referencedType;  // 被引用对象的类型（决定"读"怎么取）
+    };
+    std::vector<std::unordered_map<std::string, RefLocalInfo>> m_refScopes;
+    // 被调函数的声明（按符号名查）—— 调用点据此判断"这个实参是不是按引用传"。
+    // ★ 键是【Sema 已定好的符号名】（mangledName）⇒ 身份只有 Sema 一处裁决，
+    //   CodeGen 只是把"已定的身份"翻译成"形参是不是引用"（docs/learn/54 同款思路）。
+    std::unordered_map<std::string, FuncDeclPtr>  m_funcBySymbol;
+
     // 块作用域析构栈：每进一个 BlockStmt 压一层，块内声明的类局部追加进
     // 当前层；块结束时逆序发射本层析构后弹层（LIFO → 逆声明序析构，
     // [class.dtor]/2）。emitBlockStmt 用空列表压栈、返回时恢复外层列表，
@@ -155,6 +174,30 @@ private:
     // VarExpr 局部 → 栈槽；全局 → 标签；裸字段 → this+偏移；Member → 递归 + 字段偏移。
     // 与 visit(MemberExpr) 的"子对象取址"约定同源（那边只管类字段这一步）。
     void emitClassAddress(const ExprPtr& expr);
+
+    // ── 引用语义三件套（[dcl.ref]/1：引用是别名，不是副本）────────────────
+    // 【统一表示】：引用变量与引用形参的槽里放的是【被绑定对象的地址】。
+    //   读 ⇒ 从该地址间接加载；写 ⇒ 往该地址间接存储。
+    //   （类的"值"在本实现里就是对象地址 ⇒ 引用到类对象时"读"直接给地址，不解引用。）
+    //
+    // emitRefValue：读一个引用（rax = 被绑定对象的值；类引用则 rax = 对象地址）。
+    void emitRefValue(const std::string& name, const RefLocalInfo& info);
+    // findRefLocal：按名字查"当前作用域里可见的引用绑定"（作用域链由内向外扫）。
+    // 查不到返回 nullptr ⇒ 该名字不是引用 ⇒ 走普通局部/全局路径。
+    const RefLocalInfo* findRefLocal(const std::string& name) const;
+    // emitAddressOf：取一个左值的地址（rax = &obj）。
+    //   局部标量 → leaq 槽；局部类对象 → leaq 槽；全局 → leaq 标签；
+    //   引用变量/形参 → 读它持有的地址；成员 → 对象地址 + 字段偏移；
+    //   解引用 *p → 指针值本身就是地址；其余形态 → 退化为值（由调用点先物化临时）。
+    void emitAddressOf(const ExprPtr& expr);
+    // emitArgument：发一个实参。passByRef 为真 ⇒ 传【地址】（引用绑定）；
+    //   为假 ⇒ 传【值】。不可取地址的实参绑定到引用形参时物化一份临时
+    //   （[dcl.init.ref]/5.4.2：const 引用可以绑右值）。
+    void emitArgument(const ExprPtr& arg, bool passByRef);
+    // 查被调函数的声明（按已定符号名）—— 找不到返回 nullptr（调用点按"全按值传"处理）。
+    FuncDeclPtr lookupCallee(const std::string& symbol) const;
+    // 第 argIndex 个形参是不是【可写的左值引用】（非 const 的 T&）—— 只有它按地址传。
+    bool paramNeedsAddress(const FuncDeclPtr& fn, size_t argIndex) const;
     // 帧估算用：数出函数体里所有会被物化的构造调用（与发射端同序遍历）。
     uint32_t countCtorTempBytes(std::shared_ptr<BlockStmt> block);
     uint32_t countCtorTempBytesInExpr(const ExprPtr& expr);
@@ -295,7 +338,8 @@ private:
                          const std::string& methodName,
                          const std::vector<ExprPtr>& args,
                          uint32_t vtableIndex,
-                         int sretBuf = kNoSretTarget);
+                         int sretBuf = kNoSretTarget,
+                         FuncDeclPtr callee = nullptr);
 
     // ── 辅助 ──
     // 生成全局唯一标签：前缀 + "_" + 计数器，如 else_0、while_begin_1
