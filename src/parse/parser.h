@@ -313,6 +313,12 @@ private:
     //              | type-alias-decl | global-var-decl | ['virtual'] function-decl
     DeclPtr            parseDeclaration();
     TemplateDeclPtr    parseTemplateDecl();
+    // 模板形参表解析（[temp.param]）—— 自由模板与成员模板【共用同一份】。
+    // 形参表是同一个文法、同一条语义规则 ⇒ 只有一处实现（两处各写一遍必然漂移）。
+    // 调用方负责"建帧 + 开模板形参作用域"（模板体解析期间形参要在作用域内），
+    // 本函数只管形参表本体 + expect('>') + 默认实参约束检查。
+    void               parseTemplateParameterList(TemplateDecl& decl,
+                                                   TemplateParamFrame& frame);
     // outSpecPattern 非空时，若类名后紧跟模板 id（Box<T*, T>），
     // 把尖括号里的模式写回该向量 —— 供 parseTemplateDecl 判定偏特化/全特化。
     ClassDeclPtr       parseClassDecl(std::vector<TemplateArg>* outSpecPattern = nullptr);

@@ -99,6 +99,7 @@ add_executable(unit_tests
     tests/unit/test_vtable_handle.cpp
     tests/unit/test_sret_return.cpp
     tests/unit/test_member_assign_clobber.cpp
+    tests/unit/test_member_template_params.cpp
     src/lex/preprocessor.cpp
     src/sema/sfinae.cpp
     src/ast/constant_folder.cpp

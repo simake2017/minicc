@@ -32,58 +32,57 @@
 ## 当前主线任务
 
 ★ **待办不在本文件** —— 统一到 `docs/ROADMAP.md` §0（当前优先级 = 执行序）。新会话接手：**先读 §0 再选活**。
-★ **本文件只留"已完成"的台账**，且只留**最近 6 批的完整记录**（接手当前脉络要用的就是这几批）；★ **全量 51 批原文在 `docs/工作台账.md`**（每批的根因/修法/踩坑/边界都在那里，需要细节时读它）。
+★ **本文件只留"已完成"的台账**，且只留**最近 6 批的完整记录**（接手当前脉络要用的就是这几批）；★ **全量 52 批原文在 `docs/工作台账.md`**（每批的根因/修法/踩坑/边界都在那里，需要细节时读它）。
 ★ 下面的**历史索引表**一行一批，产物列指向 `docs/learn/NN` 与 `docs/BUGS.md` 的 B 编号 —— 按批号查详版，不必翻全文。
 
 ### 最近批次（完整记录）
 
-✅ **Stage 3 批 2+3（名字可见性：切活表 + C++20 UndeclaredTemplate 规则 + 登记表整类退场）已完成
-（docs/learn/52 + learn/51 + specs/designs）** ——
-★ 起点是用户那句「**往 clang 工业级方向靠拢**」——不是"把 bug 修掉"，而是
-**换掉整个机制**：minicc 原先的"名字登记表"是**前向扫 token 流**得到的
-**跨作用域并集**（`NameRegistry`），它分不出遮蔽、分不出"这个 `<` 是不是模板实参表"。
-**改法是照 clang 的 Actions 模式重画**：Parser 不再自建第二份表，改为
-**向 Sema 提问**（clang 的 `Parser.h:639` `Sema &Actions;` 构造期前置条件 +
-`SemaDecl.cpp:912 Sema::ClassifyName` 活链查询）；判据单点收口到
-`SemanticAnalyzer::classifyParseQualified` + `ScopeTable`（活作用域表，
-块作用域 push/pop）。
-① **C++20 `UndeclaredTemplate` 规则落地**（[temp.names]/3 + P0846R0；
-clang `SemaDecl.cpp:996-1003`：`getCPlusPlusVersion() >= CXX20 && SS.isEmpty()
-&& NextToken.is(tok::less)` ⇒ `getAssumedTemplateName`）——
-★ 关键判据：**问的是"是不是一个值"**，不是"是不是一个类型"：
-声明过但是变量 ⇒ 不假定模板（[basic.scope.hiding]，变量可遮蔽模板名）；
-**查不到** ⇒ 按 C++20 假定是模板名 ⇒ `unknown<int>(y)` 走 template-id 路径
-⇒ 报 clang 逐字相同的 `use of undeclared identifier 'y'`（**含列号 33:18**）。
-② **三处消歧点切活表**：语句层裸名 / 语句层模板 id 链闸 / 表达式模板闸；
-★ `SS.isEmpty()` 只用在**表达式闸**（限定名不假定），
-语句层链闸**保留** C++20 假定 —— 否则 `N::B<int> x;` 会退化成比较链、
-丢掉 B38 建立的「no template named 'B' in namespace 'N'」逐字文案。
-③ **两处 clang 对齐修复**：`Box;`（可见的模板名单独成句）此前**拒收合法程序**
-（模板名不是类型名、却是**可见的名字** ⇒ 补第三问 `isVisibleTemplateName`，
-clang 只 warning、rc=0）；裸名未声明诊断 `Undefined variable` ⇒
-`use of undeclared identifier`（**仅限无限定名**，限定名保留旧文案）。
-④ **`NameRegistry` 整类删除**（src/sema/name_registry.{h,cpp} +
-tests/unit/test_name_registry.cpp 11 例 + CMakeLists/build.sh 三处登记）：
-它是"第二份作用域事实"，与红线 1（语义裁决权单一）直接冲突。
-★ 附带一个**真 bug 被抓出来**（BUGS.md B40）：活表能看见遮蔽 ⇒
-`int S; S;` 终于判成**表达式**（clang 同款）—— 而**用例 test_basics_23 的注释
-早就写着"遮蔽 ⇒ 是表达式"**，是实现与用例文档互相矛盾、靠对拍才暴露。
-（第二次印证"**用例注释也是契约**"。）
-★ 内建名字（`std::declval`）**必须由 Sema 构造期播种**进活表——
-它在 token 流里根本不出现，漏播 ⇒ SFINAE 两个用例当场红（"查不到"≠"不是"）。
-★ Parser 现在**自持一个 Sema**（`m_ownedSema`），主流程由 main.cpp
-`parser.setSema(&semaAnalyzer)` 注入真 Sema —— 解析期查询与语义期裁决**同一张表**。
-测试 tests/lang/test_basics_30（负例 rc=1，文案+列号与 clang 逐字同）+
-basics_31（正例 rc=0）+ 单测 tests/unit/test_parse_scope.cpp（`ParseScopeRetirement.*` 4 例）；
-文档 docs/learn/52（新）+ learn/51（§8 重写 + §8.1 给批 4 的三条交接）+
-specs/parse-stage-live-scope.spec.md + designs/…design.md（§3.6 三处消歧点新旧判据对照）；
-BUGS.md 新增 **B40**（遮蔽看不见）/ **B41**（模板名单独成句被拒收）。
-★ **有意漂移 2 处**（basics_23/25：遮蔽终于在 Parser 层可见），基线已重刷。
-全量 ctest **382/382** / build 0 警告 / **logdiff 零漂移**（162 集成用例逐字节一致）/
-check-doc-standard.sh 六判据全绿。
-★ 未做（下一批 = 批 4）：**嵌套类**（ROADMAP 主线 I 行 7-3）——
-须用**同一条作用域链查询**回答，不许为"嵌套"开特判；
-交接三条见 docs/learn/51 §8.1（不建第二张表 / 不开特判 / 先把源码现场对着 clang 写）。
+✅ **成员模板的形参表收口到自由模板那一份（BUGS.md B56，docs/learn/58）** ——
+★ 起点是用户那句「**这些位置的解析模板是不是应该跟外面一样，实现一种复用，而不是全都新做**」
+—— 评估后确认：**该复用，而且已经漂移出可见偏差**（不是洁癖问题）。
+① **病灶**：类成员循环里的成员模板分支**另写了一份**形参表（简化版），
+与自由路径那份（`parseTemplateDecl` 内联）**各写一遍** ⇒ 两条路径随批次演进而漂移：
+成员侧缺【无名形参 / 模板模板形参 / 默认实参 / 默认实参约束 / **`frame.count` 同步**】。
+★ 两条路径不是同时写的，而是**时间差**：成员侧是批 21（learn/34）的一次性快照，
+自由侧此后逐批加料 ⇒ 能力差越拉越大。
+② **最要命的一条**：`frame.count` 没同步 ⇒ `lookupTemplateParam` 在成员模板的帧里
+**一个形参都取不到** ⇒ 方法体里的裸 `T` 建成 **Class 节点**而非 **TemplateParam 节点**。
+★ 实测（同一段函数体里）：成员模板**自己**的 `U` 认不出（`base = U (class/tparam)`），
+而**外层**类模板的 `T` 认得出（`base = T (template param, scope hit)`）——
+因为外层那帧的 `count` 是同步的（自由路径同步了）。
+⇒ 不是"成员模板不支持什么"，而是"**成员模板自己的形参作用域根本没生效**"。
+③ **后果**：依赖限定名 `typename T::type`（[temp.res]/5）走不进依赖名分支
+⇒ 报 `unknown type name 'T::type'`（**合法程序被拒**，clang rc=5）。
+★ 而正确性此前是靠**按名兜底**偶然成立的：`substituteType` 的 Case 6
+（按名字撞替换表）⇒ 自由模板靠作用域认形参、成员模板靠按名撞表，
+**两条不同的依据走到同一个结果** ⇒ 一旦某形态只对一条路成立就分叉成 bug。
+④ **修法（判据单点）**：抽 `Parser::parseTemplateParameterList`
+（`src/parse/parser.cpp:1243`）为**唯一实现**，自由路径与成员路径都调它。
+★ 形参作用域的"建帧 + 开作用域"**留在调用方**（必须活到模板体解析结束）。
+★ **为什么不做"给 `parseTemplateDecl` 加 `isMember` 开关"**：那会把两套**模板体分派**
+与两套**名字登记规则**塞进一个函数；判据单点说的是"同一个问题的答案只能有一处"，
+不是"函数越少越好"——**形参表是同一个问题**（该合），**模板体形态是两个问题**（不该合）。
+⑤ **★ 自踩的坑（评估阶段误判，突变验证时推翻）**：我判过一条"成员模板的名字在类作用域里
+丢了值位"（以为 `parseFunctionDecl` 登记方法名时模板形参作用域还开着 ⇒ 值位被 closeScope 丢掉）
+⇒ 实测把 `declareName` 的值位去掉，**日志一个字节都没变**。
+真因：`openScope` 登记的名字落在 `m_stack[nameScopeIndex()]`（**最近的外层非模板形参作用域**
+= 类作用域，模板形参作用域被跳过）⇒ 值位一直都在。
+★ 教训：**"名字在哪一层登记"要看登记的 API** ——
+`declare`（最内层）与 `openScope`（最近的外层非模板形参作用域）是两套落点规则。
+⑥ **边界不放大**：推导侧两处缺口（模板模板实参 `C<T>` 推不出 + 未推导形参不用默认实参顶上）
+**自由路径同款**（实测自由路径同样报错）⇒ **登记 B57 为 open**，本批只收口解析侧。
+测试 tests/tmpl/test_tmpl_78_member_template_params.cpp（rc=22，与 clang 对拍）
++ 单测 tests/unit/test_member_template_params.cpp（`MemberTemplateParams.*` 6 例：
+断言**性质** —— 形参节点种类 / 依赖限定名的限定者形态 / 四项能力 / 约束检查）；
+突变验证 **5/5** 实跑变红（脚本 `tools/verify-member-template-mutations.sh`；
+M5 = 整体退回旧实现 ⇒ 5 例全红；★ 每条突变在集成侧同样被抓）。
+全量 ctest 413 → **421**；集成新增 1 份、**有意漂移 4 份**（成员模板相关：
+成员侧现在也打形参表那套日志 + 形态从 Class 节点变 TemplateParam 节点 +
+`[subst]` 从 Case 6 切到 Case 1；★ **rc、运行输出、汇编三者逐字节不变**），
+另 **165 份零漂移**；build 0 警告；check-doc-standard.sh 六判据全绿。
+文档 docs/learn/58（新）+ BUGS.md B56（已修）/ B57（open）+ ROADMAP §0.1 批 0-4 标 ✅。
+★ 副作用（下一批用得上）：主线 K 的 **K-4**（模板模板形参）现在**只需改自由侧那一处**，
+成员侧自动跟随。
 
 ✅ **Stage 3 批 4（嵌套类）已完成（docs/learn/53 + specs/designs）** ——
 ★ 这是用户最初那个提问（"class A 里面有个 B，然后外面还有个 class B"）的落地 ——
@@ -259,7 +258,7 @@ S f(){S s; s.v=7; return s;} int main(){S x=f(); return x.v;}`
 语义日志一行未动，已重刷基线）；build 0 警告。
 文档 docs/learn/57（新）+ BUGS.md B48/B49（+ B50 登记 open）+ ROADMAP §0.1 批 0-1 标 ✅。
 
-### 历史批次索引（51 批 → 产物指针）
+### 历史批次索引（52 批 → 产物指针）
 
 | # | 批次 | 产物 |
 |---|---|---|
@@ -314,12 +313,15 @@ S f(){S s; s.v=7; return s;} int main(){S x=f(); return x.v;}`
 | 49 | ROADMAP 重排 + 文档线收敛规则已完成（docs/ROADMAP.md §0 + docs/learn/55） | learn/55 |
 | 50 | 类模板里的嵌套类已完成（实例化步骤 5.8，BUGS.md B47，docs/learn/56） | learn/56 ｜ B47 ｜ tests×1 |
 | 51 | 按值返回 + 拷贝省略已完成（BUGS.md B48/B49，docs/learn/57） | learn/57 ｜ B48/B49 ｜ tests×3 |
+| 52 | 成员模板的形参表收口到自由模板那一份（BUGS.md B56，docs/learn/58） | learn/58 ｜ B56 ｜ tests×2 |
 
 ### 交接状态
 
 **未做（按优先级）**：★ **本文件不维护待办清单** —— 统一到 `docs/ROADMAP.md` §0（当前优先级 = 执行序）。
 要点：§0.1 批 0（~~按值返回+拷贝省略~~ ✅ learn/57；~~实例化 5.8 克隆嵌套类~~ ✅ learn/56；
+~~成员模板的形参表收口~~ ✅ learn/58；
 **批 0-3 = 全局类对象（B50）** = ★ 段错误，两根因：存储尺寸 + 全局取地址）→
+★ 另有 **B57**（函数模板上的模板模板形参推导 + 默认实参填充，**自由与成员同款**）→
 §0.2 主线 K 模板线六项（别名模板特化的**非法程序拒收** / 偏特化模式的值位 /
 `template<auto V>` 偏特化 / 模板模板形参的形参包·默认实参·嵌套 /
 类外定义特化成员 / 函数模板显式 NTTP 实参）→ §0.3 降级区（语法面 17 条）→

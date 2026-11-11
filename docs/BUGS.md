@@ -68,6 +68,8 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B53](#b53-非静态数据成员的类内初始化式nsdmi未实现int-x--5-类内被拒未修) | NSDMI（`int x = 5;` 类内成员默认值，[class.mem]）未实现 ⇒ 拒收合法程序；clang Parser.h 自身 19 处使用、llvm 千行级 | `src/parse/parser.cpp` 类体字段分支 | 中（拒收合法程序；修法三件套机制现成） | ⬜ 未修 |
 | [B54](#b54-全局限定名-x-不支持-parser-拒收--空段也不落全局层) | 全局限定名 `::X` 不支持：Parser 直接拒收 `::`（"Unexpected token '::'"）；Scope 表的空段分支也只是**跳过**、不把路径落到全局层 | `src/parse/parser.cpp` 表达式/类型位置 + `src/sema/parse_scope.cpp:167` | 低（语法面欠账；clang 支持，minicc 拒收） | ⬜ 未修 |
 | [B55](#b55-按-path-认层时同-path-的多层只查最内层潜伏边界) | `lookupInPath` 按 path 认层 ⇒ 同 path 的多层（函数作用域 + 它的块作用域）只查**最内层**那层，外层那份被跳过 | `src/sema/parse_scope.cpp:197` | 低（潜伏边界，今天不可达） | ⬜ 未修 |
+| [B56](#b56-成员模板的形参表另写一份自己的形参在方法体里认不出依赖限定名直接被拒) | 成员侧另写了一份简化形参表 ⇒ 帧计数没同步 ⇒ 成员模板**自己**的 `T` 建成 Class 节点 ⇒ `typename T::type` 报 `unknown type name` | `src/parse/parser.cpp` 类成员循环的成员模板分支 | 中（合法程序被拒；连带 5 项形参能力缺失） | ✅ 已修 |
+| [B57](#b57-函数模板上的模板模板形参推导--默认实参填充未实现自由与成员同款) | 模板模板实参 `C<T>` 推不出来 + 未推导的形参不用默认实参顶上 ⇒ 两条形态的函数模板都推不出候选 | `src/sema/template_deduction.cpp` deducePair / 收尾检查 | 中（合法程序被拒；**自由与成员同款**，非成员侧独有） | ⬜ 未修 |
 
 > ★ **索引欠账（历史遗留）**：B37~B46 六条**未补进上表**（条目正文都在，
 > 只是索引没跟上）—— 本表自 B36 之后断档，B47 是补上的第一行新条目。
@@ -3642,7 +3644,6 @@ static 成员声明时应已 `declareName`（★ 需顺带确认/补上登记）
 **状态**：⬜ 未修
 
 ---
-
 ## B52. macOS 本机端到端验证被堵：Apple `as` 拒收汇编注释里的全角标点（未修）
 
 - severity: low（只影响 macOS 本机验证，不影响 Linux 主线）｜ status: open ｜ related: `src/driver/main.cpp` 汇编步骤（`as -o …`）
@@ -3661,7 +3662,6 @@ minicc 集成测试只在 Linux（logdiff 基线）跑。
 **状态**：⬜ 未修
 
 ---
-
 ## B53. 非静态数据成员的类内初始化式（NSDMI）未实现：`int x = 5;` 类内被拒（未修）
 
 - severity: medium（拒收合法程序）｜ status: open ｜ related: `src/parse/parser.cpp` 类体字段分支（~2150），docs/learn/08 ctor 主线
@@ -3784,3 +3784,99 @@ t.classifyQualified("f::x");      // ⇒ 0（同一句，因块作用域开着�
 复用父层路径（Block / TemplateParam），"按路径认层"就必须处理"多对一"，
 否则同一路径在不同栈状态下指向不同的层 —— ★ 这与 B10→B20→B22→B45 那个坑
 同源：**同一个键在两处被当成唯一，实际不是**。
+
+## B56. 成员模板的形参表另写一份 ⇒ 自己的形参在方法体里认不出（依赖限定名直接被拒）
+
+- severity: medium ｜ status: fixed ｜ related: src/parse/parser.cpp:1243, docs/learn/58
+
+**现象**（合法程序被拒，可复现）
+
+```cpp
+struct Box { int value; using type = int; };
+struct S { template <class T> typename T::type get(T x) { return x.value; } };
+int main(){ Box b; b.value = 5; S s; return s.get(b); }
+// clang++-18: rc=5（正确返回 b.value）
+// 修前 minicc: [Semantic Error] unknown type name 'T::type'
+```
+
+**根因**：类成员循环里的成员模板分支**另写了一份**形参表解析（简化版），
+与自由路径那份各写一遍。简化版**只 push 形参节点、没同步 `frame.count`** ⇒
+`lookupTemplateParam`（`src/parse/parser.cpp:183`）在成员模板的帧里取不到任何形参
+⇒ `parseType` 把方法体里的裸 `T` 建成 **Class 节点**而非 **TemplateParam 节点**
+⇒ 依赖名分支（`src/parse/parser.cpp:455`，前提是 `lookupTemplateParam` 命中）走不进去。
+
+★ 实测（同一段函数体里）：成员模板**自己**的 `U` 认不出（`base = U (class/tparam)`），
+而**外层**类模板的 `T` 认得出（`base = T (template param, scope hit)`）——
+因为外层那帧的 `frame.count` 是同步的（自由路径同步了）。
+⇒ 这不是"成员模板不支持什么"，而是"**成员模板自己的形参作用域根本没生效**"。
+
+★ 正确性此前是靠**按名兜底**偶然成立的：`substituteType` 的 Case 6
+（`src/sema/template_instantiation.cpp:1007`）按名字撞替换表，
+`Class("T")` 配 `{T := int}` 也能替换对 ⇒ 自由模板靠作用域认形参、成员模板靠按名撞表，
+两条不同的依据走到同一个结果 —— 一旦某个形态只对一条路成立（依赖限定名）就分叉成 bug。
+
+**影响面**：成员模板全体。连带缺失 5 项形参能力（无名形参 / 模板模板形参 / 默认实参 /
+默认实参约束 / 帧计数同步）—— 自由路径早就有，成员侧没有。
+
+**修法**（2026-11-10，docs/learn/58）：抽 `Parser::parseTemplateParameterList`
+（`src/parse/parser.cpp:1243`）为**唯一实现**，自由路径与成员路径都调它。
+形参作用域的"建帧 + 开作用域"留在调用方（必须活到模板体解析结束）。
+
+**修复**：成员模板的形参能力与形态与自由模板完全一致；`typename T::type` 可用；
+集成 tests/tmpl/test_tmpl_78_member_template_params.cpp（rc=22，与 clang 一致）
++ 单测 tests/unit/test_member_template_params.cpp（`MemberTemplateParams.*` 6 例，
+断言**性质**：形参节点种类 / 依赖限定名的限定者形态 / 四项能力 / 约束检查）。
+突变验证 5/5 实跑变红（M5 = 整体退回旧实现 ⇒ 5 例全红）。
+★ 4 份既有集成日志**有意漂移**（成员侧现在也打形参表那套日志 + 形态从 Class 节点变
+TemplateParam 节点 + `[subst]` 从 Case 6 切到 Case 1）——
+**rc、运行输出、汇编三者逐字节不变**；另 165 份逐字节零漂移。
+
+**教训**：★ **"同一规则两处各写一遍"必然漂移**（B10→B20→B22→B45 同一个坑的第六次现形）。
+本次的具体形态是**时间差**：成员侧是批 21 的一次性快照，自由侧此后逐批加料 ⇒ 能力差越拉越大。
+★ 另一条：**"名字在哪一层登记"要看登记的 API** ——
+`declare`（登记进最内层）与 `openScope`（登记进最近的外层**非模板形参**作用域）
+是两套落点规则；只盯着调用点上的 `openScope(TemplateParam)` 会算错
+（本批评估阶段就误判过一次"值位丢了"，突变验证时被推翻）。
+
+## B57. 函数模板上的模板模板形参推导 + 默认实参填充未实现（自由与成员同款）
+
+- severity: medium ｜ status: open ｜ related: src/sema/template_deduction.cpp:435, docs/learn/58
+
+**现象**（合法程序被拒，可复现）
+
+```cpp
+template <class T> struct Holder { T value; };
+template <template <class> class C, class T> T wrap(C<T> x) { return x.value; }
+int main(){ Holder<int> h; h.value = 9; return wrap(h); }
+// clang++-18: rc=9
+// minicc: [Semantic Error] no matching function for call to 'wrap'
+//          (no template candidate deduces successfully)
+```
+
+```cpp
+template <class T, class U = int> T f(T x) { return x; }
+int main(){ return f(1); }
+// clang++-18: rc=1
+// minicc: 同上报错
+```
+
+**根因**：两条，都是**推导侧**的独立缺口：
+① `deducePair` 只认"P 本身就是模板形参"（`isTemplateParamName(P, paramNames)`，
+`src/sema/template_deduction.cpp:435`），不认"**模板 id 的基名**是模板模板形参"
+（`C<T>` 形态）⇒ `C` 无处可绑；
+② 推导收尾阶段"走完实参仍有未绑定形参 ⇒ 失败"，**没有**"取默认实参顶上"这一步
+（[temp.arg]/3：推不出来的形参用默认实参）⇒ `U` 无处可推。
+
+**为什么现在不修**：★ 这两条**自由路径与成员路径同款**（实测自由路径同样报错）
+⇒ 不是成员侧独有，收口形参表**不会**让它们消失；属**推导引擎**的独立缺口，
+要动的是 `template_deduction.cpp`（① 补模板 id 形态的合一；② 收尾阶段补默认实参填充）。
+且 ① 与 ROADMAP 主线 K 的 K-4（模板模板形参的形参包/默认实参/嵌套）同族，宜合并做。
+
+**影响面**：函数模板（自由 + 成员）的这两种形态；类模板的模板模板实参匹配
+（`checkTemplateArguments`）**不受影响** —— 那条路已经通了（learn/33）。
+
+**回归（修后要补）**：自由与成员各一份正例（rc 与 clang 一致）。
+
+**教训**：★ **解析侧与推导侧是两层** —— 收口解析侧不会自动补上推导侧的能力。
+本批把成员侧从"解析期就拒收"推进到"解析期收得下、推导期按既有能力办"，
+**与自由路径完全对齐**；剩下的差距是**两侧共有**的，不是这次收口该背的。
