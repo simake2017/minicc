@@ -2431,7 +2431,7 @@ StmtPtr Parser::parseStatement() {
                     // 限定者链上任一层的 '<...>' 实参表）——等价旧 sawTypeIdSyntax。
                     bool hasTemplIdSyntax = false;
                     for (TypePtr t = type; t; t = t->nestedQualifier) {
-                        if (!t->templateArgs.empty()) { hasTemplIdSyntax = true; break; } // mrd 如果有参数
+                        if (!t->templateArgs.empty()) { hasTemplIdSyntax = true; break; }
                     }
                     isDecl = hasTemplIdSyntax && isDeclaratorlessDecl(type);
                     // ★ 裸 `S;`（无模板 id 语法、无声明符）：parser 名字识别

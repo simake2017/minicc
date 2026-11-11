@@ -64,8 +64,10 @@ void ParseScopeTable::leave() {
     Scope s = std::move(m_stack.back());
     m_stack.pop_back();
     if (!isPersistent(s.kind, m_stack.back().kind)) return;
-    // mrd 参数key 直接就是 path
-    auto& ctx = m_contexts[s.path]; //mrd** 这里如果没有会默认创建一个ctx对象
+    // 键即作用域路径：离开时把本层的名字并进该路径的持久上下文。
+    // ★ 用 operator[] 取槽：路径没出现过时它就地建一张空表 —— 这是对的，
+    //   刚被判为持久的作用域（命名空间/类）确实存在于该路径上。
+    auto& ctx = m_contexts[s.path];
     for (const auto& [name, info] : s.names) {
         auto it = ctx.find(name);
         if (it == ctx.end()) {
@@ -195,7 +197,9 @@ unsigned ParseScopeTable::classifyQualified(const std::string& qualified) const 
 std::optional<ParseScopeTable::NameInfo>
 ParseScopeTable::lookupInPath(const std::string& path,
                               const std::string& name) const {
-    for (auto it = m_stack.rbegin(); it != m_stack.rend(); ++it) { // mrd ** 这里会按照 path 去匹配，比如 ns::ns::classA这种结构，优先从第一个匹配到的，然后往右扩展
+    // ★ path 是【精确键】不是前缀：查 "N::M::" 只命中那一层，不命中外层的 "N::"。
+    //   活链自内向外扫，第一个 path 命中的帧就是该限定名的归属层。
+    for (auto it = m_stack.rbegin(); it != m_stack.rend(); ++it) {
         if (it->path != path) continue;
         auto n = it->names.find(name);
         if (n != it->names.end()) return n->second;
@@ -224,7 +228,7 @@ bool ParseScopeTable::hasScopePath(const std::string& path) const {
 // ★ 判据：命名空间恒持久；类仅当其【名字所属作用域】不是函数/块时持久
 //   —— 函数/块里的类是局部类（local class），C++ 里没有 `f::Local` 这种限定名。
 bool ParseScopeTable::isPersistent(ScopeKind kind, ScopeKind parentKind) {
-    if (kind == ScopeKind::Namespace) return true; // mrd 持久化只有namespace 和 class 两种
+    if (kind == ScopeKind::Namespace) return true;
     if (kind != ScopeKind::Class) return false;
     return parentKind != ScopeKind::Function && parentKind != ScopeKind::Block;
 }

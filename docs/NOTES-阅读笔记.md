@@ -25,7 +25,8 @@ related: ["[[docs/BUGS]]", "[[docs/PITFALLS]]", "[[docs/learn/17-multiple-inheri
 - [四、Sema —— 类布局与 vtable 拼装](#四sema--类布局与-vtable-拼装)
 - [五、模板实例化 —— 我最初卡住的地方](#五模板实例化--我最初卡住的地方)
 - [六、补遗 —— 后发现的 4 处](#六补遗--后发现的-4-处)
-- [七、再补遗 —— `// mrd` 的 13 处](#七再补遗--mrd-的-13-处)
+- [七、再补遗 —— `// mrd` 的 18 处](#七再补遗--mrd-的-18-处)
+  - [七之二、再补遗二 —— 2026-11-10 远端回流后的 5 处](#七之二再补遗二--2026-11-10-远端回流后的-5-处)
 
 ---
 
@@ -218,13 +219,14 @@ resolveType(Box<int>)                        ← 只认名字
 
 ---
 
-## 七、再补遗 —— `// mrd` 的 13 处
+## 七、再补遗 —— `// mrd` 的 18 处
 
 - severity: medium ｜ status: maintained ｜ related: docs/learn/50, docs/BUGS.md#b11-本类自身多态而基类全非多态时-_vptr-与首基类字段压在同一-offset
 
 注释规范收紧到"四段式"后，`// mrd` 这类个人标记同样属于【禁止：私人笔记】，
-故按前例再清一轮（批次见 docs/learn/50）。**13 条里 10 条与紧邻的正式注释完全重复**，
+故按前例再清一轮（批次见 docs/learn/50）。**首轮 13 条里 10 条与紧邻的正式注释完全重复**，
 删掉不丢信息；**3 条带独有信息**，已就地改写成正式注释（③ 动机段）。
+**次轮 5 条**（2026-11-10 远端回流，见 §七之二）是同一套处置的复演。
 
 | 原出处 | 笔记 | 去向 |
 |---|---|---|
@@ -242,13 +244,30 @@ resolveType(Box<int>)                        ← 只认名字
 | `src/sema/semantic_analyzer.cpp` 基类布局 | "标识 没有主基类，但是存在多态" | ★ 独有信息：`noPrimary` = 无**动态**主基类可摆而本类自身多态 ⇒ vptr 自己占 offset 0、基类从 8 起（BUGS.md B11）⇒ 已改写为正式注释 |
 | `src/sema/semantic_analyzer.cpp` 成员调用推导 | "对于成员类型 要继续往下推导" | 与上方 `inferType(mem)` 的作用说明重复，删除 |
 
+### 七之二、再补遗二 —— 2026-11-10 远端回流后的 5 处
+
+- severity: medium ｜ status: maintained ｜ related: docs/learn/50, docs/specs/comment-standard-conformance.spec.md
+
+远端 `chore: 阅读批注（mrd）` 提交把 5 处 `// mrd` 批注**重新写回了源码** ——
+守卫脚本 `check-comment-style.sh` 判据②当场变红（这是它该做的事）。
+按本节前例再清一轮：**5 条里 3 条与紧邻的正式注释完全重复**，删掉不丢信息；
+**2 条带独有信息**，已就地改写成正式注释（③ 动机段）。
+
+| 原出处 | 笔记 | 去向 |
+|---|---|---|
+| `src/parse/parser.cpp` 语句层模板 id 判据 | "如果有参数" | 与 `!t->templateArgs.empty()` 这个条件逐字重复，删除 |
+| `src/sema/parse_scope.cpp` `leave()` 取持久槽 | "参数key 直接就是 path" | 与文件头 §④ demo（`并入 m_contexts["N::"]`）重复，删除 |
+| `src/sema/parse_scope.cpp` `leave()` 取持久槽 | "这里如果没有会默认创建一个ctx对象" | ★ 独有信息：`operator[]` 在路径未出现过时就地建空表 —— 空表是对的（刚被判为持久的作用域确实存在于该路径上）⇒ 已改写为正式注释的动机句 |
+| `src/sema/parse_scope.cpp` `lookupInPath` 活链扫描 | "这里会按照 path 去匹配，比如 ns::ns::classA这种结构，优先从第一个匹配到的，然后往右扩展" | ★ 独有信息：path 是**精确键**不是前缀（`"N::M::"` 不命中 `"N::"`）、活链自内向外第一个命中即归属 ⇒ 已改写为正式注释 |
+| `src/sema/parse_scope.cpp` `isPersistent` | "持久化只有namespace 和 class 两种" | 与紧邻的函数头注释块逐字重复，删除 |
+
 至此源码里**既没有 `// wangyang`，也没有 `// mrd`**。
 
 ---
 
 ## 附：源码里保留了哪些
 
-- severity: low ｜ status: maintained ｜ related: src/parse/parser.cpp, src/sema/semantic_analyzer.cpp, src/sema/template_instantiation.cpp, src/lex/preprocessor.cpp, include/ast.h
+- severity: low ｜ status: maintained ｜ related: src/parse/parser.cpp, src/sema/semantic_analyzer.cpp, src/sema/template_instantiation.cpp, src/sema/parse_scope.cpp, src/lex/preprocessor.cpp, include/ast.h
 
 去掉个人名字后**就地保留**的注释，是那些本身就在解释"为什么"的：
 
@@ -256,5 +275,7 @@ resolveType(Box<int>)                        ← 只认名字
 - `src/parser.cpp:323/335/919/1060/1504/2075` —— 模板形参作用域、模板 id、P3 各阶段
 - `src/semantic_analyzer.cpp` 中类布局与 vtable 的逐条说明（上表"说明"列）
 - `src/template_instantiation.cpp:274/419/902` —— 实例名充当汇编符号、构造/析构的名字绑定
+- `src/sema/parse_scope.cpp` `leave()` —— `operator[]` 就地建空表是对的（持久作用域确实存在于该路径上）
+- `src/sema/parse_scope.cpp` `lookupInPath()` —— path 是精确键不是前缀、活链第一个命中即归属
 - `src/preprocessor.cpp:143/184/484` —— 行拼接、`[src-line]` 调试块、递归缩进
 - `include/ast.h:315`、`include/preprocessor.h:100`、`src/codegen.cpp:106`
