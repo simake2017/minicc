@@ -1,49 +1,8 @@
 #pragma once
-// =============================================================================
-// 阶段 5：代码生成器 (Code Generator)（理论见 docs/learn/14）
-// =============================================================================
-// 职责：把树状 AST "拍平"成线性的 x86-64 指令（AT&T 语法 .s）。类型与字段名在此
-//   彻底消失，只剩地址和数字。
-// 对照 clang：clang/lib/CodeGen/ 的 CGExpr/CGStmt（本版直接吐 .s，中间无 LLVM IR 层——【简化】）
-// 目标：x86-64 System V AMD64 ABI │ 输出：GNU as 可汇编的 .s（.text/.data/.rodata）
-// 管线：Preprocessor → Lexer → Parser → Sema → 模板推导/实例化 → ★CodeGen★
-//   → .s → 自研链接器产出可执行文件。输入：类型全解析、auto 已替换、ClassLayout 已算好。
-//
-// ── 节点 ⇒ 指令 速查表（逐条展开见 codegen.cpp 各 visit 重载）────────────
-//   IntLiteral 42        ⇒ movq $42, %rax
-//   VarExpr(局部 x@-32)   ⇒ movq -32(%rbp), %rax
-//   VarExpr(全局 g)       ⇒ movq g(%rip), %rax
-//   VarExpr(栈类对象 d)   ⇒ leaq -N(%rbp), %rax        # 值语义 = 对象地址
-//   MemberExpr(u.age)    ⇒ 对象地址 %rax → movl off(%rax), %eax（宽度分派）
-//   AssignStmt(u.age=20) ⇒ movl %eax, off(%rcx)
-//   BinaryExpr(a + 1)    ⇒ 左 pushq → 右 %rcx → popq 左 → addq %rcx, %rax
-//   CallExpr(f(a,b))     ⇒ 实参逆序 push → popq rdi/rsi → callq f
-//   NewExpr(new Dog)     ⇒ movq $size,%rdi → callq malloc → 装 _vptr → callq ctor
-//   IfStmt               ⇒ testq %rax,%rax / je else_N ... / jmp endif_N
-//   WhileStmt            ⇒ while_begin_N: 条件 / je while_end_N / body / jmp 回边
-//   ptr->vfunc()         ⇒ movq (%rdi),%rax / movq N(%rax),%rax / callq *%rax
-//   字段宽度分派          ⇒ 1B movb（写）/ movzbq（读）│ 2~4B movl │ 8B movq
-//
-// ── 调用约定（System V AMD64 ABI）──────────────────────────────────────
-//   整数/指针参数依次用 rdi, rsi, rdx, rcx, r8, r9，返回值 rax，栈 16 字节对齐；
-//   成员函数的 this 占第一个参数槽 rdi（Itanium C++ ABI），显式实参从 rsi 起顺延。
-//   callee-saved = %rbp/%rbx/%r12~%r15：谁用谁恢复（emitVirtualCall 用 rbx，
-//   __minicc_dynamic_cast 的 DFS 用 r12~r14，均自行保存/恢复）。
-//   栈帧以 %rbp 为基址（详见 codegen.cpp emitFunction）：-8 起依次是 this、
-//   形参 spill（各 8B），再往下是局部变量，向低地址增长，止于 %rsp（序言 subq 预留）。
-//
-// ── vtable 与名字修饰（Itanium C++ ABI 简化版）─────────────────────────
-//   含虚函数的类 → 一张 vtable（.data），对象偏移 0 处藏 _vptr
-//   成员方法 "类名_方法名"（Dog_speak）│ 模板实例 _Z5MyPtrIiE（阶段 4 NameMangler）
-//   vtable/typeinfo：_ZTV7MyClass / _ZTI7MyClass
-//
-// ── 对应 LLVM 模块（把 LLVM 好几个阶段压缩进 ~900 行手写代码）──────────
-//   SelectionDAG 指令选择 → emitExpr/emitStmt 手写模式匹配 │
-//   X86ISelLowering 调用约定降级 → emitCall/emitVirtualCall │
-//   RegAllocGreedy → 极简"单累加器 rax + 栈周转"策略 │
-//   PrologEpilogInserter（序言/尾声）→ emitFunction 手写 push/leave/ret │
-//   AsmPrinter（汇编打印）→ generate() 拼装三段输出
-// =============================================================================
+// x86-64 AT&T 汇编生成器，消费 Sema 已解析的类型、字段偏移与符号。
+// 参考 clang/CodeGen/CGExpr.cpp、CGCall.cpp、CGClass.cpp；System V AMD64 ABI。
+// 例：标量结果放 rax，局部对象使用栈地址，类按值返回通过隐藏缓冲。
+// 栈帧与临时对象空间在函数序言预留。
 
 #include "ast.h"
 #include "ast_visitor.h"
@@ -107,15 +66,8 @@ private:
     std::unordered_map<std::string, int> m_arrayLocals;  // 局部数组 -> 栈偏移
     std::unordered_set<std::string>     m_arrayGlobals; // 全局数组名字
 
-    // ── 引用变量 / 引用形参（[dcl.ref]/1：引用是【别名】，不是副本）────────
-    // 名字 → { 槽偏移, 被引用对象的类型 }
-    // ★ 槽里存的是【被绑定对象的地址】—— 引用自己不存"值的副本"。
-    //   读  = 从该地址间接加载；写 = 往该地址间接存储。
-    //   局部引用变量与引用形参共用这一张表 ⇒ 同一份语义只有一个实现。
-    // ★ 这张表是【作用域链】不是一张平表（docs/learn/53 的教训）：
-    //   同名变量在不同的块里可以各有一种形态（块① `int& s;` 块② `S s;`），
-    //   平表会让"旧的那个别名"盖住"新的那个类对象" ⇒ 查表必须由内向外扫。
-    //   层 0 = 函数作用域（形参 + 函数体顶层声明），每进一层 BlockStmt 压一层。
+    // 引用别名的槽存对象地址，按块维护名字以支持遮蔽。
+    // 局部有地址的绑定可走别名；形参目前仅可写左值引用保证按地址传递。
     struct RefLocalInfo {
         int     offset = 0;      // 相对 %rbp 的负偏移（槽里放的是地址）
         TypePtr referencedType;  // 被引用对象的类型（决定"读"怎么取）
@@ -147,14 +99,8 @@ private:
     int m_lastCtorTempOffset = 0;
     std::string m_lastCtorTempClass;
 
-    // ── sret：按值返回类对象的【隐藏返回缓冲】约定 ──────────────────────────
-    // 教学版口径（对齐 System V 的 sret 形态）：
-    //   调用点：rdi = 返回缓冲地址；显式实参从 rsi 起（成员方法则 rsi = this，
-    //           实参从 rdx 起）；返回值 rax = 缓冲地址。
-    //   定义点：序言把 rdi  spill 到 m_sretPtrSlot；`return <类对象>` 把对象
-    //           逐字节拷进该缓冲，rax 回填缓冲地址。
-    // ★ 判据单点：**"这个函数按值返回类"只看返回类型是不是类**（Type::isClass）——
-    //   调用点与定义点读的是同一个 Type ⇒ 天然一致，不会漂（learn/49 / B45 同款）。
+    // 类按值返回使用 sret 隐藏缓冲，调用方与定义方共用返回类型判据。
+    // 例：S x=f(); 可直接用 x 的槽作缓冲；显式实参寄存器随隐藏参数右移。
     bool m_fnReturnsClassByValue = false;  // 当前【定义中】的函数按值返回类
     int  m_sretPtrSlot = -1;               // 隐藏返回缓冲指针的栈槽（rbp 负偏移）
     uint32_t m_sretValueSize = 0;          // 返回类型（类）的大小
@@ -175,12 +121,7 @@ private:
     // 与 visit(MemberExpr) 的"子对象取址"约定同源（那边只管类字段这一步）。
     void emitClassAddress(const ExprPtr& expr);
 
-    // ── 引用语义三件套（[dcl.ref]/1：引用是别名，不是副本）────────────────
-    // 【统一表示】：引用变量与引用形参的槽里放的是【被绑定对象的地址】。
-    //   读 ⇒ 从该地址间接加载；写 ⇒ 往该地址间接存储。
-    //   （类的"值"在本实现里就是对象地址 ⇒ 引用到类对象时"读"直接给地址，不解引用。）
-    //
-    // emitRefValue：读一个引用（rax = 被绑定对象的值；类引用则 rax = 对象地址）。
+    // 引用槽统一存地址，读写通过该地址进行；初始化与参数两侧共用绑定判据。
     void emitRefValue(const std::string& name, const RefLocalInfo& info);
     // findRefLocal：按名字查"当前作用域里可见的引用绑定"（作用域链由内向外扫）。
     // 查不到返回 nullptr ⇒ 该名字不是引用 ⇒ 走普通局部/全局路径。
@@ -209,7 +150,7 @@ private:
     // return 点就近析构：把【所有活跃作用域层】登记的对象从内到外、层内逆序各发一遍
     // 析构，并顺带保护 rax 里的返回值（析构是 callq，会踩 rax）。
     // 返回值 = 是否真的发了析构；false 时【一个字节都不发】，
-    // 从而保证非 RAII 函数的汇编逐字节不变。见 docs/BUGS.md B4。
+    // 从而保证非 RAII 函数的汇编逐字节不变。见 docs/已知边界。
     bool emitDtorsOnReturn();
 
     // 帧空间预估：扫描函数体内所有局部变量声明并累加占用字节（类类型按布局
@@ -322,18 +263,8 @@ private:
     // 发射 RTTI 运行时助手 __minicc_dynamic_cast（沿 typeinfo 基类链匹配）
     void emitDynamicCastHelper();
 
-    // ── 虚函数调用（核心！） ──
-    // pet->speak()（Animal，vtable[0]）⇒
-    //   (a) movq (%rdi), %rax      # 读出 obj._vptr
-    //   (b) movq 0(%rax), %rax     # vtable[idx*8]
-    //   (c) callq *%rax            # 间接调用
-    // 参数：className/methodName 只用于生成可读注释；args 不含 this；
-    //   vtableIndex 是 Sema 在 ClassLayout.vtableEntries 里查好的编译期常数
-    //   —— "下标编译期定死，表项内容运行期才定"。
-    // ★ sretBuf != kNoSretTarget ⇒ 本次是"按值返回类对象"的虚调用：rdi 归隐藏
-    //   返回缓冲指针，this 挪到 rsi、显式实参从 rdx 起（最多 4 个）。
-    //   kNoSretTarget = 老口径（this 在 rdi）。
-    // ⚠ 哨兵不能用"偏移 >= 0"判定：rbp 偏移【全是负数】⇒ 真实槽位会被当成"没有"。
+    // 虚调用经对象 vptr 取槽，间接调用 Sema 已确定签名的方法。
+    // 例：Animal* p 指向 Dog 时，p->speak() 使用实际对象的覆写槽。
     void emitVirtualCall(const std::string& className,
                          const std::string& methodName,
                          const std::vector<ExprPtr>& args,

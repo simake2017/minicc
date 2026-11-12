@@ -1,21 +1,6 @@
-// =============================================================================
-// src/lex/lexer.cpp —— 阶段 1：词法分析器实现（手写 DFA）
-// =============================================================================
-// 核心思想：根据当前字符决定进入哪个"扫描分支"，每个分支消费若干字符、产出一个 Token。
-//
-// 管线位置  源码 → Preprocessor → ★Lexer★ → Parser → Sema → 模板推导/实例化 → CodeGen
-// 标准章节  [lex.phases]（翻译阶段）│ [lex.token] │ [lex.pptoken]（最长匹配的注记在此）
-//           [lex.name] [lex.icon] [lex.string] [lex.operators]
-// 对照 clang：clang/lib/Lex/Lexer.cpp:Lexer::LexTokenInternal —— 本文件 nextToken() 是它的教学简化版。
-//
-// demo: "int x = 42;" ⇒ [KwInt][Identifier "x"][Assign "="][IntLiteral "42"][Semicolon][Eof]
-// 本文件结构
-//   tokenTypeName()             —— 枚举 → 可读名（供诊断消息）
-//   字符级操作                    peek/peekNext/advance/isAtEnd/currentLocation/makeToken
-//   skipWhitespaceAndComments() —— 空白 + // 注释 + /* 注释 */
-//   四大扫描分支                  scanNumber / scanIdentifierOrKeyword / scanString / scanOperator
-//   调度入口                      nextToken（按首字符分派）/ tokenizeAll（批量扫描）
-// =============================================================================
+// 手写词法扫描器实现。
+// 参考 clang/Lex/Lexer.cpp: Lexer::LexTokenInternal。
+// 最长匹配决定边界：a->b 中 -> 是一个 Token；a - b 中 - 独立。
 
 #include "lexer.h"
 #include <cctype>
@@ -23,13 +8,7 @@
 
 namespace minicc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// tokenTypeName：给每种 Token 一个可读名字
-// ─────────────────────────────────────────────────────────────────────────────
-// demo: KwInt ⇒ "int"；Arrow ⇒ "->"；Eof ⇒ "EOF"；IntLiteral ⇒ "IntLiteral"
-// 约定：关键字/运算符返回"源码形态"，字面量/标识符返回"类别名"，
-// 这样 Sema 能直接拼出类似 "期望 ';' 但得到 '}'" 的可读报错。
-// ⚠ switch 必须与 token.h 的枚举一一对应，新增种类时两边同步。
+// Token 的诊断名称；关键字与运算符使用源码拼写。
 const char* tokenTypeName(TokenType t) {
     switch (t) {
         case TokenType::Eof:           return "EOF";
@@ -122,20 +101,9 @@ const char* tokenTypeName(TokenType t) {
     return "Unknown";
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 构造函数
-// ─────────────────────────────────────────────────────────────────────────────
-// 按值传参 + std::move：右值实参（如临时 string）零拷贝移动进来，左值最多拷贝一次
-// —— 一个签名覆盖两种情况。
-// demo: Lexer lex("int x = 42;"); ⇒ m_source 持有该串，m_pos=0，m_line=m_col=1
 Lexer::Lexer(std::string source)
     : m_source(std::move(source)) {}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 字符级操作
-// ─────────────────────────────────────────────────────────────────────────────
-// 手写词法器三件套：只读前瞻（peek/peekNext）+ 消费前进（advance）。
-// 前瞻越界统一返回 '\0'，各分支因此可以放心写 peek()=='x' 而不用先判边界。
 
 // 查看当前字符但不消费（状态不变，可反复调用）。
 // demo: "x+1" ⇒ peek()=='x'，再 peek() 仍是 'x'
@@ -183,18 +151,8 @@ Token Lexer::makeToken(TokenType type, std::string text, SourceLocation loc) con
     return Token{type, std::move(text), loc};
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 跳过空白和注释（[lex.comment]：注释不是 token，词法上等价一个空格 ⇒ 直接吃掉）
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫到的字符 ⇒ 动作（不产 Token，连占位 token 都不生成）：
-//   ` ` `\t` `\r` `\n` ⇒ advance() 后继续循环
-//   `//`               ⇒ 跳到行尾（消费 `//`，再吞到 '\n' 或文件尾）
-//   `/*`               ⇒ 吞到 `*/`（★ 直到文件尾仍未见 `*/` ⇒ 当作"注释延续到文件末尾"，
-//                         不报错；clang 会报 unterminated comment，属可接受的简化）
-//   其他               ⇒ break，交回 nextToken() 分派
-// 用 while 而非 if：一个 token 前可能交替出现"空白 //注释 /*注释*/ 空白…"，
-// 必须反复跳，直到撞上真正的 token 首字符或文件尾。
-// demo: "  // hi\n/*c*/ 42" ⇒ 调用后光标指向 '4'
+// 跳过空白与注释，但在字面量中保留相同字符。
+// 例：x/*注释*/+1 与 x + 1 产生相同 Token 序列。
 void Lexer::skipWhitespaceAndComments() {
     while (!isAtEnd()) {
         char c = peek();
@@ -234,27 +192,8 @@ void Lexer::skipWhitespaceAndComments() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫描数字字面量（整数字面量，[lex.icon]）
-// ─────────────────────────────────────────────────────────────────────────────
-// 状态机（[lex.icon] 的整数部分）：
-//   起始 ──'0'──► [前缀态] ──'x'/'X'──► [十六进制态] ──hex──► …
-//                          ──'b'/'B'──► [二进制态]  ──0/1──► …
-//                          ──其他────►  [八进制态]  ──0~7──► …
-//   起始 ──'1'~'9'──► [十进制态] ──数字──► [十进制态]
-//   任一数字态 ──整数后缀──► [后缀态] ──非后缀──► 返回 IntLiteral
-// 扫到的字符 ⇒ 动作：
-//   数字（按进制合法性）⇒ advance() 收进 text，继续贪心
-//   后缀 u/U/l/L（可组合，见下）⇒ 收进 text（本函数【不解读】它，留给 Parser）
-//   其他/EOF ⇒ 停，产 Token{IntLiteral, text}
-// demo: "42;" ⇒ Token{IntLiteral,"42"}，光标停在 ';'（贪心保证 42 不会被切成 4 和 2）
-//       "0x1F" ⇒ "0x1F" │ "4ul" ⇒ "4ul"
-// ★ 后缀与进制【只收进 text，不在词法期解读】—— 解读放在 Parser::parseIntLiteral。
-//   理由：字面量的"值 + 形态"是【语义】信息（4L 的形态是 long），而 Token 只有
-//   一个 text 字段。让词法只负责"最长匹配切一刀"、解析器负责"读懂它"，
-//   职责边界与 clang 一致（Lexer 产出 tok::numeric_constant 的原始串，
-//   由 clang/lib/Sema/SemaExpr.cpp:Sema::ActOnNumericConstant 配着 TargetInfo 决定类型）。
-// 省略：浮点字面量（[lex.fcon]）、数字分隔符 '（C++14）、后缀 f。
+// 整数字面量保留进制前缀与后缀，数值和类型由 Parser 解释。
+// 例：0x2A、0b1010、077、4ULL 都产出 IntLiteral。
 Token Lexer::scanNumber() {
     // 先拍位置快照：token 位置指向第一个数字（若扫完再取就指向后面的字符了）
     auto loc = currentLocation();
@@ -283,10 +222,7 @@ Token Lexer::scanNumber() {
         }
     }
 
-    // ── 整数后缀 [lex.icon]：unsigned-suffix / long-suffix / long-long-suffix /
-    //    size-suffix，可任意组合且大小写皆可（`4ul`、`4LU`、`4LL`、`4ULL` …）──
-    //    词法只需保证不会把 `4long` 这种标识符开头切碎：后缀只吃
-    //    u/U/l/L/z/Z 这几个字母，且 l/L 至多吃两个（long long）。
+    // 收集整数后缀，合法组合由 Parser 校验。
     int nLong = 0;
     while (!isAtEnd()) {
         const char c = peek();
@@ -301,20 +237,8 @@ Token Lexer::scanNumber() {
     return makeToken(TokenType::IntLiteral, text, loc);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫描标识符或关键字：先按标识符规则扫完整单词，再查关键字表 kKeywordMap ——
-// auto/virtual/template 等关键字与普通标识符的区分点就在这里。
-// 状态机（[lex.name]：首字符字母/下划线，后续字母/数字/下划线）：
-//   起始 ──字母/_──► [词体态] ──字母/数字/_──► [词体态] ──其他字符──► 查 kKeywordMap
-// 扫到的字符 ⇒ 动作：
-//   字母 / `_`   ⇒ advance() 收进 text（`_` 可作首字符）
-//   数字         ⇒ advance() 收进 text（数字可作续字符，但不能开头）
-//   其他 / EOF   ⇒ 停，用 text 查 kKeywordMap 分派：
-//                    ├─ 命中 "if"     ⇒ Token{KwIf, "if"}
-//                    ├─ 命中 "return" ⇒ Token{KwReturn, "return"}
-//                    └─ 未中 "foo2"   ⇒ Token{Identifier, "foo2"}
-// 好处：新增关键字只改 kKeywordMap 一行、状态机不动。对照 clang：IdentifierTable 哈希查表。
-// demo: "if(x" ⇒ Token{KwIf,"if"}；"foo2 " ⇒ Token{Identifier,"foo2"}
+// 先扫描完整单词再查关键字表。
+// 例：int → KwInt；integer → Identifier，不能拆成 int + eger。
 Token Lexer::scanIdentifierOrKeyword() {
     auto loc = currentLocation();
     std::string text;
@@ -333,14 +257,8 @@ Token Lexer::scanIdentifierOrKeyword() {
     return makeToken(TokenType::Identifier, text, loc);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫描字符串字面量
-// ─────────────────────────────────────────────────────────────────────────────
-// [lex.string]：字符串字面量由 '"' 开始，到下一个未被转义的 '"' 结束。
-// 转义处理：读到 '\' → 再读一个字符，按下表翻译；未知转义原样保留（简化处理）。
-// ★ text 存的是"转义翻译后的值"而非原始源码文本 —— CodeGen 因此可直接把内容
-//   嵌入 .rodata 段。
-// demo: 源码 "hi\n" ⇒ Token{StringLiteral, text == "hi"+换行符}，结尾引号被消费
+// 字符串扫描时翻译转义，Token.text 不含外围引号。
+// 例："hi\n" 的 text 含换行；"a\"b" 的 text 含双引号。
 Token Lexer::scanString() {
     auto loc = currentLocation();
     advance(); // 消费开头的 " 只是往前推进，但是不添加
@@ -375,17 +293,8 @@ Token Lexer::scanString() {
     return makeToken(TokenType::StringLiteral, text, loc);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫描字符字面量（[lex.ccon]）
-// ─────────────────────────────────────────────────────────────────────────────
-// 语法：' c-char ' 或 ' c-char-sequence '（多字符字面量，Implementation-defined）
-// 与 scanString 的唯一区别是**定界符不同**与**长度语义**：字符串是"一串字符"，
-// 字符字面量是"一个整数值"。故这里把翻译后的字符【原样存进 text】，
-// 由 Parser 负责取它的值（`'a'` ⇒ 97）—— 与整数字面量"词法切串、Parser 解读"同构。
-// demo: 'a' ⇒ Token{CharLiteral, text=="a"}；'\n' ⇒ text=="\n"（已翻译）
-//       'ab'（多字符）⇒ text=="ab"，Parser 按"末字节在前"的常见实现取值
-// 对照 clang：clang/lib/Lex/Lexer.cpp:Lexer::LexCharConstant → clang/lib/Sema/SemaExpr.cpp:Sema::ActOnCharacterConstant（值在 Sema 定，
-//   因为涉及目标字符集与 wchar_t 宽度）。
+// 字符字面量识别常用转义，并拒绝空内容与未闭合引号。
+// 例：'a'、'\n'；此处保留扫描到的字符文本。
 Token Lexer::scanChar() {
     auto loc = currentLocation();
     advance(); // 消费开头的 '
@@ -428,21 +337,8 @@ Token Lexer::scanChar() {
     return makeToken(TokenType::CharLiteral, text, loc);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫描运算符和分隔符：★最长匹配（maximal munch，[lex.pptoken] 注）
-// ─────────────────────────────────────────────────────────────────────────────
-// 最长匹配原则："若下一个字符合法地把当前序列延长为一个更长的 token，就必须延长"
-//   ⇒ `a<=b` 必须切成 a | <= | b，而不能切成 a | < | = | b。
-// 扫到的记号 ⇒ 产出（先试 2 字符，组成不了已知双字符运算符再退回 1 字符）：
-//   双字符：`<=` `>=` `==` `!=` `&&` `||` `+=` `-=` `*=` `/=` `->` `::`
-//           ⇒ 消费前瞻的 n，产对应双字符 token
-//   单字符（不消费 n，产对应单字符 token）：
-//     `<` `>` `=` `!` `&` `|` `+` `-` `*` `/` `:`      可作双字符首字符的那批
-//     `%` `^` `~` `.` `,` `;` `(` `)` `{` `}` `[` `]`  只能单字符的那批
-//   其他  ⇒ 抛 "Unexpected character 'x' at 行:列"
-// 实现技巧：本项目词表只有 1/2 字符两种 ⇒ "首字符 c + 前瞻 n" 即够
-//   （clang 还要处理 `<<=`、`...` 等更长串）。
-// demo: "<=" ⇒ Token{LessEqual}；"<x" ⇒ Token{Less}，光标停在 'x'；"->" ⇒ Token{Arrow}
+// 优先匹配双字符运算符（[lex.pptoken] 最长匹配）。
+// 例：<= 与 -> 各为一个 Token；< = 保留为两个 Token。
 Token Lexer::scanOperator() {
     auto loc = currentLocation();
     char c = advance(); // 会消费
@@ -515,19 +411,7 @@ Token Lexer::scanOperator() {
         std::format("Unexpected character '{}' at {}", c, loc.toString()));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// nextToken：词法分析的核心入口
-// ─────────────────────────────────────────────────────────────────────────────
-// 这是一个"调度器"：根据当前字符的类型分派到对应的扫描函数 ——
-// 整个流程即确定性有限自动机（DFA）的外层循环。
-// ─────────────────────────────────────────────────────────────────────────────
-// 分派表（只看首字符就决定分支；ASCII 流程图见 lexer.h 类注释）：
-//   数字 (0-9)        scanNumber()                "42"
-//   字母 / 下划线     scanIdentifierOrKeyword()   "foo"、"int"
-//   双引号            scanString()                "hi"
-//   单引号            scanChar()                  'a'
-//   其他              scanOperator()              "="、";"、"->"
-// demo: "int x = 42;" 连续调用 ⇒ {KwInt}{Identifier "x"}{Assign}{IntLiteral "42"}{Semicolon}{Eof}
+// Token 读取入口；空白与注释不进入 Token 流。
 Token Lexer::nextToken() {
     skipWhitespaceAndComments(); //跳过空白符和注释
 
@@ -563,12 +447,7 @@ Token Lexer::nextToken() {
     return scanOperator();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// tokenizeAll：一次性扫描所有 Token
-// ─────────────────────────────────────────────────────────────────────────────
-// 反复调用 nextToken() 直到（含）Eof —— main.cpp 使用的接口，
-// 把整条 Token 流一次性交给 Parser。
-// demo: Lexer("int x;").tokenizeAll() ⇒ [KwInt][Identifier "x"][Semicolon][Eof]
+// 收集完整 Token 流，包含末尾 Eof。
 std::vector<Token> Lexer::tokenizeAll() {
     std::vector<Token> tokens;
     while (true) {

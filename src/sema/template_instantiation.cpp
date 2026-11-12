@@ -1,20 +1,6 @@
-// =============================================================================
-// 阶段 4：模板实例化引擎实现（理论见 docs/learn/05、13、18、27）
-// =============================================================================
-// 实例化 = 结构化替换 [temp.subst]：深拷贝蓝图 AST，逐【类型位置】换实参；复合类型
-//   （T*/T&/const T）由 substituteType 递归处理，不是文本替换。
-// 蓝图写法 ⇒ 实例（MyPtr<int>，{T := int}）：
-//   class MyPtr<T>   ⇒ 深拷贝类 AST ⇒ 新类 MyPtr_int ⇒ 符号 _Z5MyPtrIiE ⇒ 注册为真实类
-//   T* data          ⇒ int* data              │ T& get() ⇒ int& get()
-//   return N;（NTTP）⇒ return 4;（表达式位置在 cloneExpr 里替换）
-//   Vec<T>（别名）    ⇒ 只解糖成 MyPtr<T>，零新类、零新符号（[temp.alias]/1）
-//
-//   管线位置：Sema 发现 MyPtr<int> 的使用（或推导出函数模板实参）后调用本模块；
-//             产出的具体类/函数注册进全局表，供后续语义检查与 CodeGen 使用。
-//   标准章节：[temp.inst] 隐式实例化的触发（用到才实例化）│ [temp.subst] 实参替换
-//             [dcl.ref]/6 引用折叠 │ [temp.alias]/1 别名只解糖不实例化
-//   对照 clang：SemaTemplateInstantiate.cpp ≈ instantiate*，TreeTransform.h ≈ cloneExpr/cloneStmt
-// =============================================================================
+// 模板实例化与符号编码实现。
+// 参考 clang/Sema/SemaTemplateInstantiateDecl.cpp、TreeTransform.h；标准 [temp.subst]。
+// 例：Box<T>{T v;} 代入 int 得独立字段；T&& 代入 int& 得 int&。
 
 #include "template_instantiation.h"
 #include <format>
@@ -142,7 +128,7 @@ std::string NameMangler::losslessArgumentsKey(
 // ★ 命名空间里的类/模板名带 "::"（"M::B" / "N::C"），直接拼进符号标签会让
 //   汇编器报 "junk at end of line"，故统一净化。⚠ 净化后 "N::S" 与 "N_S"
 //   会撞名 —— 教学实现接受（见 docs/learn/26）。
-// ★ B38：mangleTemplateInstance 也用它（模板名带作用域 ⇒ "M::B"）。
+// mangleTemplateInstance 也用它（模板名带作用域 ⇒ "M::B"）。
 static std::string symbolSafe(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -157,14 +143,7 @@ std::string NameMangler::mangleTemplateInstance(
     const std::string& templateName,
     const std::vector<TemplateArg>& args) {
 
-    // ★★ B38：模板名可能带作用域（"M::B"）⇒ 先净化再算长度。
-    //   '::' 不是合法的 mangling 字符，直接拼进去汇编器会报 "junk at end of line"。
-    //   净化规则与 mangleRTTI / mangleVTable 共用同一份 symbolSafe（产生端与
-    //   使用端同源 ⇒ 天然一致）。长度前缀按【净化后】的名字算（'::'→'__' 等长，
-    //   故对既有名字零影响 —— 既有模板名都是纯标识符）。
-    // 对照 clang（Itanium ABI）：嵌套名编成 N…E ⇒ `M::B<int>` 是 _ZN1M1BIiE，
-    //   本实现是 _Z4M__BIiE —— 编码形态不同（教学实现，见 docs/BUGS.md B7），
-    //   但【唯一性】一致：`M::B<int>` 与 `::B<int>` 必是不同符号。
+    // 作用域名先清洗，再按清洗结果计算名称长度；此处不是完整 Itanium 嵌套名编码。
     const std::string safeName = symbolSafe(templateName);
     std::string result = std::format("_Z{}{}I", safeName.size(), safeName);
 
@@ -522,23 +501,9 @@ ClassDeclPtr TemplateInstantiator::instantiate(
             sub ? sub->toString() : "?");
     }
 
-    // 5.6 克隆成员模板（[temp.mem]）—— 类模板体里的成员模板
-    // ★ 为什么必须克隆：成员模板的推导与实例化是在【对象的类】那张表上做的
-    //   （Sema::m_classMemberTemplates[类名]，见 semantic_analyzer.cpp 的 inferCall）。
-    //   而蓝图类根本不在 m_classDecls 里 —— `template<class T> struct Box {...}` 的
-    //   Pass 1 只登记模板（"class template 'Box' registered"），蓝图**从不经过**
-    //   processClassDecl，也就永远不会登记成员模板表。于是实例类 Box_int 手里
-    //   一张空表 ⇒ `Box<int> b; b.pick(7);` 报 "No member 'pick' in class 'Box_int'"
-    //   （docs/BUGS.md B18：解析层通、语义层断）。
-    // ★ 只替换【外层】形参：subst 里只有 T，成员模板自己的 U 不在表中 ⇒
-    //   substituteType 的 Case 1 走"不在表中则原样保留"分支。这正是成员模板
-    //   "内层形参留到调用点再推导"的前提 —— 若把 U 也替换掉就没有可推导的东西了。
-    // demo: `template<class T> struct Box { template<class U> T convert(U x); };`
-    //       Box<int> ⇒ 实例里的成员模板变成 `template<class U> int convert(U x)`
-    //       调用 b.convert(7) ⇒ U := int ⇒ 符号 Box_int_convert_int
-    // 对照 clang：主模板的成员模板在特化里被 TreeTransform 带着类的实参重建
-    //   （SemaTemplateInstantiateDecl.cpp 的 InstantiateDecl → TransformTemplateDecl），
-    //   内层形参保持未绑定。
+    // 成员模板随外层类克隆，替换外层形参，保留自身形参待调用时推导。
+    // 例：Box<T>::get<U> 在 Box<int> 中先替换 T，U 仍是占位符。
+    // 共享蓝图会让不同外层实例互相污染。
     if (!templateDecl->classTemplate->memberTemplates.empty()) {
         std::cout << "  ║ ── Member Template Substitution ──\n";
     }
@@ -562,12 +527,8 @@ ClassDeclPtr TemplateInstantiator::instantiate(
         newClass->memberTemplates.push_back(clonedMt);
     }
 
-    // 5.7 克隆 static 数据成员（[class.static.data]；BUGS.md B33）
-    // 实例类各持各的声明（processClassDecl 会按实例名注册 "Box_int::value"），
-    // 类型随形参替换（`static const int size = sizeof(T)` 这类用法由此成立），
-    // 初始化式走 cloneExpr（表达式位置上的 T 一并替换）。
-    // ★ 每个实例的静态常量是【不同实体】：Box<int>::tag 与 Box<double>::tag
-    //   在符号表里是两个名字（"Box_int::tag" / "Box_double::tag"），不会互踩。
+    // static 成员每个实例独立声明，类型与初始化式都应用外层替换。
+    // 例：Box<int>::value 与 Box<double>::value 分别登记。
     for (auto& sm : templateDecl->classTemplate->staticDataMembers) {
         StaticDataMember cloned;
         cloned.name = sm.name;
@@ -579,16 +540,9 @@ ClassDeclPtr TemplateInstantiator::instantiate(
         newClass->staticDataMembers.push_back(std::move(cloned));
     }
 
-    // 5.8 克隆嵌套类（[class.nest] + [temp.inst]/5）
-    // ★ 为什么必须克隆：嵌套类也是【外层类模板的成员】—— 它的字段/方法里可以出现
-    //   外层的形参 T（`struct Inner { T v; }`）。不克隆 ⇒ 实例 Box_int 里压根没有
-    //   Inner 这个类型 ⇒ `Box<int>::Inner i;` 报 "no type named 'Inner' in 'Box_int'"
-    //   （docs/ROADMAP.md §0.1 批 0-2）。
-    // ★ 登记名【不在这里定】：本处只交出裸名（"Inner"），前缀化（"Box_int::Inner"）
-    //   由 Sema::processClassDecl 统一做 —— 前缀规则只有那一份（红线 3 判据单点）。
-    // 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:SemaTemplateInstantiator::
-    //   InstantiateClassTemplate → TransformDecl 递归遍历类成员（含嵌套 RecordDecl），
-    //   嵌套类的 DeclContext 指向实例化后的外层类。
+    // 嵌套类是模板成员，须递归克隆并替换外层形参（[class.nest]、[temp.inst]）。
+    // 例：Box<T>::Inner{T v;} 在 Box<int> 中 v 为 int。
+    // 克隆保留裸名，完整限定名交给 Sema 统一登记。
     if (!templateDecl->classTemplate->nestedClasses.empty()) {
         std::cout << "  ║ ── Nested Class Substitution ──\n";
     }
@@ -638,16 +592,8 @@ FuncDeclPtr TemplateInstantiator::instantiateFunction(
     targs.reserve(typeArgs.size());
     for (auto& a : typeArgs) targs.push_back(TemplateArg::ofType(a));
 
-    // ★ 函数模板实例必须编出完整的 <bare-function-type>（返回类型 + 参数表），
-    //   不能只编模板实参 —— 那是类模板的编法（docs/BUGS.md B2）。
-    //   这里用的是蓝图（尚未替换）的返回类型与参数表：形参在签名里保留为
-    //   T_ / T0_… 形态，与 clang 的编法一致。
-    //   demo: `template<class T> T twice(T x);` 蓝图签名 = T→T ⇒ 实例 twice<int>
-    //         编出 _Z5twiceIiET_T_（_Z + 5twice + I i E 模板实参 + T_ 返回类型 + T_ 形参表）
-    //   成员模板（[temp.mem]）另走一套：符号是 `类名_方法名` + 实参后缀 —— 与普通
-    //   成员函数同款前缀，使 CodeGen 既有的调用约定（`Cls_method`）能对上，
-    //   而不同实参的实例又靠 `_int` / `_double` 后缀区分开（自由函数模板的
-    //   Itanium 名里已含实参，无此需要）。
+    // 函数模板符号须包含返回与形参类型，不能只编码模板实参。
+    // 例：同为 f<int> 的 f(T) 与 f(T*) 必须区分（Itanium ABI §5.1.8）。
     std::string mangled;
     if (ownerClassName.empty()) {
         mangled = NameMangler::mangleFunctionTemplateInstance(
@@ -686,27 +632,9 @@ FuncDeclPtr TemplateInstantiator::instantiateFunction(
     return instance;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 类型替换 substituteType —— [temp.subst] 的核心（理论见 docs/learn/02、05、27）
-// ─────────────────────────────────────────────────────────────────────────────
-// 深度优先遍历类型树：按节点种类分派，未命中或非依赖则原样返回。
-//   扫到哪种类型节点 ⇒ 走哪个 Case ⇒ 结果（以 {T := int} 为例）：
-//     TemplateParam("T") ⇒ Case 1   ⇒ int（不在表中则原样保留，如外层模板的形参）
-//     decltype(e)        ⇒ Case 1.5 ⇒ 替换 e 后求值（延迟求值的兑现时刻）
-//     T*                 ⇒ Case 2   ⇒ int*（pointee 无变化则复用原节点）
-//     T&                 ⇒ Case 3   ⇒ int&；配 {T := int&} ⇒ int& & 折叠为 int&
-//     T&&                ⇒ Case 4   ⇒ int&&；配 {T := int&} ⇒ int& && 折叠为 int&
-//     const T            ⇒ Case 5   ⇒ const int
-//     typename T::type   ⇒ Case 5.5 ⇒ 查类成员别名（查不到 ⇒ 软失败）
-//     MyPtr<T>           ⇒ Case 5.2 ⇒ MyPtr<int>（实参位替换）
-//     X<int>（别名 id）   ⇒ Case 5.8 ⇒ 解糖（展开失败 ⇒ 软失败）
-//     Class("T")         ⇒ Case 6   ⇒ int（parseType 把裸 T 建成了 Class 节点）
-//
-// ★ 引用折叠 [dcl.ref]/6：T& & / T& && / T&& & ⇒ T&，T&& && ⇒ T&& —— 只要有一层
-//   左值引用，结果就是左值引用。这是万能引用（T&& 形参）的根基：
-//     foo(42)  ⇒ T = int,  T&& = int&&
-//     foo(var) ⇒ T = int&, T&& = int& && ⇒ int&（折叠）
-//   ★ 折叠只在 Type::makeLValueReference 里实现一份，调用点不得自行判断。
+// 按类型树结构替换，未命中的非依赖类型保持原样。
+// 参考 clang/Sema/TreeTransform.h: TransformType；标准 [temp.subst]。
+// 例：T* 代入 int → int*；T&& 代入 int& → int&；typename T::type 延迟查成员。
 TypePtr TemplateInstantiator::substituteType(
     TypePtr type, const TypeSubstitution& subst) {
 
@@ -736,20 +664,9 @@ TypePtr TemplateInstantiator::substituteType(
         return type;
     }
 
-    // ── Case 1.5: decltype(expr) —— 延迟求值的兑现时刻（理论见 docs/learn/20）──
-    // Parser 只留下"表达式 + 是否加括号"（那时 T 未知），替换阶段拿到实参才能求值：
-    //   ① 先把实参替换进操作数表达式  ② 交给 DecltypeEvaluator 求值成具体类型
-    // demo: template<class T> struct is_range<T, void_t<decltype(declval<T>().begin())>>
-    //       T := vector<int> ⇒ ① declval<vector<int>>().begin() ② 求值 ⇒ int ✓
-    //       T := int         ⇒ ② 求值失败 ⇒ 抛 SubstitutionFailure ⇒ 偏特化不匹配
-    //                          ⇒ 回退主模板 false_type —— 这一抛一捕就是 SFINAE 全貌
-    // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformDecltypeType →
-    //   clang/lib/Sema/SemaType.cpp:Sema::BuildDecltypeType 重新求值。
+    // decltype 保留的表达式在替换后求值，此时形参已有实际类型。
+    // 例：decltype(x) 按声明类型，decltype((x)) 还取决于值类别。
 
-    //template <typename T>  这里 decltype 是一个 class type
-    // struct is_range<T, std::void_t<decltype(std::declval<T>().begin()),
-    //                                decltype(std::declval<T>().end())>>
-    //     : public std::true_type {};
     if (type->isDecltype()) {
         std::cout << "    [subst] decltype: 先替换操作数，再求值（两段式的第二段）\n";
 
@@ -865,13 +782,8 @@ TypePtr TemplateInstantiator::substituteType(
         }
     }
 
-    // ── Case 5.5: 依赖类型名 typename T::type（[temp.res]/5，理论见 docs/learn/25）──
-    // 限定者（T）要等替换才知道，成员名（type）是它里面的类型别名：
-    //   Class{"type", nestedQualifier=TemplateParam("T")} → 替换限定者后查别名表。
-    // ★ 失败必须【当场】抛：替换期正是 [temp.deduct]/8 的直接上下文，查不到即软失败
-    //   被 Sfinae::attempt 吸收 —— void_t<typename T::type> 探测惯例全靠这一条。
-    // 限定者替换后仍是形参（多层模板的内层）⇒ 原样返回留给外层替换（同 Case 1）。
-    // 对照 clang：clang/lib/Sema/TreeTransform.h:TransformDependentNameType → clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 重做限定名查找。
+    // 依赖成员类型先替换限定者，再交给 Sema 查表。
+    // 例：typename T::type 在 T=S 后查 S::type；缺失成员由 SFINAE 边界裁决。
     if (type->isClass() && type->isNestedName() && type->nestedQualifier) {
         std::cout << std::format("    [subst] 依赖限定名 {}::{} → 先替换限定者...\n",
             type->nestedQualifier->toString(), type->name);
@@ -904,14 +816,8 @@ TypePtr TemplateInstantiator::substituteType(
         return type;
     }
 
-    // ── Case 5.2: 类模板 id 的实参替换（先于别名解糖）──
-    // 【为什么必需】Case 1/6 只按【名字】查表，而 `MyPtr<T>` 的依赖藏在实参里 ——
-    //   不替换就会拿形参 T 去实例化，造出假实例 MyPtr_T，方法返回类型跟着错。
-    // demo: substituteType(MyPtr<T>, {T := int}) ⇒ MyPtr<int>
-    //       substituteType(MyPtr<T>, {})          ⇒ 原样返回（保持依赖）
-    // ★ 必须先做这一步再做别名解糖：别名 Vec<T> 的实参先变成 int，展开出的
-    //   MyPtr<int> 才是具体的；顺序反了就会拿 T 去实例化。
-    // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformTemplateSpecializationType 逐项 Transform。
+    // 类模板 id 的依赖可能藏在实参中，不能只按类名查替换表。
+    // 例：MyPtr<T> 在 T=int 后变为 MyPtr<int>。
     TypePtr idNode = type;
     if (type->isClass() && !type->templateArgs.empty()) {
         std::vector<TemplateArg> newArgs;
@@ -955,15 +861,8 @@ TypePtr TemplateInstantiator::substituteType(
         }
     }
 
-    // ── Case 5.3: 模板模板形参的使用点 `C<T>`（[temp.param]/4）──
-    // 形参 C 绑的是【一个模板】而不是类型：把 C 换成被传进来的模板名，
-    //   `C<T>` 于是成为 `Box<T>`（实参已在 Case 5.2 换过），交由外部的落地路径兑现。
-    // ★ 与 Case 6（裸形参名 → 类型）的分工：这里换的是【模板 id 的名字段】，
-    //   换完仍是"待实例化的半成品"，不是具体类型 —— 与模板体内的 `Box<T> inner;`
-    //   走同一条兑现路径（所以不需要在这里调 resolveType，也不应该调：
-    //   这一层不认识 Sema，硬调会引入双向依赖）。
-    // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformTemplateSpecializationType 里
-    //   TemplateTemplateParmDecl 的替换发生在 TransformTemplateName。
+    // 模板模板形参替换模板名，实参仍须逐位替换。
+    // 例：C<T> 在 C=Box、T=int 后成为 Box<int>。
     if (idNode->isClass() && !idNode->templateArgs.empty()) {
         auto it = subst.find(idNode->name);
         if (it != subst.end() && it->second.isTemplate()) {
@@ -978,13 +877,8 @@ TypePtr TemplateInstantiator::substituteType(
         }
     }
 
-    // ── Case 5.8: 别名模板 id X<int> / X<T>（[temp.alias]/1，理论见 docs/learn/27）──
-    // X 是 `template<class U> using X = ...;` 声明的【别名】：不产生新类型、只产生
-    // 新名字 —— 故这里是"解糖"（desugar）而非"实例化"，展开后不留痕迹。
-    // ★ 必须在替换期展开并【当场】判成败：展开失败（如 enable_if 条件为假）要抛软
-    //   失败让 Sfinae::attempt 吸收成"该候选被剔除"，拖到 Sema 解析期就成硬错误。
-    // 与 Case 5.5 的区别：5.5 管 `typename T::type`（成员别名），本支管顶层 `X<T>`。
-    // 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:Sema::SubstType 判 isTypeAlias() → CheckAliasTemplateId 取 sugar。
+    // 别名模板不产生新类型，代入实参后交给 Sema 展开。
+    // 例：Ptr<T>=T*，Ptr<int> → int*。
     if (idNode->isClass() && !idNode->templateArgs.empty() && m_aliasResolver) {
         std::vector<TemplateArg> substArgs;
         substArgs.reserve(idNode->templateArgs.size());
@@ -1085,6 +979,7 @@ FuncDeclPtr TemplateInstantiator::cloneMethod(
     }
     newMethod->name = method->name;
     newMethod->isVirtual = method->isVirtual;
+    newMethod->isStatic = method->isStatic;
     newMethod->isOverride = method->isOverride;
     newMethod->ownerClassName = newClassName;
     newMethod->location = method->location;
@@ -1119,18 +1014,9 @@ FuncDeclPtr TemplateInstantiator::cloneMethod(
     return newMethod;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 克隆嵌套类 —— 类模板的成员递归克隆（[class.nest] + [temp.inst]/5）
-// 嵌套类的字段类型、方法签名与函数体里的【外层形参】T 一并替换；嵌套类里的嵌套类
-//   递归克隆（Box → A → B 三层同理）。
-// ★ 登记名不在这里定：本函数交出【裸名】（"Inner"），前缀化（"Box_int::Inner"）由
-//   Sema::processClassDecl 统一做 —— "登记名 = 外层登记名 + :: + 裸名"这条规则
-//   只有那一份（红线 3 判据单点；learn/49 的"作用域即身份"）。
-// demo: template<class T> struct Box { struct Inner { T v; }; };
-//       Box<int> ⇒ 克隆出 Inner { int v; } ⇒ 登记名 Box_int::Inner
-// 对照 clang：clang/lib/Sema/SemaTemplateInstantiate.cpp:SemaTemplateInstantiator::
-//   InstantiateClassTemplate → TransformDecl 递归遍历 CXXRecordDecl 的成员
-//   （含嵌套 RecordDecl），嵌套类的 DeclContext 指向实例化后的外层类。
+// 递归克隆嵌套类，字段、方法、别名与成员模板中的外层形参一并替换。
+// 例：Box<int>::Inner 与 Box<double>::Inner 各持独立节点。
+// 保持裸名供 Sema 登记完整路径，避免重复拼接限定名。
 ClassDeclPtr TemplateInstantiator::cloneNestedClass(
     const ClassDeclPtr& src, const TypeSubstitution& subst) {
 
@@ -1181,13 +1067,8 @@ ClassDeclPtr TemplateInstantiator::cloneNestedClass(
     return cloned;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 克隆表达式 —— 深拷贝结构，对应 clang/lib/Sema/TreeTransform.h:TreeTransform::TransformExpr
-// ─────────────────────────────────────────────────────────────────────────────
-// 本项目表达式节点不存类型注解，实例的类型在语义分析中重新推出，故这里只递归克隆结构。
-// 【覆盖率】ast.h 的 14 种 Expression 派生类已全覆盖：Int/Bool/String/Nullptr 字面量、
-//   Var、Binary、Unary、Call、Member、Index、New、DynamicCast、This、Delete（漏一种
-//   则 default 返回 nullptr，-Wswitch 会提醒补 case）。
+// 深拷贝表达式结构，实例的类型注解由语义分析重新计算。
+// 参考 clang/Sema/TreeTransform.h: TransformExpr。
 ExprPtr TemplateInstantiator::cloneExpr(
     ExprPtr expr, const TypeSubstitution& subst) {
 
@@ -1227,20 +1108,9 @@ ExprPtr TemplateInstantiator::cloneExpr(
             return cloned;
         }
 
-        // ── 变量引用 ──
-        // ★ NTTP 的值替换发生在【表达式位置】（类型位置才归 substituteType）：模板体里
-        //   裸的 NTTP 形参名由 Parser 建成 VarExpr，在这里换成整数字面量。
-        // 扫到的 VarExpr ⇒ 结果：
-        //   VarExpr{"N"} 替换表里绑的是【值】  ⇒ IntLiteralExpr{4}
-        //       （template<int N> class Buf { int size() { return N; } } 的 Buf<4>
-        //         ⇒ 实例方法体变成 `return 4;`，Sema 与 CodeGen 只见到常量）
-        //   VarExpr{"x"} 绑的是类型或未命中 ⇒ 克隆名字本身
-        // ★ explicitTemplateArgs 必须一并替换：declval<T>() 的 T 挂在 VarExpr{declval,[T]}
-        //   上，只克隆名字会让 decltype 求值阶段看到裸 declval()，T 凭空丢失 ⇒ 探测链断裂。
-        // 对照 clang：clang/lib/Sema/TreeTransform.h:TreeTransform::TransformDeclRefExpr 换成已求值的 TemplateArgument
-        //   （真 C++ 还要过 CheckTemplateArgument 做常量折叠，如 Buf<2+2> 折成 4，见 ROADMAP D）
-        // ⚠ 已知边界：只按"名字命中 NTTP 形参名"判定，未做作用域检查 —— 模板体内同名
-        //   局部变量遮蔽 NTTP 时会被误伤（clang 靠 DeclRefExpr 绑定的 ValueDecl* 区分）。
+        // 表达式中的 NTTP 名替换为带类型的字面量。
+        // 例：template<int N> 的 return N 在 N=4 后得到整数 4；bool/char 保留相应种类。
+        // 类型位置由 substituteType 处理。
         case NodeKind::Var: {
             auto& e = static_cast<VarExpr&>(*expr);
             auto it = subst.find(e.name);
@@ -1285,7 +1155,7 @@ ExprPtr TemplateInstantiator::cloneExpr(
             return cloned;
         }
 
-        // 条件（三元）表达式（主线 C）：三支全递归克隆。
+        // 条件（三元）表达式：三支全递归克隆。
         // demo: "return a > b ? x : y;" ⇒ 结构不变、内部 T 已替换
         case NodeKind::Conditional: {
             auto& e = static_cast<ConditionalExpr&>(*expr);
@@ -1388,17 +1258,9 @@ ExprPtr TemplateInstantiator::cloneExpr(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 克隆语句 —— 深拷贝，对应 clang/lib/Sema/TreeTransform.h:TreeTransform::TransformStmt
-// ─────────────────────────────────────────────────────────────────────────────
-// ★ 必须深拷贝：蓝图 ClassDecl 全局只有一份，Box<int> 与 Box<double> 必须各持独立
-//   AST 子树；浅拷贝会让后实例的替换覆盖掉先实例的语句（同一 StmtPtr 被两边共享）。
-// ★ 替换只发生在【类型位置】：subst 是 {形参名 → 具体类型}，语句里的局部名
-//   （item/ptr）原样保留，与模板参数无关。
-// 【覆盖率】ast.h 的 8 种 Statement 已全覆盖：VarDecl/Expr/Assign/Return/If/While/
-//   Block/DeleteStmt（漏一种则 default 返回 nullptr，该语句被静默丢弃）。
-// demo: 蓝图 Box<T> 体配 {"T" → int} ⇒ "T item = x;" 变成 "int item = x;"
-//                                    ⇒ "{ T a; T b; }" 变成 "{ int a; int b; }"
+// 递归深拷贝语句，保证各实例不互相修改，也不改写蓝图。
+// 参考 clang/Sema/TreeTransform.h: TransformStmt。
+// 例：Box<int> 与 Box<double> 的局部类型和函数体节点分别持有。
 StmtPtr TemplateInstantiator::cloneStmt(
     StmtPtr stmt, const TypeSubstitution& subst) {
 
@@ -1463,11 +1325,6 @@ StmtPtr TemplateInstantiator::cloneStmt(
             return cloned;
         }
 
-        // ── if 语句 ──
-        // 两个递归点：condition 走 cloneExpr，then/else 分支走 cloneStmt（自递归）；
-        // elseBranch 可空，需判空。
-        // demo: "if (n > 0) { T a = n; } else { T a = 0; }"
-        //    ⇒  "if (n > 0) { int a = n; } else { int a = 0; }"
         case NodeKind::If: {
             auto& s = static_cast<IfStmt&>(*stmt);
             auto cloned = std::make_shared<IfStmt>(
@@ -1490,13 +1347,7 @@ StmtPtr TemplateInstantiator::cloneStmt(
             return cloned;
         }
 
-        // ── for / break / continue 语句（主线 C）──
-        // for：init/condition/increment/body 四个子节点全递归（init 是语句——
-        // 声明式 init 里的 T 要走 substituteType，必须过 cloneStmt 不能跳过）；
-        // break/continue 是叶子，但【必须显式列】：落到 default 返回 nullptr
-        // 会被静默丢弃（同下方 Empty 分支的教训）。
-        // demo: "for (T i = 0; i < n; i = i + 1) { sum = sum + i; }"
-        //    ⇒  "for (int i = 0; i < n; i = i + 1) { sum = sum + i; }"
+        // 循环的初始化、条件、增量与循环体都可能含依赖节点，须全部克隆。
         case NodeKind::For: {
             auto& s = static_cast<ForStmt&>(*stmt);
             auto cloned = std::make_shared<ForStmt>(
@@ -1552,10 +1403,6 @@ StmtPtr TemplateInstantiator::cloneStmt(
             return cloned;
         }
 
-        // ── 代码块 ──
-        // { ... } 逐条递归 cloneStmt —— cloneMethod 拿到的 body 就是 BlockStmt，
-        // 从这里往下扇出到每条语句。
-        // demo: "{ T a; T b = a; return b; }" ⇒ "{ int a; int b = a; return b; }"
         case NodeKind::Block: {
             auto& s = static_cast<BlockStmt&>(*stmt);
             auto cloned = std::make_shared<BlockStmt>();
@@ -1566,16 +1413,7 @@ StmtPtr TemplateInstantiator::cloneStmt(
             return cloned;
         }
 
-        // ── delete 语句 ──
-        // 语句位置的 `delete p;`/`delete[] p;`（析构 + free，[expr.delete]）。
-        // pointerExpr 递归克隆；isArray 原样带上（决定 codegen 是否走数组释放）。
-        // ★ 本分支必须存在：缺失时该语句落到末尾 return nullptr 被静默丢弃 —— 模板体内
-        //   释放内存的语句实例化后凭空消失（不报错、内存泄漏）。
-        // demo: "~Box() { delete data; }" 配 {T := int} ⇒ "~Box_int() { delete data; }"
-        //       （data 是 int*，codegen 发 callq 析构 + callq free）
-        // ── 空语句 ──
-        // 无子节点、无类型 ⇒ 替换无事可做，但【必须显式列一条】：落到 default
-        // 会返回 nullptr，函数体里带 `;` 的方法被实例化时就会静默丢语句。
+        // delete 语句保留操作数及 delete[] 标记，语义分析在实例中重新完成。
         case NodeKind::Empty: {
             auto cloned = std::make_shared<EmptyStmt>();
             cloned->location = stmt->location;

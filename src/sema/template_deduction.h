@@ -1,31 +1,8 @@
 #pragma once
-// =============================================================================
-// 模板实参推导引擎 (Template Argument Deduction) —— S2~S4（理论见 docs/learn/02、03、04）
-// =============================================================================
-// 推导 = 受限的合一算法（Hindley-Milner 类型推断的简化版）：逐对 (模式 P, 实参 A) 模式
-//   匹配，解出 P 里的模板参数；同一参数两次绑定必须一致。
-// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp DeduceTemplateArguments（本版无推断 auto/偏序——【简化】）
-// 逐对 trace（identity(42) 的 P=T / A=int）：
-//     P=T          A=int          ⇒ T := int ✓（变量绑定）
-//     P=const T&   A=const int&   ⇒ 剥 const 与引用后合一 ⇒ T := int ✓
-//     P=T*         A=int*         ⇒ 剥 * 后合一
-//     P=Box<T>     A=Box_int      ⇒ 结构合一（同类模板则逐位递归）
-//     P=T          A=double       ⇒ T 已绑 int ⇒ 冲突 ✗，该候选出局
-//
-// ── S1~S6 阶段分工（本项目教学分解）────────────────────────────────────
-//   S1 解析           src/parser.cpp parseTemplateDecl（蓝图入 AST）
-//   S2 基础推导       本文件 deduce() / deducePair()（逐对合一）
-//   S3 显式实参       本文件 deduce() 前缀填充
-//   S4 不可推导上下文 本文件 deduce() 收尾检查
-//   S5 实例化         src/template_instantiation.cpp（结构化替换）
-//   S6 重载决议       src/semantic_analyzer.cpp
-//
-// 标准章节：[temp.deduct] 总则 │ [temp.deduct.call] 调用推导（逐对 P/A、引用/const/值传递调整）
-//   │ [temp.deduct.type] 结构等价/不可推导/顶层 cv 忽略 │ [temp.arg.explicit] S3 前缀规则
-// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::DeduceTemplateArguments（lib/Sema/SemaTemplateDeduction.cpp）
-//   管线：Parser(S1) → Sema(识别候选) → ★TemplateDeducer(S2~S4)★ → Instantiator(S5)
-//         → Sema(S6 重载决议) → CodeGen
-// =============================================================================
+// 函数模板实参推导与偏特化模式匹配。
+// 参考 clang/Sema/SemaTemplateDeduction.cpp: DeduceTemplateArguments。
+// 以结构化合一构造形参到实参的替换表；调用推导与偏特化保留各自调整规则。
+// 例：P=T*、A=int* 得 T=int；P=T&&、左值 int 实参得 T=int&。
 
 #include "ast.h"
 #include "type.h"
@@ -98,30 +75,9 @@ public:
     // （偏特化模式位写成别名模板 id 时，靠它在替换阶段解糖）。
     void setAliasTemplateResolver(AliasTemplateResolver* r) { m_aliasResolver = r; }
 
-    // 逐对 P/A 合一：自外向内递归剥壳（别名 → const → 引用 → 指针），直到 P 是裸模板参数
-    //   （bind）或 P 完全非依赖（要求 P == A 恒等）。
-    // 扫到哪种 P ⇒ 走哪条分支 ⇒ 结果：
-    //   P=const X   ⇒ 剥顶层 const，递归                 （[temp.deduct.type] 顶层 cv 不参与）
-    //   P=T&        ⇒ 实参非左值即 ✗，否则递归
-    //   P=T&&       ⇒ 模板参数的右值引用 + 实参左值 ⇒ T := A&；否则递归
-    //                 （[temp.deduct.call]/3 万能引用）
-    //   P=T*        ⇒ 实参非指针即 ✗，否则递归 pointee
-    //   P=T         ⇒ 值传递调整（剥引用/顶层 const）后 bind
-    //   P=C<T1..>   ⇒ 同模板同元数 ⇒ 逐位递归；否则 ✗      （[temp.deduct.type]/8）
-    //   其余        ⇒ 恒等比较 P == A
-    // 【为什么是 public】CTAD（[dcl.type.class.deduct]）拿构造函数形参当模式、构造实参
-    //   当被推项直接调它逐位合一（SemanticAnalyzer::deduceClassTemplateArgs）—— 同一套
-    //   合一算法换个方向用。
-    // structuralMatch：本次合一走哪套规则（★ 差别不是"松紧"而是【适用哪一套】）：
-    //   false 调用推导   ⇒ [temp.deduct.call] 全套调整，含 /3：P 是"模板参数的右值引用"
-    //                      且实参左值时 T := A&
-    //   true  偏特化匹配 ⇒ [temp.class.spec.match]/2 结构等价：`T&&` 模式对 `int&&` 实参
-    //                      ⇒ T := int（剥掉实参那层引用）
-    //   ⚠ true 时绝不能套用万能引用规则 —— 那会 bind 出 T := int&，使 `Kind<T&&>` 匹配
-    //     `Kind<int&&>` 时把 T 绑成 int&（错）。
-    //   ⚠ 两套规则共用一个开关：matchPattern 为跳过左值/右值绑定检查而传 argIsLValue=true，
-    //     而它【同时】是万能引用分支的开关 —— 关掉一个必然误开另一个。
-    // ★ A 按值传入：入口要按 [expr.type]/1 剥引用壳（见 .cpp 顶部注释），const& 改不了绑
+    // 逐对结构合一；调用推导允许值传递调整和转发引用，偏特化按结构匹配。
+    // 例：T* 对 int* 得 T=int；T&& 对左值 int 得 T=int&；T 对 int 与 double 冲突。
+    // argIsLValue 用于引用绑定，structuralMatch 保留模板实参中的引用层。
     bool deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
                     const std::vector<std::string>& paramNames,
                     Subst& subst, DeductionResult& out,
@@ -137,17 +93,8 @@ private:
     MemberTypeResolver* m_memberResolver = nullptr;
     AliasTemplateResolver* m_aliasResolver = nullptr;
 
-    // 模式归约：把模式位里"要求值才能定形"的位置先算出来。
-    // 扫到哪种模式位 ⇒ 归约成什么（[temp.deduct]/8）：
-    //   void_t<E...>     ⇒ 各 E 替换后全合法 ⇒ void；任一不合法 ⇒ 抛
-    //   decltype(e)      ⇒ 替换 e 后真求值 ⇒ 具体类型
-    //   Vec<T>（别名 id） ⇒ 解糖后再归约（别名可指向别名，逐层剥）
-    // 逐位 trace（is_range<T, void_t<decltype(declval<T>().begin())>>，第 2 位靠第 1 位
-    //   刚推出的绑定来归约 —— 这正是从左到右逐位匹配的价值）：
-    //   subst={T→vector<int>} ⇒ declval<vector<int>>().begin() → int ⇒ 归约为 void ✓
-    //   subst={T→int}         ⇒ declval<int>().begin() 不合法 ⇒ 抛 ⇒ 不匹配 ✓
-    // 求值失败抛 SubstitutionFailure，由 matchPattern 捕获为"不匹配"。
-    // 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::DeduceTemplateArguments（失败 ⇒ TDK_SubstitutionFailure）
+    // 依赖模式先代入已有绑定再求值，失败按 SFINAE 处理。
+    // 例：void_t<typename T::type> 在已知 T 后才能决定是否匹配。
     TypePtr reducePattern(const TypePtr& P,
                           const std::unordered_map<std::string, TypePtr>& subst);
 

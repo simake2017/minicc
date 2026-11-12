@@ -1,40 +1,10 @@
 #pragma once
-// =============================================================================
-// src/lex/preprocessor.h —— 阶段 0：预处理器 (Preprocessor)（理论见 docs/learn/07）
-// =============================================================================
-// 对应 [cpp.phase] 翻译阶段 2~4：行拼接 → 指令行识别 → 宏展开 + #include 文件并合。
-// 对照 clang：clang/lib/Lex/Preprocessor.cpp（同 Token 级驱动；本版宏表/条件栈极简——【简化】）
-// 功能 ⇒ 标准章节 ⇒ 本项目的实现程度（支持/不支持一目了然）：
-//   #include "…" / <…>  ⇒ [cpp.include]    ⇒ 支持
-//       搜索顺序："…" 先当前目录再 -I；<…> 先 -I 再 /usr/include
-//   #pragma once        ⇒ [cpp.pragma]     ⇒ 支持（canonical 路径去重）
-//       其余 pragma 警告后忽略
-//   #define / #undef    ⇒ [cpp.define]/[cpp.undef] ⇒ 支持对象宏 + 函数宏
-//       递归展开、自引用"涂蓝"保护（[cpp.rescan] 的简化）
-//   #if/#ifdef/#ifndef/#elif/#else/#endif ⇒ [cpp.cond] ⇒ 支持条件编译栈
-//       死分支里的 #define/#include 等指令一律跳过
-//   #if 表达式          ⇒ [cpp.cond]       ⇒ 支持整数字面量、defined(X)
-//       运算符：! && || == != < > <= >= + - * / 与括号
-//   __LINE__/__FILE__   ⇒ [cpp.predefined] ⇒ 支持（就地生成，不进宏表）
-//   #error              ⇒ [cpp.error]      ⇒ 支持
-//   # 字符串化 / ## 粘贴 / 变参宏 / _Pragma ⇒ 明确不支持（见 docs/learn/07）
-//
-// 管线位置 —— 整条管线唯一的"文本级"阶段，也是六阶段中的阶段 0：
-//   源码.cpp ──► Preprocessor ──► 展开后的纯文本 ──► Lexer ──► Parser ──► Sema ──► ...
-//                （本文件）         （等价 gcc -E 输出）
-// 之后文本里不再有 '#' 指令、未展开的宏、头文件边界，Lexer 看到的是一整段平铺源码。
-//
-// 对照 clang（函数级对照见 preprocessor.cpp 头注）：
-//   指令识别与条件编译栈 ⇒ 对照 clang：PPDirectives.cpp
-//   #include 文件并合     ⇒ 对照 clang：clang/lib/Lex/PPDirectives.cpp:HandleIncludeDirective
-//   头文件搜索路径        ⇒ 对照 clang：HeaderSearch::LookupFile
-//   宏展开/重扫描/涂蓝    ⇒ 对照 clang：PPMacroExpansion.cpp
-//   #if 常量表达式求值    ⇒ 对照 clang：PPExpressions.cpp
-// =============================================================================
+// 文本预处理器：包含文件、宏替换与条件编译。
+// 参考 clang/Lex/Preprocessor.cpp、PPMacroExpansion.cpp、PPDirectives.cpp。
+// 例：#define N 10 使 int a[N]; 展开为 int a[10];；-E 仅输出展开文本。
+// 宏采用递归重扫描与 hide 集，防止自引用无限展开。
 
 #include <cstddef>     // size_t —— readWord 的签名里用到（见下）。
-                       // 必须显式包含，不能依赖 <string> 的传递包含：
-                       // IDE 单独解析本头文件时签名会"残缺"，与 .cpp 里的定义对不上。
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -98,13 +68,7 @@ private:
     // 调试：expand 递归深度（仅用于日志缩进，不影响逻辑）
     int m_expandDepth = 0;
 
-    // 处理一段源文本（主文件或某个被包含文件）—— 三步：
-    //   ① 行拼接（删除 '\' + 换行，[lex.phases] 翻译阶段 2）
-    //   ② 逐行识别 # 指令（define/include/条件编译/pragma/error）
-    //   ③ 普通行经 expand 宏展开后写入输出
-    // 指令行被消费后输出一个空行，保住原文件行号（报错可定位）。
-    // demo（行拼接）：物理行 `#define MAX(a,b) \` + `  ((a)>(b)?(a):(b))`
-    //   ⇒ 先拼成一个逻辑行，再识别为完整的 #define，宏体得以跨行书写。
+    // 处理主文件或被包含文件的文本，条件栈在每个文件内独立。
     std::string processText(const std::string& src, const std::string& fileName);
 
     // 指令处理
@@ -114,9 +78,7 @@ private:
     void handleDefine(const std::string& rest, const std::string& fileName, int line);
     // #undef：从宏表移除（[cpp.undef]）。此后 #ifdef 该名为假、名字不再展开。
     void handleUndef(const std::string& rest, int line);
-    // #include：解析文件名 → 搜索定位 → pragma once 去重 + 循环检测 →
-    // 递归 processText，把被包含文件展开后的全文就地并合（[cpp.include]）。
-    // demo: #include "util.h" ⇒ 返回 util.h 展开后的全文，直接拼进当前输出
+    // 包含文件会递归预处理；canonical 路径用于 once 去重与循环检查。
     std::string handleInclude(const std::string& rest, const std::string& fileName, int line);
     // #pragma once：把当前文件 canonical 路径记入 m_pragmaOnce，之后重复 include
     // 同一物理文件直接跳过（头文件去重）。其余 pragma 警告后忽略。

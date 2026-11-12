@@ -1,52 +1,8 @@
 #pragma once
-// =============================================================================
-// 阶段 2：语法分析器 (Parser)（理论见 docs/learn/09、30）
-// =============================================================================
-// 职责：把线性的 Token 流转成树状 AST。手法：递归下降（Recursive Descent）——
-// 文法中每个非终结符对应一个解析函数，互相调用形成递归；每步只看 1 个前瞻 Token
-// 对照 clang：clang/lib/Parse/Parser.cpp（同递归下降 + 试探解析 TokenCheckpoint ≈ TentativeParsingAction）
-// （LL(1)），遇歧义用"存游标 + 试探 + 回滚"（speculative parsing）消解。
-//
-// 管线：预处理器 → Lexer → ★Parser★ → Sema → 模板推导/实例化 → CodeGen(.s)
-//   输入 std::vector<Token>（Lexer 产物，含末尾哨兵 Eof）
-//   输出 TranslationUnit（AST 根节点，内含声明列表）
-//
-// ── ★ 顶层分派速查：扫到哪个记号 ⇒ parseDeclaration 走哪条分支 ⇒ 建出哪种节点 ──
-//   'template'                        ⇒ parseTemplateDecl   ⇒ TemplateDecl
-//   'class' | 'struct'                ⇒ parseClassDecl      ⇒ ClassDecl
-//   'enum' | 'namespace'              ⇒ parseEnum/Namespace ⇒ EnumDecl / NamespaceDecl
-//   'using' | 'typedef'               ⇒ parseTypeAliasDecl  ⇒ TypeAliasDecl
-//   IDENT '('（配对右括号后跟 '->'）   ⇒ parseDeductionGuide ⇒ DeductionGuideDecl
-//   ['virtual'] 类型 IDENT '('        ⇒ parseFunctionDecl   ⇒ FunctionDecl
-//   类型 IDENT ['=' expr] ';'          ⇒ parseGlobalVarDecl  ⇒ GlobalVarDecl
-//
-// ── ★ 语句层分派速查（parseStatement）：首 Token ⇒ 分支 ⇒ 节点 ───────────
-//   '{' | 'if' | 'while' | 'return' | 'delete'
-//         ⇒ parseBlock/If/While/Return/Delete ⇒ BlockStmt | IfStmt | WhileStmt |
-//                                                ReturnStmt | DeleteStmt
-//   类型关键字 int/double/bool/void/auto | IDENT IDENT | IDENT 后跟 '<'..'>' / '::' /
-//   '*' '&' '&&'  ⇒ parseType + parseVarDeclStmt ⇒ VarDeclStmt
-//   其余                                       ⇒ parseExprOrAssignStmt ⇒ ExprStmt / AssignStmt
-//
-// ── 本编译器接受的语法（EBNF 概览）──────────────────────────────────────
-//   translation-unit := declaration*
-//   declaration      := template-decl | class-decl | ['virtual'] function-decl
-//   template-decl    := 'template' '<' template-params '>' ( class-decl | function-decl )
-//   class-decl       := 'class' IDENT [':' 'public' IDENT] '{' member* '}' ';'
-//   function-decl    := type IDENT '(' params ')' ['override'] ( compound-stmt | ';' )
-//   stmt             := block | if | while | return | var-decl | expr-stmt
-//   expr             := or-expr（运算符优先级链：|| > && > == > < > + > * > 一元 > 后缀）
-//
-// ⚠ most-vexing-parse 简化：真 C++ 里 `T x(Foo());` 是函数声明（[stmt.dcl]）。本实现
-//   从源头回避该歧义 —— 语句级变量声明只认【类型关键字】或【标识符 + 标识符/(*)】开头；
-//   带实参的括号初始化 `T x(args)` 【已支持】（parseVarDeclStmt 的 LParen 分支，
-//   也是 CTAD 的前置条件），列表初始化 `T x{...}` 仍不支持。
-//   类体内同样用"标识符后是否跟 '(' "区分方法与字段。
-//
-// 对照 clang（llvm-project/clang/lib/Parse/）：Parser.cpp parseTranslationUnit / 语句分派 /
-//   ParseDecl.cpp ParseDeclOrFunctionDefInternal / ParseTemplate.cpp ParseTemplateDeclaration /
-//   ParseExpr.cpp 优先级链 + ParseExprCXX.cpp template-id 歧义消解。
-// =============================================================================
+// 递归下降 Parser：Token 流 → AST，名字分类由 Sema 活作用域表提供。
+// 参考 clang/Parse/Parser.h、ParseExpr.cpp、ParseDecl.cpp。
+// 例：int x=1; 生成声明；x+1; 生成表达式；template<class T> struct Box{} 保存蓝图。
+// 表达式按优先级分层，试探解析可回滚游标与日志。
 
 #include "token.h"
 #include "ast.h"
@@ -62,48 +18,26 @@
 
 namespace minicc {
 
-// ★ 前向声明（Sema 活句柄用）—— 对照 clang 的 Parser.h：
-//   clang/include/clang/Parse/Parser.h:639 持有 `Sema &Actions;`，
-//   而 Sema 的完整定义只出现在 Parser.cpp 里（clang/include/clang/Sema/Sema.h）。
-//   本项目同理：parser.h 不引入 sema 域的头，句柄只在前向声明上。
+// 前置声明 Sema，保持接口依赖单向；对应 clang Parser 的 Actions 句柄。
 class SemanticAnalyzer;
 
-// =============================================================================
-// 语法错误的专用异常（panic 模式唯一的"预期异常"，B32 / 主线 I 第 3 项）
-// =============================================================================
-// ★ 为什么单独成类型：试探解析（template-id 消歧）靠"捕获 ParseError ⇒
-//   这不是 template-id"做决议，因此试探处只能 catch 本类型 —— 旧代码
-//   catch (const std::exception&) 会把试探内部的【真 bug】（越界 / logic_error）
-//   一并吞掉，静默降级成"比较运算"（BUGS.md B31 附带问题）。
-// 顶层驱动仍按 std::exception 捕获（is-a runtime_error），报错出口不变。
+// 语法错误使用专用异常，试探解析仅捕获它以回滚。
+// 其他异常继续传播，避免把内部故障误当作语法歧义。
 class ParseError : public std::runtime_error {
 public:
     explicit ParseError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
-// =============================================================================
-// Parser 类：单遍扫描 Token 流，产出 AST。
-// 状态极简：只有 Token 数组 + 一个游标 m_pos —— 这就是递归下降解析器的
-// 全部运行时状态（符号表、类型检查等属于后续语义分析阶段）。
-// =============================================================================
+// 单向解析 Token 流；试探解析允许临时保存与恢复游标。
 class Parser {
 public:
-    // 按值接收后 move 进成员，避免拷贝整个 Token 数组。
-    // ★ Stage 3 批 2 起：Parser 自带一个 Sema（对照 clang 的 `Sema &Actions`
-    //   是构造期就位的前提）—— 名字的种类与可见性由 Sema 的活作用域表回答，
-    //   Parser 只在"声明点"登记、在"消歧点"查询（窄接口，见 semantic_analyzer.h）。
-    //   旧设计（名字登记表 NameRegistry）随本批退场：它是【前向扫 token 流】
-    //   猜出来的第二份作用域事实，与 Sema 的活表各说各话（B38 起已不合流）。
+    // 接管 Token 流并持有默认 Sema；attachSema 可接入外部语义实例。
     explicit Parser(std::vector<Token> tokens);
     // ★ 析构函数必须【在 .cpp 里定义】：成员是 std::unique_ptr<SemanticAnalyzer>
     //   而 SemanticAnalyzer 在本头文件里只有前向声明（不引 sema 域的头）。
     ~Parser();
 
-    // ── 挂上 Sema 句柄（Stage 3：clang Actions 模式）──
-    // ★ Parser 不再自建作用域事实：名字的种类与可见性由 Sema 的活作用域表裁决，
-    //   Parser 只在"声明点"登记、在"消歧点"查询（窄接口，见 semantic_analyzer.h）。
-    //   对照 clang：Parser 构造时拿到的 `Sema &Actions`（clang Parser.h:639）。
-    // 不挂 ⇒ 登记/查询一律跳过（消歧点退化为"不知道"⇒ 宁宽勿窄地走老路）。
+    // 接入名字分类的 Sema 实例，Parser 登记与查询共用其活作用域表。
     void setSema(SemanticAnalyzer* sema) { m_sema = sema; }
 
     // 解析整个编译单元（入口函数，由 main 驱动调用）
@@ -113,20 +47,8 @@ private:
     std::vector<Token> m_tokens;   // 完整 Token 序列（含末尾哨兵 Eof）
     size_t             m_pos = 0;  // 游标：下一个待消费的 Token 下标
 
-    // ── 模板形参作用域：帧链（对应 clang 的
-    //   clang/include/clang/Sema/Scope.h:Scope::TemplateParamScope 链）──
-    // 帧的粒度 ⇒ 查名字的结果（本项目无通用 Scope 类，用等价的【帧链】代替）：
-    //   一个 template<...> 一份帧（栈上局部对象，构造即入栈 / 析构即出栈）
-    //     ⇒ 解析 `template<class T> struct A { T v; };` 时 T 命中本帧 ⇒ TemplateParam("T")
-    //   沿 parent 上溯 ⇒ 内层优先（parent 指针顶替 Scope::getParent()）
-    // ★ 帧的生命周期 == 该 template 声明的解析范围，异常路径由栈展开保证出栈
-    //   （对照 clang：clang/include/clang/Parse/Parser.h:528 的 MultiParseScope 同样
-    //   "构造 Enter、析构 Exit"，用法见 clang/lib/Parse/ParseTemplate.cpp:53）。
-    // clang 的模板形参作用域不是独立容器，只是统一 Scope 链上的一个【种类位】
-    //   （clang/include/clang/Sema/Scope.h:81）：clang/lib/Sema/SemaTemplate.cpp:1047 的
-    //   Sema::ActOnTypeParameter 末尾用
-    //   S->AddDecl(Param) 把形参挂进当前 Scope 的声明链（SemaTemplate.cpp:1075）
-    //   ⇒"内层优先"是 Scope 链的天然性质，无需手写 parent。
+    // 模板形参帧随模板体保持有效，内层同名形参遮蔽外层。
+    // 例：Box<T> 的成员模板 get<U> 可同时查询 T 与 U。
     struct TemplateParamFrame {
         const TemplateDecl* owner  = nullptr;  // 归属：这是哪个 template<>
         size_t              count  = 0;        // 已注册形参个数（随解析推进增长）
@@ -147,17 +69,8 @@ private:
     // 当前帧（无模板上下文时为 nullptr）—— 对应 clang 的"当前 Scope"
     TemplateParamFrame* m_currentFrame = nullptr;
 
-    // 查模板形参：从当前帧往外层帧走（内层优先），返回形参本身而非 bool（查不到即
-    //   nullptr）。demo：`template<class T, int N>` 下查 "T" ⇒ Type 形参；查 "N" ⇒
-    //   NonType 形参；查 "U"（未命中）⇒ nullptr ⇒ 调用点退回建 Class("U")。
-    // ★ 分水岭是「存下标 vs 存地址」，不是「存什么类型的指针」：帧里只留 owner + count，
-    //   count 是上界，查询时现取 `owner->templateParams[i]` —— 下标描述的始终是同一
-    //   逻辑位置，与 vector 扩容无关。
-    // ★ 别把因果说反：防悬空【不是】只存下标的功劳。ast.h 的元素早已是 shared_ptr，节点
-    //   住在 vector 之外的稳定地址上（扩容搬的只是指针值），缓存 `const TemplateParam*`
-    //   本就不会悬空；只存下标的收益是【少一条必须记住的不变量】，防悬空由 shared_ptr 承担。
-    //   对照 clang：Sema 的名字查找沿 Scope 链上行；TemplateParameterList 只存 NamedDecl*
-    //   数组 + 长度，节点的命由 ASTContext 的 arena 保，二者分工一致。
+    // 从内向外查询形参，返回种类信息而非仅判断存在。
+    // 例：template<class T,int N> 中 T 是类型形参，N 是值形参。
     const TemplateParam* lookupTemplateParam(const std::string& name) const;
 
     // ── Token 流操作（LL(1) 前瞻的底层设施）──
@@ -188,44 +101,26 @@ private:
     //   的分支快筛 —— 这样既有代码的日志逐字节不变。
     TypePtr parseBuiltinTypeSpecifierSeq();
 
-    // ── 模板实参解析（[temp.arg]）──
-    // template-argument-list := '<' template-argument (',' template-argument)* '>'
-    // template-argument      := type-id | constant-expression
-    //   类型实参（Box<int>）  → TemplateArg{kind=Type,     type}
-    //   非类型实参（Buf<4>）  → TemplateArg{kind=Integral, value}   ★ NTTP
-    // 调用约定：本函数自己消费 '<' 与 '>'（调用前不预消费，返回时整段已吃掉）。
-    // 对照 clang：clang/lib/Parse/ParseTemplate.cpp:Parser::ParseTemplateArgumentList（ParseTemplate.cpp）
-    //   真实现里 constant-expression 要走完整表达式解析 + 常量求值
-    //   （Sema::ActOnNonTypeTemplateArgument）。本项目教学简化：只认整数字面量，
-    //   不做常量折叠（如 Buf<2+2> 不支持，见 ROADMAP 主线 D）。
+    // 模板实参保留类型、整型值、常量表达式或模板名，常量求值由 Sema 完成。
+    // 参考 clang ParseTemplate.cpp: Parser::ParseTemplateArgumentList。
+    // 例：Box<int>、Buf<4>、Buf<2+2>、Wrap<Box,int>；本入口消费两侧尖括号。
     std::vector<TemplateArg> parseTemplateArgumentList();
     // 该 token 是否会继续一个（以字面量开头的）表达式 —— 用于区分
-    // 「裸字面量实参 Buf<4>」与「常量表达式实参 Buf<4+1>」（主线 D）。
+    // 「裸字面量实参 Buf<4>」与「常量表达式实参 Buf<4+1>」。
     static bool isExprContinuation(TokenType t);
 
-    // ── 主线 D：模板实参里的 `>` 歧义（[stmt.ambig] 的实参表版）────────────
-    // 解析 NTTP 常量表达式实参（Buf<2+2>）期间置真：comparison 层遇裸 '>'
-    // 必须【停】——它是实参表的收尾，不是大于号。括号分组内解除
-    // （Buf<(2>1)> 里的是真比较）。对照 clang：ParseUnqualifiedId 后按
-    // [temp.arg] 做 tentative parse，C++11 起 '>' 一律当收尾。
+    // 模板值实参中裸 > 结束实参，括号内恢复普通比较表达式。
+    // 例：Buf<2+2>；大于比较使用 Buf<(2>1)>。
     bool m_stopAtGreater = false;
 
-    // ── 主线 D 二批：constexpr 前缀的搬运 ────────────────────────────────
+    // ── constexpr 前缀的搬运 ────────────────────────────────
     // parseType 吃到 constexpr 时置真（并把它当 const 处理），紧随其后的
     // parseVarDeclStmt / parseGlobalVarDecl 读走并写进节点的 isConstexpr。
     // 只应出现在变量声明处；出现在形参表等其它位置会被静默当 const（已知边界）。
     bool m_pendingConstexpr = false;
 
-    // ── B32：试探解析的存档点 + 日志缓冲（对照 clang TentativeParsingAction）──
-    // 动机：template-id 消歧等场合需要"空跑一段再决定"，失败就回滚。旧实现
-    //   只回滚 m_pos 一个维度，试探期打点留进输出成幽灵行（BUGS.md B32）；
-    //   且回滚靠手写 saved 变量，Parser 新增状态维度时容易漏救。TokenCheckpoint
-    //   把"存档 + 回卷 + 日志缓冲"做成 RAII：
-    //     构造 ⇒ 快照全维度 + 日志进缓冲栈；
-    //     commit() ⇒ 试探成立，保留进度，缓冲冲刷（成功路径输出逐字节不变）；
-    //     析构未 commit ⇒ 全维度回卷 + 缓冲丢弃（幽灵行根治）。
-    // ★ 新状态维度进快照是编译期强制、不靠 Code Review 记性 —— 这就是防
-    //   "回滚漏维度"复发的结构保证（B32「正确的写法」第 1 条）。
+    // 试探解析保存游标、上下文标记及日志缓冲，失败后不泄漏状态或输出。
+    // 参考 clang TentativeParsingAction。
     class TokenCheckpoint {
         Parser& p;
         size_t pos;
@@ -259,48 +154,29 @@ private:
     //   试探路径用；非试探路径行为与直写 std::cout 逐字节一致。
     std::vector<std::string> m_logBuffers;
 
-    // ── Sema 活句柄（Stage 3）──
+    // ── Sema 活句柄（）──
     // ★ 只持指针，不持作用域数据 —— 作用域表住在 Sema 那边（红线 1）。
     //   自建 Parser 时由 m_ownedSema 兜底（clang 的 Actions 恒在位）。
     SemanticAnalyzer* m_sema = nullptr;
     // 自建 Sema（仅"Parser 单跑"时用；主线由 main 注入，见 src/driver/main.cpp）。
     std::unique_ptr<SemanticAnalyzer> m_ownedSema;
 
-    // ── 名字登记助手（Stage 3）──
-    // 三条判据各写一处、只写一处（判据单点）：
-    //   声明一个名字到当前作用域；
-    //   声明一个"引入作用域的名字"并进入该作用域（返回新作用域路径）；
-    //   离开当前作用域。
-    // 空句柄时全部空转 ⇒ 登记/查询退化为"不知道"（宁宽勿窄）。
+    // 名字登记助手统一类、模板与值的分类规则。
     void declareName(const std::string& name, unsigned bits);
     void openScope(ScopeKind kind, const std::string& name, unsigned bits);
     void closeScope();
 
-    // ── 名字种类查询（Stage 3 批 2：消歧点向 Sema 问"这个名字在此处是什么"）──
-    // ★ 位含义见 include/name_scope.h；查不到 = 0 = 未知 = 宁宽勿窄
-    //   （只做正向判定，绝不从"没有某位"反推"不是某类"）。
-    //   限定名与裸名统一入口（限定名的逐段解析在表那一侧做）。
+    // 查询当前位置的名字种类，位定义见 include/name_scope.h；未找到返回 0。
     unsigned nameBits(const std::string& name) const;
 
-    // ★ C++20 [temp.names] 的 UndeclaredTemplate 规则：名字在本作用域链上
-    //   【查不到】+ 后面是 '<' ⇒ 必须假定它是模板名。
-    //   对照 clang：clang/lib/Sema/SemaDecl.cpp:Sema::ClassifyName ——
-    //     "NotFound && NextTokenIsLess ⇒ UndeclaredTemplate"
-    //     （"we're required to assume that this is a template name"）。
-    //   复核由【试探实参表】完成（clang 用 isTemplateArgumentList，本实现在
-    //   同一处试探：解析不出实参表 ⇒ 回滚成比较链）。
-    // ★ 声明过就【不】假定：变量可以遮蔽模板名（[basic.scope.hiding]）。
+    // C++20 [temp.names]：未声明名后跟 < 时，可按 UndeclaredTemplate 解析。
+    // 已知值名仍按值处理，不能仅凭后续出现括号就判断为模板。
     bool isTemplateNameHere(const std::string& name) const;
 
     // 语句层链闸专用：实参表已解析完 ⇒ '<' 必然存在 ⇒ C++20 假定直接适用。
     bool isTemplateNameInTemplateId(const std::string& name) const;
 
-    // 日志【单一出口】（B32「正确的写法」第 2 条）：全部 [parse:*] 打点过
-    //   这里。收口前 87 处 std::cout 散点直写 —— 符号定名、择优早已"判据
-    //   单点"，日志却一直是散点；同一原则两处执行力度不同。收口后静默
-    //   开关（本函数的缓冲分支）只此一处，未来加时间戳/日志级别也是改一处。
-    // 注意 parseIntLiteral 的"刻意不打日志"约定不变：它根本不调用本函数
-    //   （learn/39 —— 它被每条整数表达式调用，打点会淹没日志）。
+    // 解析日志的统一出口；试探期间缓冲，提交后才输出。
     template<typename... Args>
     void logParse(std::string_view fmt, Args&&... args) {
         std::string line = std::vformat(fmt, std::make_format_args(args...));
@@ -357,7 +233,7 @@ private:
     StmtPtr parseIfStmt();
     // while-stmt := 'while' '(' expr ')' stmt
     StmtPtr parseWhileStmt();
-    // 数组声明符后缀解析：在变量名后收可选的 `[ 常量表达式 ]`（主线 E）
+    // 数组声明符后缀解析：在变量名后收可选的 `[ 常量表达式 ]`
     TypePtr parseArrayDeclaratorSuffix(TypePtr baseType);
 
     StmtPtr parseForStmt();

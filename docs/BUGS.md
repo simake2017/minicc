@@ -82,6 +82,7 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B56](#b56-成员模板的形参表另写一份自己的形参在方法体里认不出依赖限定名直接被拒) | 成员侧另写了一份简化形参表 ⇒ 帧计数没同步 ⇒ 成员模板**自己**的 `T` 建成 Class 节点 ⇒ `typename T::type` 报 `unknown type name` | `src/parse/parser.cpp` 类成员循环的成员模板分支 | 中（合法程序被拒；连带 5 项形参能力缺失） | ✅ 已修 |
 | [B57](#b57-函数模板上的模板模板形参推导--默认实参填充未实现自由与成员同款) | 模板模板实参 `C<T>` 推不出来 + 未推导的形参不用默认实参顶上 ⇒ 两条形态的函数模板都推不出候选 | `src/sema/template_deduction.cpp` deducePair / 收尾检查 | 中（合法程序被拒；**自由与成员同款**，非成员侧独有） | ⬜ 未修 |
 | [B58](#b58-const-引用形参与右值引用形参按值传不跟踪被绑定对象) | `const int&` / `T&&` 形参的实参**可能是右值**（无地址）⇒ 本实现按值传，被调方看不到被绑定对象在调用期间的变化 | `src/codegen/codegen.cpp` 引用形参传递（判据 `isAliasBinding` 的边界） | 低（极窄：只有调用期间对象被改才有差异） | ⬜ 未修 |
+| [B59](#b59-模板限定表达式丢失多级链静态调用误走对象通道) | 多级 template-id 限定链与静态调用通道 | Parser / Sema / CodeGen | 中 | ✅ 已修 |
 
 > ★ **索引欠账（历史遗留，已补）**：B33、B37~B46 一度**未补进上表**（条目正文都在，
 > 只是索引没跟上）—— 本表自 B36 之后断档；2026-11-11 已把缺失行补齐。
@@ -3939,6 +3940,23 @@ int main(){ return f(1); }
 **与自由路径完全对齐**；剩下的差距是**两侧共有**的，不是这次收口该背的。
 
 ---
+
+## B59. 模板限定表达式丢失多级链，静态调用误走对象通道
+
+- severity: medium ｜ status: fixed ｜ related: docs/learn/60-template-qualified-expr.md
+
+**现象**：`Box<int>::Inner::b` 在第二个 `::` 处解析失败；
+`Box<int>::make()` 不能正确区分类型限定者与运行时对象。
+
+**根因**：Parser 的 template-id 分支只接一段成员；Sema 的常量折叠仅接受根 VarExpr；
+调用路径把类型限定访问当对象访问；模板方法克隆还遗漏 `isStatic`。
+
+**修复**：Parser 保留完整 MemberExpr 链，Sema 共享 `resolveTypeQualifier` 逐层查类型，
+类型限定调用检查静态属性并回填选中符号，CodeGen 复用普通函数传参通道；方法克隆保留 static。
+中间值限定者诊断包含 `is not a class, namespace, or enumeration`，非静态方法无对象调用拒收。
+
+**验证**：`TemplateQualifiedExpr.*` 六例及 `tests/lang/test_basics_39_template_qualified.cpp`；
+集成用例在 clang 与 minicc 下均返回 0，覆盖引用形参、sret 静态调用及对象表达式副作用。
 
 ## B58. const 引用形参与右值引用形参按值传（不跟踪被绑定对象）
 

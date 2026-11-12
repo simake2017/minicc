@@ -1,27 +1,6 @@
-// =============================================================================
-// 模板实参推导引擎 —— S2 逐对推导 / S3 显式实参 / S4 不可推导上下文
-// （理论见 docs/learn/02、03、04）
-// =============================================================================
-// 扫到哪种 P ⇒ 走哪条分支 ⇒ 结果（[temp.deduct.call]）：
-//   P=const X   ⇒ 剥顶层 const 后递归          │ P=T&   ⇒ 实参须左值，否则 ✗
-//   P=T&&       ⇒ 左值实参 ⇒ T := A&（万能引用）│ P=T*   ⇒ 实参须指针，递归 pointee
-//   P=T（裸参数）⇒ 值传递调整后绑定              │ P=C<T1..> ⇒ 同类模板同元数 ⇒ 逐位合一
-//   P 非依赖    ⇒ 要求 P == A（恒等）
-// 三阶段：S3 显式实参占前缀 → S2 逐 (P,A) 配对合一（绑定须一致）→ S4 收尾
-//   （仍有未绑定参数 ⇒ 不可推导上下文错）。
-//
-// 逐对 trace（twice(3)）：S3 无显式 ⇒ S2 P=T A=int ⇒ T := int ✓ ⇒ S4 全绑定
-//   ⇒ { T := int } ──交 S5──▶ twice<int>
-// 实际日志（逐对打印，供教学观测）：
-//   [deduction] ▶ twice — 模板参数 <T>，实参 1 个
-//   [deduction]   P=T          A=int        ⇒ T := int
-//   [deduction] ◀ 推导成功: <T=int>
-//
-//   标准章节：[temp.deduct] 总则 │ [temp.deduct.call] 逐对 P/A 调整规则
-//             [temp.deduct.type] 类型等价/不可推导 │ [temp.arg.explicit] 显式实参
-//   对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:Sema::DeduceTemplateArguments（lib/Sema/SemaTemplateDeduction.cpp）
-//     deduce() ≈ 入口 │ deducePair() ≈ 逐对合一回调
-// =============================================================================
+// 模板实参推导：结构合一、显式实参注入与不可推导位置检查。
+// 参考 clang/Sema/SemaTemplateDeduction.cpp: DeduceTemplateArguments。
+// 例：f(T*) 收到 int* 推出 T=int；f(T,T) 收到 int 与 double 因绑定冲突失败。
 
 #include "template_deduction.h"
 #include "sfinae.h"
@@ -30,21 +9,8 @@
 
 namespace minicc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 偏特化匹配 [temp.class.spec.match] —— 复用同一套合一算法（理论见 docs/learn/19）
-// ─────────────────────────────────────────────────────────────────────────────
-// 【为什么能复用 deducePair】与函数模板推导是同一件事 —— 都是"受限合一"，只是 P 的
-//   来源不同：调用点用形参表，这里用特化模式。
-// 逐位 trace（模式 [T*, T]）：
-//   实参 [double*, double] ⇒ ① P=T* A=double* ⇒ T := double ✓ ② P=T A=double ⇒ 一致 ✓ ⇒ 匹配
-//   实参 [int, int]        ⇒ ① P=T* A=int ⇒ 不是指针 ✗ ⇒ 该偏特化不匹配
-// 逐位 trace（模式 [T&, T]，走下方"引用结构前置检查"）：
-//   实参 [int, int]  ⇒ 引用位收到非引用实参 ✗ │ 实参 [int&, int] ⇒ T := int ✓
-// 【职责边界】本函数只回答"这一条偏特化匹配不匹配"（逐条试，不含比较）；
-//   "多条都匹配时谁胜"由调用方 selectClassTemplate 用 dominance 循环裁决
-//   [temp.class.order]（semantic_analyzer.cpp 的 selectClassTemplate，比较器
-//   classSpecAtLeastAsSpecialized），见 docs/learn/21。
-// 返回：全部位匹配成功 → true，subst 填好可交付实例化；任一位失败 → false
+// 偏特化复用逐对合一，但模式的值位须精确匹配，引用不做调用表达式调整。
+// 例：Box<T*> 匹配 Box<int*>；Box<int,4> 不匹配 Box<int,5>。
 bool TemplateDeducer::matchPattern(
     const std::vector<TemplateArg>& pattern,
     const std::vector<TemplateArg>& args,
@@ -60,15 +26,8 @@ bool TemplateDeducer::matchPattern(
 
     DeductionResult out;
     for (size_t i = 0; i < pattern.size(); i++) {
-        // ── 值位（NTTP 模式位）[temp.class.spec] ──
-        //   模式位写成值（`enable_if<true, T>` 的 true、`Box<int, 4>` 的 4）时，
-        //   该位【不参与合一、不绑定任何形参】—— 只要求实参位同形态同值。
-        //   整个 enable_if 惯用法就架在这一位上：主模板的 true 分支是
-        //   `enable_if<true, T> { using type = T; }`，false 分支无 type 成员 ⇒
-        //   探测失败。位不比值，两个分支就会同时匹配 ⇒ 偏序裁决出歧义。
-        //   值位若写成形参名（`Box<T, N>` 的 N）在本项目里 Parser 已按类型位建
-        //   节点，故此处不会遇到"值位可绑定"的形态。
-        //   对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:DeduceTemplateArguments 的 TDK_NonDeducedType 路径。
+        // 常量值模式位按值比较，不引入新绑定。
+        // 例：Box<int,4> 只匹配对应值 4；待推导值名尚不支持。
         if (pattern[i].isValue()) {
             const TemplateArg& A = args[i];
             if (!A.isValue() || !pattern[i].equals(A)) {
@@ -108,13 +67,8 @@ bool TemplateDeducer::matchPattern(
             return false;
         }
 
-        // ── ★ 引用的结构匹配前置检查 ──
-        // [temp.class.spec.match]/2：偏特化匹配是【结构等价】，不是函数调用那套
-        //   "左值可绑定"。deducePair 的 P=T& 分支只看 argIsLValue 会放行 A=int，
-        //   于是 `Probe<T&>` 错误匹配上 `Probe<int>` —— 引用位只能由引用实参填充
-        //   （clang 同样在 clang/lib/Sema/SemaTemplateDeduction.cpp:DeduceTemplateArguments 的 TDK_Reference 分支把关）。
-        // demo: Probe<T&> 对 Probe<int>  ⇒ 不匹配 ✓ │ 对 Probe<int&> ⇒ 继续推导 ✓
-        //       Probe<T&> 对 Probe<int&> → 两边都是左值引用 → 继续推导 ✓
+        // 偏特化按类型结构匹配，不能使用函数调用的引用绑定宽容规则。
+        // 例：S<int&> 不匹配 S<int>，即使 int 左值能绑定 int&。
         {
             // 剥掉顶层 const 再判引用性（const T& 的 const 是外层修饰）
             TypePtr pc = P;
@@ -142,11 +96,7 @@ bool TemplateDeducer::matchPattern(
             }
         }
 
-        // argIsLValue 传 true：特化模式里的引用按"可绑定"处理（"引用必须对引用"
-        //   已由上面单独把关，故安全）。
-        // ★ structuralMatch 传 true：本次是【结构等价】而非调用推导，必须关掉
-        //   [temp.deduct.call]/3 的万能引用规则 —— 否则 `Kind<T&&>` 匹配 `Kind<int&&>`
-        //   会把 T 绑成 int&（把"实参是引用"当成"实参是左值"），正确答案是 T := int。
+        // 结构匹配的引用形态已在上方验证，此处按可绑定左值继续递归。
         if (!deducePair(P, args[i].type, /*argIsLValue=*/true, paramNames, subst, out,
                         /*structuralMatch=*/true)) {
             failReason = out.failureReason;
@@ -156,17 +106,8 @@ bool TemplateDeducer::matchPattern(
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// desugarAlias —— 模式位里的别名模板 id 解糖（[temp.alias]/1，理论见 docs/learn/27）
-// ─────────────────────────────────────────────────────────────────────────────
-// ★ 推导比的是【名字】，而别名就是"同一个类型的另一个名字" —— 同一次调用两侧各走各的
-//   解糖路径，P 侧不解 ⇒ 合一判"名字不等" ⇒ 候选被静默剔除：
-//     template<class T> using Vec = MyPtr<T>;
-//     template<class T> Vec<T> pass(Vec<T> v);   // P 侧写 Vec<T>
-//     pass(v);                                    // A 侧已在调用点解糖成 MyPtr<int>
-// 是"解糖"不是"实例化"：T 仍是形参，`MyPtr<T>` 保持依赖，正交给逐位合一去绑定。
-// 逐对：desugarAlias(Vec<T>, {}) ⇒ MyPtr<T>（保持依赖）│ 配 {T := int} ⇒ MyPtr<int>
-// 对照 clang：clang/lib/Sema/SemaTemplateDeduction.cpp:DeduceTemplateArguments 之前取 getCanonicalType，别名已被完全剥掉。
+// 别名不引入新类型，模式与实参均解糖后再匹配。
+// 例：Vec<T> 是 MyPtr<T> 的别名时，可与 MyPtr<int> 合一得到 T=int。
 TypePtr TemplateDeducer::desugarAlias(
     const TypePtr& P,
     const std::unordered_map<std::string, TypePtr>& subst) {
@@ -188,22 +129,8 @@ TypePtr TemplateDeducer::desugarAlias(
     return desugared ? desugared : P;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// reducePattern —— 把模式位归约成具体类型（void_t / decltype 的求值点）
-// ─────────────────────────────────────────────────────────────────────────────
-// 扫到哪种模式位 ⇒ 归约成什么（[temp.deduct]/8，CWG 1558：void_t<E...> 各 E 全合法则等价
-//   于 void，否则替换失败；别名模板的实参替换失败【也算】SFINAE —— is_range 的偏特化
-//   正是靠这条"不命中就静默退化"）：
-//   void_t<E...> ⇒ 逐个替换 E，全合法 ⇒ void；任一不合法 ⇒ 抛 SubstitutionFailure
-//   void_t<>     ⇒ 无实参 ⇒ 直接合法 ⇒ void
-//   decltype(e)  ⇒ 替换 e 后真求值 ⇒ 具体类型
-//   Vec<T>（别名）⇒ 解糖后递归再归约（别名可指向别名）
-// 逐位 trace（void_t<decltype(declval<T>().begin())>）：
-//   {T→vector<int>} ⇒ ① 替换实参 ② decltype 求值 ⇒ int（合法）⇒ 归约为 void ✓
-//   {T→int}         ⇒ ② 抛 SubstitutionFailure ⇒ 整个模式位不匹配 ✓
-// 【本实现的简化】void_t 是【编译器内建】（名字命中即按上述语义处理，不走别名模板机制），
-//   详见 SemanticAnalyzer::registerBuiltins。
-// 对照 clang：TreeTransform 里 void_t 是普通别名模板，替换失败同样被吞掉。
+// 用已有绑定归约依赖模式，求值失败移除候选。
+// 例：void_t<typename T::type> 只有 T 提供该成员类型时才归约为 void。
 TypePtr TemplateDeducer::reducePattern(
     const TypePtr& P,
     const std::unordered_map<std::string, TypePtr>& subst) {
@@ -280,11 +207,8 @@ bool TemplateDeducer::isTemplateParamName(const TypePtr& t,
     return false;
 }
 
-// 把一次绑定 paramName := type 写入替换表 subst；已有绑定时要求新旧类型相等。
-// 【理论】合一算法的 unify(变量, 类型)：变量只能绑定一次，重复绑定必须一致，否则整次
-//   推导失败（对应 clang 诊断 "conflicting types for deduction of template parameter"）。
-// demo: max(x:int, y:int) ⇒ 第一次 bind(T,int) 记 "T := int"；第二次 bind(T,int)
-//       equals ✓ 记 "T := int（一致 ✓）"；bind(T,double) ⇒ 冲突 ✗
+// 同一形参的重复绑定必须一致。
+// 例：f(T,T) 收到 int,int 成功；收到 int,double 失败。
 bool TemplateDeducer::bind(const std::string& paramName, const TypePtr& type,
                            Subst& subst, DeductionResult& out,
                            const std::string& patternStr, const std::string& argStr) {
@@ -326,18 +250,9 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
     std::string pStr = P->toString();
     std::string aStr = A->toString();
 
-    // ── A 的引用壳按 [expr.type]/1 剥掉（仅限调用推导）──────────────────────
-    // A 来自 inferCall 取的【声明类型】：变量 `int& r` 给的 A 是 `int&`。但表达式的
-    // 类型永不可能是引用 —— 值类别由 argIsLValue 单独携带，deducePair 看见的 A
-    // 必须是裸类型。不剥的话【具体 P】配引用实参会死磕结构不等（实测 rc=1）：
-    //   template<class T> int f(int& x, T y);
-    //   int& r = a;  f(r, 2);
-    //   ⇒ P=int& 绑定检查 ✓，递归到 P=int（非依赖）vs A=int& ⇒
-    //     "no match for non-dependent parameter: P='int' vs A='int&'"
-    // P=T 形参位此前靠「值传递调整 A'=int」侥幸存活（T 被绑成 int& 而非 clang 的 int，
-    // 靠折叠归一兜住）—— 统一从入口剥，两条路同一判据。
-    // ★ 偏特化匹配（structuralMatch=true）的 A 是【模板实参】（Box<int&> 的 int&
-    //   是有意义信息），不剥 —— 与 T&& 分支跳过万能引用是同一个守卫。
+    // 调用实参传入的是声明类型，须剥引用以还原表达式类型（[expr.type]）。
+    // 偏特化的实参本身就是类型，必须保留引用层。
+    // 例：int& r 作为调用实参按 int 推导；模板实参 S<int&> 仍保留 int&。
     if (!structuralMatch && A->isReference()) {
         A = A->referencedType;
         aStr = A->toString();
@@ -365,7 +280,7 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
     // ── P = T&：左值引用参数 ──
     // [temp.deduct.call]：P 是引用类型时以被引用类型参与推导，但绑定要过 [dcl.init.ref]。
     // ★ 判据不在本处写死，走 Type 的 referenceBindsValueCategory（判据单点）——
-    //   这里原先写的是"右值一律拒"，于是 `const T&` 收右值被误拒（BUGS.md B26）：
+    //   这里原先写的是"右值一律拒"，于是 `const T&` 收右值被误拒（已知边界）：
     //   `const T&` 建成 LValueRef(Const(T))，外层不是 const ⇒ 剥 const 那支救不了它。
     if (P->isLValueReference()) {
         std::string why;
@@ -378,25 +293,15 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
         // ★ structuralMatch：两侧【对称】剥壳 —— 偏特化匹配是模板实参表的类型对类型
         //   结构等价（[temp.class.spec.match]/2），模板实参可以是引用类型，具体引用位
         //   （如 Duo<T, int&> 的 int&）配 int& 实参必须命中。若拿 A=int& 原样递归，
-        //   内层落到"非依赖恒等"会比成 int vs int& 误拒（clang 判匹配，BUGS.md B28）。
+        //   内层落到"非依赖恒等"会比成 int vs int& 误拒（clang 判匹配，已知边界）。
         //   安全性：structuralMatch 仅由 matchPattern 传入，其 refKind 预检已保证
         //   P 是引用 ⇒ A 必是同种引用。
         const TypePtr& innerA = structuralMatch ? A->referencedType : A;
         return deducePair(P->referencedType, innerA, argIsLValue, paramNames, subst, out, structuralMatch);
     }
 
-    // ── P = T&&：万能引用（forwarding reference，[temp.deduct.call]/3）──
-    // 扫到的形态 ⇒ 绑定（std::forward 完美转发的根基）：
-    //   A 左值（argIsLValue）⇒ T := A&（实例化时 T&& 折叠为 A&）
-    //   A 右值               ⇒ T := A
-    //   structuralMatch=true ⇒ 【跳过本分支】，只做结构等价：`T&&` 配 `int&&` ⇒ T := int
-    // ★ A 取自变量的【声明类型】，可能本身就是引用（`int& rr` 的 A 就是 int&）：再套一层
-    //   即得嵌套引用 `int& &` ⇒ id(rr) 推出 T := int& & ⇒ 符号 _Z2idIRRiE，与 id(a) 的
-    //   T := int& ⇒ _Z2idIRiE 分叉（clang 只产出后者）。修复不在本处补剥壳，而是由
-    //   Type::makeLValueReference 按 [dcl.ref]/6 在构造点归一 —— 折叠规则只写一份。
-    //   （[expr.type]/1：表达式永远没有引用类型，故 clang 里 A 到这一步已是裸类型。）
-    // ★ 偏特化匹配若套用本分支，`Kind<T&&>` 匹配 `Kind<int&&>` 会 bind 出 T := int&
-    //   （把"实参是引用"当成"实参是左值"），而正确答案是 T := int。
+    // 转发引用只在裸模板形参 T 的 T&& 上成立（[temp.deduct.call]）。
+    // 例：左值 int 得 T=int&；右值 int 得 T=int，替换后再由引用折叠归一。
     if (P->isRValueReference()) {
         TypePtr inner = P->referencedType;
         if (!structuralMatch && isTemplateParamName(inner, paramNames) && argIsLValue) {
@@ -431,7 +336,7 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
     //   匹配（structuralMatch）里 A 是【模板实参类型】，本来就可以是引用 —— 剥了反而错：
     //   Same<T,T> 配 Same<int&,int&>，剥壳后 T := int（clang 是 T := int&）；更糟的是
     //   Same<T,T> 配 Same<int&,int>，逐位剥壳后"一致 ✓"误命中偏特化（clang 判 T 推导
-    //   冲突、不命中，回落主模板）—— 静默选错特化（BUGS.md B28）。
+    //   冲突、不命中，回落主模板）—— 静默选错特化（已知边界）。
     if (isTemplateParamName(P, paramNames)) {
         TypePtr adjusted = A;
         if (!structuralMatch) {
@@ -445,15 +350,8 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
         return bind(paramKey(P), adjusted, subst, out, pStr, aStr);
     }
 
-    // ── P = C<T1...>：类模板 id 的结构合一（[temp.deduct.type]/8 的 "T<T1,...,Tn>" 情形）──
-    //   P=MyPtr<T> A=MyPtr<int>（实例类型 MyPtr_int）⇒ 第 1 位 T ↔ int ⇒ T := int ✓
-    //   P=MyPtr<T> A=Box<int>                        ⇒ 不同模板 ✗
-    //   P=Box<T*>  A=Box<int,double>                 ⇒ 元数不同 ✗
-    //   模式位是值（NTTP）                            ⇒ 要求 toString() 逐位相等（不做算式反推）
-    // ★ A 侧是【实例化后】的类型，名字已被改写成 MyPtr_int，靠名字反推是错的（清洗规则不是
-    //   单射）；必须查实例记下的出身（templateOriginName/templateOriginArgs，见
-    //   getOrInstantiateClass）。clang 不需要出身字段（它的实例仍带实参表）。
-    // ★ 别名模板全靠这条：`Vec<T>` 解糖成 `MyPtr<T>` 后能不能推出 T 全看本分支。
+    // 类模板 id 逐位合一，实例类型通过出身信息还原原模板及实参。
+    // 例：MyPtr<T> 与 MyPtr<int> 得 T=int；模板名不同则不能合一。
     if (P->isClass() && !P->templateArgs.empty()) {
         bool sameTemplate =
             A->isClass() &&
@@ -521,11 +419,7 @@ bool TemplateDeducer::deducePair(const TypePtr& P, TypePtr A, bool argIsLValue,
     return false;
 }
 
-// 一次函数模板调用的完整推导：S3 显式前缀 → S2 逐对合一 → S4 收尾检查。
-// 【理论】合一算法主循环：先注入已知绑定（显式实参），再逐对递归合一，
-//         最后验证所有变量均已绑定；任一步失败即返回 success=false。
-// demo: twice(3) ⇒ S3 无显式 ⇒ S2 P=T,A=int ⇒ T := int ✓ ⇒ S4 全绑定 ⇒ success；
-//       失败候选由重载决议 S6 丢弃，全部失败才报 "no matching function"。
+// 完整调用推导先注入显式实参，再合一形参/实参，最后检查未推导位置。
 DeductionResult TemplateDeducer::deduce(
     const TemplateDeclPtr& tmpl,
     const std::vector<TypePtr>& argTypes,

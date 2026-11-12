@@ -1,34 +1,22 @@
-// =============================================================================
-// 类型系统实现（include/type.h 声明的 Type 成员）
-// =============================================================================
-// 工厂方法、sizeInBytes、equals、toString、stripReferences/stripConst。
-// 目录分工：
-//   · 引用折叠与结构替换（substituteType）在 src/template_instantiation.cpp；
-//   · 类型 → Itanium mangling 编码（NameMangler::encodeType）也在那里。
-//   本文件的 toString 面向"人读"，encodeType 面向"链接器"。
-// =============================================================================
+// 类型树的构造、比较、布局尺寸与可读表示。
+// 参考 clang/AST/Type.cpp；采用 x86-64 LP64 尺寸模型。
+// 例：int 占 4 字节；指针占 8 字节；const int* 与 int* const 不相等。
 
 #include "type.h"
 #include <format>
 
 namespace minicc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TemplateArg：模板实参的人读形态
-// ─────────────────────────────────────────────────────────────────────────────
-// 按 kind 分派：类型实参取类型名，非类型实参（NTTP）取十进制数字 —— 这是"值 vs 类型"
-// 在字符串层面的体现（把 4 当成类型打印只会得到无意义的 "?"）。
-// demo: ofType(makeInt()).toString() ⇒ "int"；ofValue(4).toString() ⇒ "4"
+// 模板实参的可读表示，类型、值和模板名分别打印。
 std::string TemplateArg::toString() const {
     if (kind == TemplateArgKind::Type)     return type ? type->toString() : "?";
     if (kind == TemplateArgKind::Template) return templateName;   // 模板名本身就是可读形态
-    // 主线 D：常量表达式形态的实参（Buf<2+2>）此时尚未求值（语义期才归一），
-    // value 槽是占位 0 —— 打印可读形态而不是撒谎的 "0"。
+    // 表达式实参尚未求值时打印 <constant expression>，避免把占位值 0 当成结果。
     if (valueExpr) return "<constant expression>";
-    return std::to_string(value); // 对于none type类型，这里直接透传了
+    return std::to_string(value);
 }
 
-// 逐位相等（声明与说明见 include/type.h）——
+// 逐位相等（声明与说明见 src/ast/type.h）——
 // demo：ofType(int) == ofType(int) ⇒ true │ ofValue(1, int) == ofValue(1, bool) ⇒ false
 //       （形态不同：前者是 Buf<1> 的 1，后者是 Flag<true> 的 true）
 bool TemplateArg::equals(const TemplateArg& o) const {
@@ -47,11 +35,7 @@ bool TemplateArg::equals(const TemplateArg& o) const {
 // 工厂方法：创建各种类型实例
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 内置标量类型的统一构造：kind + 规范可读名，两者是【一一对应】的
-// （kind 决定 sizeInBytes/encodeType/equals，name 只服务日志与报错）。
-// 抽成一个原语而不是逐个手写 6 行样板：10 个整型各写一遍只会让"哪几个是不同类型"
-// 这件事淹没在重复代码里 —— 而"char / signed char / unsigned char 是三个类型"
-// 恰恰是本批最想让人看见的一行（故三者的 name 也【不】归一）。
+// 内置类型的 kind 决定语义，name 仅供显示与诊断。
 static TypePtr makeBuiltin(TypeKind k, const char* name) {
     auto t = std::make_shared<Type>();
     t->kind = k;
@@ -108,29 +92,12 @@ TypePtr Type::makePointer(TypePtr pointee) {
     return t;
 }
 
-// ── 引用折叠（[dcl.ref]/6）：★ 在【构造点】就规范化，不留给调用方 ──
-// 【写法 ⇒ 结果】四行合一（只要有一层是左值引用，结果就是左值引用）：
-//     T&  &  ⇒ T&      T&  && ⇒ T&      T&& &  ⇒ T&      T&& && ⇒ T&&
-// 出处：foo(42) ⇒ T=int,  T&& = int&&          （实参是右值 ⇒ A 已是裸类型）
-//       foo(var)⇒ T=int&, T&& = int& && ⇒ int& （实参是变量 ⇒ A 取自声明类型，本身即引用）
-// 【为什么必须在构造点】折叠不是"替换时顺手做的一步"，而是【引用类型的不变量】：造引用的
-//   地方有四处 —— 模板替换（substituteType）、推导的万能引用 bind、Parser 声明符、Sema。
-//   只在其中一条路径折叠，别处造出的嵌套引用就无人收拾：`id(rr)` 得到非法的 `int& &`，
-//   观测量是同一函数被实例化出两个符号（_Z2idIRiE / _Z2idIRRiE）。放进工厂函数后，
-//   四"处"变成零"处"（踩坑史 T3）。
-// 对照 clang：clang/lib/Sema/SemaType.cpp:Sema::BuildReferenceType（SemaType.cpp:1887）是唯一折叠点，canonical type 在
-//   clang/lib/AST/ASTContext.cpp:ASTContext::getLValueReferenceType（ASTContext.cpp:4163）构造时即算好 —— 同一个思想：
-//   规范化在类型诞生的那一刻完成。
-// ★ 本实现无 canonical type 概念（日志/符号/比较吃同一份结构），故直接返回折叠后的规范
-//   形式，而非 clang 那样保留拼写形式的嵌套节点。
-//
-// 左值引用 T&。入参 referenced = 被引用的内层类型。
-// demo：makeLValueReference(Int) → LValueReference(Int)，toString="int&"，encodeType→"Ri"
+// 引用在构造点统一折叠，调用方无需自行归一（[dcl.ref]）。
+// 例：T& &、T&& &、T& && 都得到 T&；只有 T&& && 得到 T&&。
 TypePtr Type::makeLValueReference(TypePtr referenced) {
     // T& & → T&：内层已是左值引用，直接复用（结构共享，不造新节点）
     if (referenced->isLValueReference()) return referenced;
-    // T&& & → T&：'&' 赢 —— 剥掉内层的 '&&'，结果仍是左值引用
-    // （递归调用而非直接取 referencedType，是为了对"万一存在的更深处嵌套"自愈）
+    // 递归规范化内层引用，保证最终为左值引用。
     if (referenced->isRValueReference()) return Type::makeLValueReference(referenced->referencedType);
 
     auto t = std::make_shared<Type>();
@@ -144,10 +111,7 @@ TypePtr Type::makeLValueReference(TypePtr referenced) {
 // demo：makeRValueReference(Int) → RValueReference(Int)，toString="int&&"，encodeType→"Oi"
 // 当 T 是模板参数时 T&& 是"万能引用"（[temp.deduct.call]）。
 TypePtr Type::makeRValueReference(TypePtr referenced) {
-    // [dcl.ref]/6：右值引用套在【任何】引用上，结果都是那个内层引用本身
-    //   T&  && → T&      T&& && → T&&
-    // 即"内层是什么就还是什么"—— 故直接返回内层，无需区分左右值。
-    // （注意与左值引用的区别：那个是"剥壳取左值"，这个是"原样返回"。）
+    // 外层为 && 时保留内层引用：T& && → T&；T&& && → T&&。
     if (referenced->isReference()) return referenced;
 
     auto t = std::make_shared<Type>();
@@ -157,14 +121,8 @@ TypePtr Type::makeRValueReference(TypePtr referenced) {
     return t;
 }
 
-// const 限定 const T。入参 inner = 被限定的内层类型。
-// demo：makeConst(Int) → Const(Int)，toString="const int"，encodeType→"Ki"
-//       makeConst(LValueReference(Int)) → const int&，encodeType→"KRi"
-// ★ const 落在哪一层由【源码位置】决定（[dcl.type.cv]，见 type.h"组合规则"与 docs/learn/23）：
-//   makeConst(Int)              → Const(Int)           "const int"    （说明符侧，限定基类型）
-//   makeConst(Pointer(Int))     → Const(Pointer(Int))  "int* const"   （声明符侧）
-//   makePointer(makeConst(Int)) → Pointer(Const(Int))  "const int*"   （说明符侧）
-//   两种结构打印不同、mangling 不同、偏特化匹配结果也不同 —— 不可互换。
+// const 限定只包一层，并保留它修饰的是指针还是被指类型。
+// 例：Const(Int) → const int；Const(Pointer(Int)) → int* const。
 TypePtr Type::makeConst(TypePtr inner) {
     auto t = std::make_shared<Type>();
     t->kind = TypeKind::Const;
@@ -217,16 +175,9 @@ TypePtr Type::makeDecltype(DecltypeExprPtr expr, bool paren) {
     return t;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// canRepresentValue：整型值能否被本类型无损表示（[dcl.init]/7 + [expr.const]/10）
-// ─────────────────────────────────────────────────────────────────────────────
-// 这是 converted constant expression 判据的核心一步：非类型模板实参 `Buf<4L>` 填
-// `template<int N>` 合法，`Buf<-1>` 填 `template<unsigned N>` 不合法 —— 分界就是
-// "值装不装得下"，而不是"形态是否字面相同"。
-// ★ bool 单独走一条：它的 integerBitWidth() 是 1，但"1 位量"描述不了它的值域 ——
-//   bool 的可表示集合是 {0,1}。clang 对 `F<2>` 报的正是 cannot be narrowed to 'bool'。
-// demo: (1, bool) ⇒ true │ (2, bool) ⇒ false │ (-1, unsigned int) ⇒ false
-//       (4, long) ⇒ true │ (70000, short) ⇒ false │ (4, char) ⇒ true
+// 非类型模板实参的无损表示检查（[dcl.init]、[expr.const]）。
+// 例：bool 只接受 0/1；unsigned char 接受 255、不接受 256。
+// 按目标类型的值域判断，避免把可表示常量误判为窄化。
 bool Type::canRepresentValue(int64_t v) const {
     if (!isInteger()) return false;
     if (isBool()) return v == 0 || v == 1;
@@ -247,17 +198,8 @@ bool Type::canRepresentValue(int64_t v) const {
     return v >= lo && v <= hi;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// sizeInBytes：获取类型占用的字节数
-// ─────────────────────────────────────────────────────────────────────────────
-// "运行期看偏移量"的基础。按 LP64（x86-64 System V）模型：
-//   bool/char/三个 char 变体 = 1，short = 2，int = 4，long/long long = 8（★ long 在
-//   LP64 上是 8 字节，与 Windows 的 LLP64 不同 —— 本项目按本机 ABI）。
-//   double = 8，指针与引用 = 8（引用本质是指针），class 取 classLayout.totalSize；
-//   TemplateParam / Auto / Decltype 大小未知，返回 0（正常流程下不应活到 CodeGen）。
-// ★ 整型家族的字节数【不在这里逐个写死】，而是从 integerBitWidth() 推出来 ——
-//   宽度表在 type.h 一处维护，sizeInBytes 与它不可能对不上（此前两处各写一份
-//   "int=4" 的口子正是这类漂移的温床）。
+// 按 x86-64 LP64 返回字节数：int=4、long=8、指针/引用=8。
+// 类使用已计算布局；数组为元素大小乘长度。
 std::uint32_t Type::sizeInBytes() const {
     switch (kind) {
         case TypeKind::Array:
@@ -287,12 +229,8 @@ std::uint32_t Type::sizeInBytes() const {
     return 0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// equals：类型比较
-// ─────────────────────────────────────────────────────────────────────────────
-// 结构化递归比较：kind 相同才继续，复合类型递归比较内层。用于语义检查（实参/形参匹配）
-// 与函数模板推导中"多处推导结果须一致"的判断（合一算法 unify 成功后的等价检查）。
-// demo: int equals int ⇒ true；int equals double ⇒ false；Pi equals Pi ⇒ true（递归比 pointee）
+// 按类型树结构判等，限定符层次和模板实参均参与。
+// 例：const int* != int* const；char != signed char。
 bool Type::equals(const TypePtr& other) const {
     if (!other) return false;
     if (kind != other->kind) return false;
@@ -356,12 +294,7 @@ bool Type::equals(const TypePtr& other) const {
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// toString：类型的可读字符串表示
-// ─────────────────────────────────────────────────────────────────────────────
-// 递归拼接，用于中文日志与报错信息。与 NameMangler::encodeType 的分工：toString 面向
-// "人读"，encodeType 面向"链接器"。
-// demo: Const(LValueReference(Int)).toString() ⇒ "const int&"
+// 面向日志与诊断的类型表示；符号编码另由 NameMangler 负责。
 std::string Type::toString() const {
     switch (kind) {
         case TypeKind::Void:   return "void";
@@ -391,19 +324,8 @@ std::string Type::toString() const {
             return referencedType ? referencedType->toString() + "&&" : "?&&";
         case TypeKind::Const: {
             if (!innerType) return "const ?";
-            // ★ 'const' 印在【哪一侧】由它限定的东西决定（[dcl.type.cv]）：
-            //     Const(Int)          → "const int"       限定基类型
-            //     Pointer(Const(Int)) → "const int*"      指针【指向】const
-            //     Const(Pointer(Int)) → "int* const"      const 的【指针】
-            // ★ toString() 不是单射 —— 若一律输出 "const " + inner->toString()，
-            //   Pointer(Const(Int)) 与 Const(Pointer(Int)) 会印成同一个串。危害不止日志难读：
-            //   ① getOrInstantiateClass 的【缓存键】以 toString 为输入 ⇒ C<const int*> 与
-            //      C<int* const> 共用一条缓存，后者的实例被前者的实例顶掉；
-            //   ② 实例名清洗（template_instantiation.cpp Step 2）同样吃 toString。
-            //   即"类型树的形状"与"人读串"必须是单射（同族教训见 docs/learn/23）。
-            //   对照 clang：TypePrinter::printQualifiedType 按 TypeClass 分派（⚠ 本地语料缺
-            //   clang/include/clang/AST/TypePrinter.h，未能 grep 验证），
-            //   指针的 const 走 printPointer 输出 "int *const"。
+            // const 的显示位置保留限定层次。
+            // 例：Pointer(Const(Int)) → const int*；Const(Pointer(Int)) → int* const。
             if (innerType->isPointer()) {
                 return (innerType->pointeeType ? innerType->pointeeType->toString() : "?")
                        + "* const";
@@ -444,14 +366,8 @@ std::string Type::toString() const {
     return "?";
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// stripReferences / stripConst：去除修饰，获取"裸类型"
-// ─────────────────────────────────────────────────────────────────────────────
-// 推导时常用：先剥掉实参/形参的引用与 const，再比较"裸类型"（对应 [temp.deduct.call]
-// 对实参类型做的退化调整）。
-// demo: stripReferences(RValueReference(Int)) ⇒ Int；stripReferences(Int) ⇒ nullptr
-//       stripConst(Const(Int)) ⇒ Int；stripConst(Int) ⇒ nullptr
-// （nullptr = "无可剥的修饰"，调用方据此回退到原类型。）
+// 仅剥对应最外层修饰；组合剥离由调用方决定。
+// 例：stripReferences(int&) → int；stripConst(const int*) 不剥被指类型的 const。
 TypePtr Type::stripReferences() const {
     if (isLValueReference() || isRValueReference()) {
         return referencedType ? referencedType : nullptr;
@@ -467,17 +383,8 @@ TypePtr Type::stripConst() const {
     return nullptr;
 }
 
-// ── 引用绑定判据（[dcl.init.ref]，全项目【单点】）─────────────────────────────
-// 声明与"为什么必须单点"写在 include/type.h 的尾注里（那里是权威表述）。
-// 判据表（形参 ⇒ 可接受的实参值类别）：
-//   T&        左值           │ 右值 ✗   （[dcl.init.ref]/5.4.1）
-//   const T&  左值 ✓ 右值 ✓  │         （/5.4.2：const 左值引用可绑右值）
-//   T&&       右值           │ 左值 ✗   （[dcl.init.ref]/5.3；模板的 T&& 是万能引用，
-//                                       由推导引擎先折叠成 T := A&，不走本判据）
-//   非引用    左右值皆可      │         （按值传参：值类别无关）
-// ★ const T& 的形态：本项目 parseType 把 `const T&` 建成 LValueRef(Const(T))
-//   （cv 落在被引用类型上，见 docs/learn/23）—— 所以"被引用类型是不是 const"要看
-//   referencedType，而不是看引用节点自己有没有被 const 包住。
+// 统一的引用绑定检查（[dcl.init.ref]）。
+// 例：int& 拒绝右值；const int& 可绑定右值；int&& 拒绝左值。
 bool referenceBindsValueCategory(const TypePtr& paramType, bool argIsLValue,
                                  std::string* why) {
     if (!paramType || !paramType->isReference()) return true;   // 按值传参

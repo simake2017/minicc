@@ -1,9 +1,6 @@
-// =============================================================================
-// constant_folder.cpp —— 常量折叠实现
-// 对照 clang：ExprConstant.cpp（EvaluateAsInt 的裁判逻辑）、
-//   CodeGen 前的 ConstantFolding。教学版只折三种节点：
-//   BinaryExpr / UnaryExpr / ConditionalExpr，且只在操作数全是字面量时。
-// =============================================================================
+// 常量折叠实现，支持算术、条件、逗号与已知常量变量。
+// 参考 clang/AST/ExprConstant.cpp。
+// 例：(2 + 3) + x → 5 + x；(1, 7) → 7。
 
 #include "constant_folder.h"
 
@@ -109,9 +106,7 @@ ExprPtr ConstantFolder::foldNode(ExprPtr expr) {
             auto& b = static_cast<BinaryExpr&>(*expr);
             ExprPtr l = foldNode(b.left);
             ExprPtr r = foldNode(b.right);
-            // ★ 先回写孩子再判定/打日志：孩子可能被常量传播【换成新节点】
-            //   （VarExpr → 字面量），describe(expr) 读的是 b.left/b.right，
-            //   不回写会对着旧节点描述（VarExpr 落进 default 打成 <expr>）。
+            // 先回写替换后的子节点，使日志描述与实际折叠的树一致。
             b.left = std::move(l);
             b.right = std::move(r);
 
@@ -128,7 +123,7 @@ ExprPtr ConstantFolder::foldNode(ExprPtr expr) {
                     if (isBool) return std::make_shared<BoolLiteralExpr>(*v != 0);
                     return std::make_shared<IntLiteralExpr>(*v);
                 }
-                // 除零：不折（保留运行期语义，见头注 3）
+                // 除零：不折（保留运行期语义，除零不在此求值）
             }
             return expr;
         }
@@ -185,11 +180,8 @@ ExprPtr ConstantFolder::foldNode(ExprPtr expr) {
             return expr;
         }
 
-        // ── 变量引用：查编译期常量表 ⇒ 常量传播 ──────────────────────
-        // `const int c = 4; int x = c * 2;` 里 c 在此处替换成字面量 4，
-        // 外层二元节点下一轮自然折成 8 —— 传播与折叠交替，正是
-        // 教科书"constant propagation + folding"的流水线形态。
-        // 查不到（普通变量 / 变量是类的对象 / 指针const 等）原样保留。
+        // 常量传播：const int c = 4; 中的 c * 2 可折成 8。
+        // 未知名字保持原样，由 Sema 回调决定哪些变量是编译期常量。
         case NodeKind::Var: {
             if (!m_constResolver) return expr;
             auto& v = static_cast<VarExpr&>(*expr);

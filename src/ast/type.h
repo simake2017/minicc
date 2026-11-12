@@ -1,28 +1,8 @@
 #pragma once
-// =============================================================================
-// 类型系统（Type System）—— 理论见 docs/learn/12（类型封装）、23（cv 位置与同一性）
-// =============================================================================
-// 一句话：编译期看"符号"（类型名、字段名），运行期看"偏移量"（内存布局）。
-// 对照 clang：clang/include/clang/AST/Type.h 的 Type 类族 + QualType（本版类型即值、无 QualType 包装层——【简化】）
-//
-// 【本文件提供什么 ⇒ 谁在用】
-//   Type 类型树（基础/类/指针/引用/const/模板参数/decltype）⇒ Parser 建、Sema 填、CodeGen 读
-//   ClassLayout（字段偏移 / vtable 槽位 / 多继承子对象）      ⇒ CodeGen 照抄，不再自己算
-//   equals / stripReferences / stripConst（结构比较与去修饰）⇒ 语义检查、模板推导的合一
-//
-// 【管线位置】type.h 横跨所有阶段，是语义信息的"通货"：
-//   Parser parseType() 构造 Type → Sema 填 Expression::resolvedType、算 ClassLayout →
-//   TemplateInstantiator::substituteType 结构化替换（含引用折叠）→
-//   NameMangler::encodeType 编成 Itanium mangling。
-//
-// 【标准章节】[basic.type] [basic.fundamental] [class] / [dcl.ptr] [dcl.ref] [dcl.type.cv]
-//   [dcl.spec.auto] / [class.mem] [class.virtual] / [temp.param] [temp.deduct]
-// 对照 clang：AST/Type.h（Type / BuiltinType / PointerType / ReferenceType / RecordType /
-//   TemplateTypeParmType / AutoType）、Decl.h（FieldDecl ≈ FieldInfo）、
-//   RecordLayout.h（ASTRecordLayout ≈ ClassLayout）。
-//   ★ 差异：clang 用 QualType + Qualifiers 承载 const（不单独建节点），本实现把 const
-//     建成独立的 TypeKind::Const 节点，便于观察与讲解。
-// =============================================================================
+// 各阶段共用的类型树、模板实参与类布局。
+// 参考 clang/AST/Type.h、TemplateBase.h、RecordLayout.h。
+// 本实现用独立 Const 节点展示限定层次，Sema 计算布局后供 CodeGen 使用。
+// 例：const int* → Pointer(Const(Int))；int* const → Const(Pointer(Int))。
 
 #include <cstdint>
 #include <memory>
@@ -44,19 +24,8 @@ using DecltypeExprPtr = std::shared_ptr<Expression>;
 // ★ 同样只前置声明：依赖保持单向（ast.h → type.h），shared_ptr 允许不完整类型。
 struct FunctionDecl;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TypeKind：类型的种类
-// ─────────────────────────────────────────────────────────────────────────────
-// ── 整型家族（[basic.fundamental]/2）────────────────────────────────────────
-// 每个「独立的类型」一个 kind，与 clang BuiltinType 一一对应。★ 三处易混：
-//   ① char / signed char / unsigned char 是【三个不同类型】([basic.fundamental]/7)，
-//      尽管 char 在 x86-64 Linux 上就是 signed char 的表示 —— 故 c / a / h 三个编码都不同，
-//      重载与模板特化都必须把它们当不同类型。本项目只体现"类型不同"，不实现
-//      `char` 的符号性实现定义行为差异。
-//   ② `unsigned` 单独写 ≡ `unsigned int`；`long` ≡ `long int` —— 多关键字序列在
-//      parseType 里规范化（见 Parser::parseBuiltinTypeSpecifierSeq）。
-//   ③ bool 不是整型家族成员（它是独立的算术类型），但【能参与整型转换】，
-//      故 isInteger() 把它算进来 —— 判据点见 type.h 的 isInteger 注释。
+// 类型种类；char、signed char、unsigned char 各有独立身份。
+// unsigned 与 unsigned int 等多关键字写法由 Parser 归一。
 enum class TypeKind : uint8_t {
     Void,           // void
     Bool,           // bool
@@ -83,27 +52,9 @@ enum class TypeKind : uint8_t {
     Array,          // T[N] —— 数组类型（主线 E，[dcl.array]）
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TypeKind ↔ clang 类型类 ↔ Itanium mangling 编码
-// ─────────────────────────────────────────────────────────────────────────────
-//   TypeKind                       clang（clang/include/clang/AST/Type.h）      encodeType
-//   Void / Bool / Double           BuiltinType::Void/Bool/Double          v / b / d
-//   Char / SChar / UChar           BuiltinType::Char_S/SChar/UChar        c / a / h
-//   Short / UShort                 BuiltinType::Short/UShort              s / t
-//   Int / UInt                     BuiltinType::Int/UInt                  i / j
-//   Long / ULong                   BuiltinType::Long/ULong                l / m
-//   LongLong / ULongLong           BuiltinType::LongLong/ULongLong        x / y
-//   Pointer                        PointerType                            P + 内层
-//   LValueReference                LValueReferenceType                    R + 内层
-//   RValueReference                RValueReferenceType                    O + 内层
-//   Const                          （clang 用 Qualifier，非独立节点）      K + 内层
-//   Class                          RecordType / CXXRecordDecl             <名字长度><名字>
-//   TemplateParam                  TemplateTypeParmType                   参数名原样输出
-//   Auto                           AutoType                               Da（★ auto NTTP 用）
-//   encodeType 的实现见 src/template_instantiation.cpp 的 NameMangler::encodeType。
-//
-// ★ Itanium 的整型编码取自 ABI §5.1.2 的 <builtin-type> 表；`j`/`m`/`t`/`y` 这几个
-//   "无符号版"最易漏 —— 漏一个就会把 `Buf<4u>` 编成 `Buf<4>`（与 int 实例撞符号）。
+// 类型编码见 src/sema/template_instantiation.cpp: NameMangler::encodeType。
+// 遵循 Itanium ABI §5.1.2 的基本编码：int → i，unsigned int → j，T* → P + T。
+// const 在此是节点，在 clang 中由 QualType 的限定位表示。
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AccessModifier：访问修饰符
@@ -114,14 +65,8 @@ enum class AccessModifier : uint8_t {
     Protected,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FieldInfo：类的字段信息（运行期看偏移量）
-// ─────────────────────────────────────────────────────────────────────────────
-// 对应 clang::FieldDecl（clang/include/clang/AST/Decl.h）+ ASTRecordLayout 中的字段偏移。
-// demo：class Point { int x; int y; };
-//   fields = [ FieldInfo{name=x, type=int, offset=0, size=4},
-//              FieldInfo{name=y, type=int, offset=4, size=4} ]
-//   （int 按 4 字节对齐，x 在偏移 0，y 紧随其后在偏移 4）
+// 字段的类型与对象内偏移；对应 clang FieldDecl 和 ASTRecordLayout。
+// 例：struct Point { int x; int y; }; → x@0、y@4。
 struct FieldInfo {
     std::string name;            // 显示名 —— MI 下带限定前缀，仅用于打印与"全限定名"查找
     TypePtr     type;
@@ -130,13 +75,8 @@ struct FieldInfo {
     AccessModifier access = AccessModifier::Public;
     std::string sourceClass;     // 声明该字段的类名（空 = 自身字段；非空 = 继承自该类）
 
-    // ── 下面三项：把"这个字段住在哪个子对象里"变成可精确回答的问题 ──
-    // ★ 为什么不能靠 name 字符串反推来源：name 是【显示标签】不是【路径】。祖辈前缀
-    //   （"B.x"）传进来时看不出它走的是哪条子对象路径；两个次基类同名字段、或祖辈前缀
-    //   恰好与某个直接基类撞名时，字符串会塌陷成同一条 ⇒ 偏移被算到错的子对象上
-    //   （BUGS.md B13 / B15）。
-    // 对照 clang：成员是 FieldDecl* + getFieldIndex()，布局按【下标】寻址；
-    //   本项目补上 viaBase + baseFieldIndex 后与之一致（名字只用于查找，不参与寻址）。
+    // 字段身份须包含基类子对象和字段下标；显示名不能区分所有继承路径。
+    // 名字用于查找，viaBase + baseFieldIndex 用于布局定位。
     std::string declaredName;    // 裸名（不含任何限定前缀）—— 名字查找的权威键
     std::string viaBase;         // 装着它的【直接基类】子对象名（空 = 本类自身字段）
     int         baseFieldIndex = -1;  // 在 viaBase 那个基类布局 fields[] 中的下标
@@ -150,34 +90,18 @@ struct FieldInfo {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VTableEntry：虚函数表中的一个槽位
-// ─────────────────────────────────────────────────────────────────────────────
-// 对应 clang 的 vtable 布局计算（clang/lib/CodeGen/CGVTables.cpp）。
-// 含虚函数的类，对象头部藏一个 vptr 指向 vtable；vtable 本质是函数指针数组。
-//
-// ★ 槽里挂的是【声明句柄】而不是符号串（clang/include/clang/AST/VTableBuilder.h:
-//   VTableComponent 挂 CXXMethodDecl*，槽里同样没有第二份符号串）：符号名由
-//   唯一定名点 registerFunction 产出，槽只负责"指向哪一个声明"。
-//   ⇒ 派生类覆写时换的是【句柄】，符号不必（也不许）在这里另算一遍 ——
-//     两处各算一遍就必然漂：Pass 1 算槽时形参类型还没解析（"Inner"），
-//     Pass 2 算定义时已解析（"Outer::Inner"）⇒ 同一方法两个符号 ⇒ 链接期
-//     undefined reference（docs/BUGS.md B45）。
-// demo：class Base { virtual void foo(); };
-//   vtableEntries = [ VTableEntry{method=<Base::foo 的声明>, index=0} ]
+// 虚表槽持有方法声明，符号统一从声明的 mangledName 取得。
+// 参考 clang/AST/VTableBuilder.h: VTableComponent。
+// 避免在形参类型尚未解析时另算符号；覆写只替换句柄。
+// 例：Base::foo 占槽 0，Derived::foo 覆写后该槽指向派生声明。
 struct VTableEntry {
-    // 槽指向的声明（唯一定名点 = registerFunction 写在 decl->mangledName 上）。
-    // ★ 前置声明即可：ast.h 定义 FunctionDecl 且 include 本文件 ⇒ 依赖单向
-    //   （type.h 不回头 include ast.h）。shared_ptr 允许不完整类型。
+    // 仅前置声明 FunctionDecl，保持 ast.h → type.h 单向依赖。
     std::shared_ptr<FunctionDecl> method;
     uint32_t    index   = 0;     // 在 vtable 中的索引（0-based）
     bool        isOverridden = false;
     std::string baseFunctionName; // 原始方法名（override 检测用；析构统一记作 "dtor"）
-    // 形参类型链（逐位类型的可读名，如 "int" / "S_intP"；零参为 ""）。
-    // ★ 槽位身份 = baseFunctionName + signature（[class.virtual]/2：同签名才叫覆写）。
-    //   只比裸名会让 `virtual int f(); int f(int);` 里的第二个 f 认领第一个的槽，
-    //   并把非虚的它误标成 virtual（BUGS.md B20 缺陷 c，实测静默算错）。
-    //   与符号名/成员查找共用同一个 paramTypeChain（判据单点）。
+    // 槽位身份由方法名和形参类型链共同确定，与成员查找共用 paramTypeChain。
+    // 例：f() 与 f(int) 不占同一槽；零参签名为空串。
     std::string signature;
     // 多继承 thunk 调整量（[class.mi] + Itanium ABI 2.4）：
     // 非 0 时，本槽位不能直接填函数地址，而要填一个跳板（thunk）——
@@ -203,25 +127,9 @@ struct BaseSubobject {
     std::vector<VTableEntry> entries;     // 次表槽位（仅非主多态基类有意义）
 };
 
-// =============================================================================
-// TemplateArg：模板实参的 tagged 值（[temp.arg]）—— 详见 docs/learn/18（NTTP）
-// =============================================================================
-// C++20 允许四类模板实参，本结构覆盖其中三类：
-//     template<class T>  → 类型实参        Box<int>       → kind=Type
-//     template<int N>    → 非类型实参 NTTP  Buf<4>         → kind=Integral
-//     template<template<class> class TT> → 模板模板实参  Wrap<Box,int> → kind=Template
-//     包展开 `Ts...`（未实现）
-//
-// ★ 约束：实参【不能】一律存成 TypePtr —— template<int N> 的实参 4 是值不是类型，
-//   TypePtr 结构上就表达不了。故用 tagged union 让"类型 or 值"共存于同一槽位。
-//
-// 【clang 对照】clang::TemplateArgument（clang/include/clang/AST/TemplateBase.h）是真正多形态的 tagged
-//   union（ArgKind{Type, Declaration, Integral, Template, Pack, ...}，Integral 形态带
-//   llvm::APSInt Integer）；本实现只取 Type / Integral / Template 三形态。形参侧对应
-//   TemplateTypeParmDecl / NonTypeTemplateParmDecl ⟷ 本项目的 TemplateParamKind。
-//
-// demo: template<int N> class Buf ⇒ Buf<4> ⇒ 替换表 { "N" → TemplateArg{Integral, 4} }
-// =============================================================================
+// 模板实参按种类保存，对应 clang/AST/TemplateBase.h: TemplateArgument。
+// 例：Box<int> 为 Type；Buf<4> 为 Integral；Wrap<Box,int> 中 Box 为 Template。
+// 类型与值不能都装进 TypePtr；参数包尚未实现。
 enum class TemplateArgKind : uint8_t {
     Type,     // 类型实参：Box<int>            →  payload 在 type 字段
     Integral, // 非类型实参：Buf<4>（NTTP）    →  payload 在 value 字段
@@ -232,20 +140,12 @@ struct TemplateArg {
     TemplateArgKind kind = TemplateArgKind::Type;
     TypePtr         type  = nullptr; // kind == Type     时有效
     int64_t         value = 0;       // kind == Integral 时有效
-    // ── 主线 D：常量表达式形态的 NTTP 实参（Buf<2+2>）────────────────────
-    // Parser 只把它解析成表达式树【存下来】（字面量 fast path 值是现成的，
-    // 不走这里），求值发生在 Sema 的 checkTemplateArguments —— 那里才有
-    // 折叠器与"是不是常量"的裁决权。求值成功后归一成 value/valueType
-    // （与 ③-c 形态归一同点写回），下游（缓存键/mangling/替换）无感。
-    // 对照 clang：Parser 把表达式存进 TemplateArgument（Expression 形态），
-    //   CheckTemplateTemplateArgument / CheckTemplateArgument 里 ConvertToValue。
+    // 常量表达式实参在 Sema 校验时归一为 value/valueType。
+    // 例：Buf<2+2> 先存表达式；求值后与 Buf<4> 使用相同值形态。
     DecltypeExprPtr valueExpr = nullptr;
 
-    // ── 模板模板实参（[temp.arg.template]）────────────────────────────────
-    // `Wrap<Box, int>` 里 Box 位的是【一个模板】，不是类型也不是值。
-    // 只存名字：本项目不做模板模板实参的逐位签名匹配（[temp.arg.template]/2
-    // 的"形参表至少一样特化"规则），形态自检只要求"这位得是个模板名"。
-    // 对照 clang：TemplateArgument 的 Template 形态带 TemplateDecl*。
+    // 模板模板实参保存模板名，逐位形参签名匹配由 Sema 负责。
+    // 例：Wrap<Box,int> 的第一位是模板 Box，不是类型 Box。
     std::string     templateName;
 
     // ── 非类型实参的【形态】（[temp.arg.nontype]）──────────────────────────
@@ -258,10 +158,7 @@ struct TemplateArg {
 
     TemplateArg() = default;
 
-    // 隐式转换：TypePtr → 类型实参。对照 clang：clang::TemplateArgument 同样有非 explicit
-    // 的转换构造（(QualType, TypeSourceInfo*) / (ValueDecl*) 等），故 clang 代码里处处能写
-    // `TemplateArgument(Ty)`。本实现只对【类型】开这个口子，【值】实参必须显式写
-    // ofValue(4) —— 刻意保留"这是值不是类型"的书写摩擦。
+    // 类型实参允许 TypePtr 隐式构造；值实参必须显式使用 ofValue。
     TemplateArg(TypePtr t)  // NOLINT(*-explicit-constructor)
         : kind(TemplateArgKind::Type), type(std::move(t)) {}
 
@@ -283,32 +180,17 @@ struct TemplateArg {
     bool isValue()    const { return kind == TemplateArgKind::Integral; }
     bool isTemplate() const { return kind == TemplateArgKind::Template; }
 
-    // 逐位相等（全特化匹配 [temp.expl.spec] 用）：类型位比类型，值位比值。
-    // 值的【形态】参与判断：`enable_if<true, T>` 的 true 与 `Buf<1>` 的 1
-    // 数值相同但不是同一种实参，不该判等。
-    // 定义放 src/type.cpp —— 与下面的 toString 同理，此处 Type 尚不完整。
+    // 全特化匹配同时比较值和类型：ofValue(1,int) != ofValue(1,bool)。
+    // 定义置于 src/ast/type.cpp，因为这里 Type 尚不完整。
     bool equals(const TemplateArg& o) const;
 
-    // 人读形态：类型实参取类型名，值实参取十进制数字
-    // demo：ofType(makeInt()) → "int"；ofValue(4) → "4"
-    // 定义放 src/type.cpp —— 此处置于 Type 定义之前，Type 尚不完整，
-    // 无法内联调用 Type::toString()。
+    // 可读形式：ofType(makeInt()) → "int"；ofValue(4) → "4"。
     std::string toString() const;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ClassLayout：类的完整内存布局（"运行期看偏移量"的核心结构）
-// ─────────────────────────────────────────────────────────────────────────────
-// 编译器在此算好每个字段的绝对偏移量，CodeGen 照抄，不再自己算；布局计算落点见
-// src/semantic_analyzer.cpp 的类注册路径（约 :226~:373）——先并入基类的
-// fields/vtableEntries，再累加本类字段偏移，最后分配 vtable 槽位。
-//
-// 【写法 ⇒ 布局】class Derived : Base（Base 有虚函数），Derived 新增 int d;
-//   偏移 0  ┌──────────────┐  vptr(8B) ──► _ZTV7Derived
-//   偏移 8  ├──────────────┤    vtable[-1] = _ZTI7Derived（RTTI type_info）；[0] = Derived::foo
-//           │ Base 字段 ...│
-//           └──────────────┘  其后是 int d；totalSize = 按最大对齐数对齐后的总字节数
-//   再例：class Point { int x; int y; }; ⇒ fields = [{x,offset=0},{y,offset=4}]，totalSize=8
+// Sema 计算的完整对象布局，CodeGen 直接消费，避免重复计算偏移。
+// 例：struct Point { int x; int y; }; → x@0、y@4、totalSize=8。
+// 多态布局另含 vptr、主表、次表和基类子对象。
 struct ClassLayout {
     std::string              className;
     uint32_t                 totalSize   = 0;    // 整个对象的字节大小
@@ -332,7 +214,7 @@ struct ClassLayout {
     //   ② 【本类自身字段】优先 —— [class.member.lookup]/3：派生类的声明【隐藏】基类同名
     //      声明。自身字段与基类字段撞名时会被重命名成 "D.x"，靠 declaredName 才认得出
     //   ③ 继承字段 —— 名字对各来源一视同仁，先到先得（真 C++ 在此应报歧义，
-    //      [class.member.lookup]/8；minicc 只做"能查到"，歧义诊断见 docs/BUGS.md B13）
+    //      [class.member.lookup]/8；minicc 只做"能查到"，歧义诊断见 docs/已知边界）
     const FieldInfo* findField(const std::string& name) const {
         auto all = findFields(name);
         return all.empty() ? nullptr : all.front();
@@ -341,12 +223,10 @@ struct ClassLayout {
     // 同上，但返回该层级的【全部】命中 —— 长度 > 1 即 [class.member.lookup]/8 的歧义
     // （`struct A{int x;}; struct B{int x;}; struct D:A,B{}; d.x` 在真 C++ 里 ill-formed）。
     // 分出这个接口的理由：findField 只能回答"取哪一条"，回答不了"是不是只有一条"；
-    // 而"静默取第一条"正是 BUGS.md B13 的观感（布局打印出两条同名、偏移还错）。
+    // 而"静默取第一条"正是 已知边界 的观感（布局打印出两条同名、偏移还错）。
     // 对照 clang：clang/include/clang/Sema/Lookup.h:LookupResult::isAmbiguous + 承载多个 NamedDecl。
     std::vector<const FieldInfo*> findFields(const std::string& name) const {
-        // ★ declaredName 才是权威键：name 是显示串，MI 下带前缀（"B.x"），拿它当键会让
-        //   查找结果依赖"前缀是哪一代留下的"。旧实现用 sourceClass + "." + name 反拼
-        //   前缀来配对 —— 那是把显示层当索引层用（BUGS.md B14 的成因）。
+        // 按 declaredName 查裸名，避免显示前缀影响继承字段查找。
         std::vector<const FieldInfo*> hit;
         for (auto& f : fields) {                                  // ① 全限定名
             if (f.name == name) hit.push_back(&f);
@@ -365,33 +245,10 @@ struct ClassLayout {
     }
 };
 
-// =============================================================================
-// 【指针 / 引用 / const 的组合规则】—— 详见 docs/learn/23
-// =============================================================================
-// ① 定位：Type 是"洋葱式"嵌套 —— 每个修饰符一个独立节点，靠 pointeeType /
-//    referencedType / innerType 三条链指向内层；组合顺序由 parseType 决定
-//    （记下 const 前缀 → 解析基础类型 → 叠加后缀 * / & / && → const 归位）。
-// ② 锚点：clang/lib/AST/ASTContext.cpp:ASTContext::getLValueReferenceType —— clang
-//    的 canonical type 在构造时即算好；minicc 的对应实现点是 Type::makeLValueReference
-//    （引用折叠的四种组合与"为什么必须在构造点"都写在那儿，此处不重复）。
-// ③ 动机：const 写在哪一侧就修饰谁（[dcl.type.cv]）—— 结构不同则打印不同、
-//    mangling 不同、偏特化匹配结果也不同（`C<const int*>` 与 `C<int* const>` 曾撞成
-//    同一条缓存）。建错树不报错、只静默算错。
-// ④ 【写法 ⇒ 建出哪种节点】（外 → 内；encodeType 见 src/template_instantiation.cpp）
-//      int ⇒ Int(i) │ int* ⇒ Pointer(Int)(Pi) │ int& ⇒ LValueReference(Int)(Ri)
-//      int&& ⇒ RValueReference(Int)(Oi) │ const int ⇒ Const(Int)(Ki)
-//      const int& ⇒ LValueReference(Const(Int))(KRi)  ← const 在【内层】
-//      int** ⇒ Pointer(Pointer(Int))(PPi)
-//      const int* ⇒ Pointer(Const(Int))(PKi)  ← const 在【内层】（说明符侧）
-//      int* const ⇒ Const(Pointer(Int))(KPi)  ← const 在【外层】（声明符侧）
-//      int* const* ⇒ Pointer(Const(Pointer(Int)))  ← 链式组合
-//      Box<int>::type ⇒ 实例类的别名表 + nestedQualifier=Box<int>、name="type"
-//   回归 tests/tmpl/test_tmpl_47_cv_position.cpp（踩坑史 T1）
-// =============================================================================
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Type：类型的统一表示
-// ─────────────────────────────────────────────────────────────────────────────
+// 类型采用嵌套节点表示修饰符，外层节点决定修饰对象。
+// 参考 clang/AST/Type.h；clang 的 const 由 QualType 承载。
+// 例：const int* → Pointer(Const(Int))；int* const → Const(Pointer(Int))。
+// 引用构造时即折叠：T& && → T&；T&& && → T&&。
 struct Type {
     TypeKind kind;
     std::string name;           // 类型名称（如 "int", "MyClass", "T"）
@@ -465,7 +322,7 @@ struct Type {
 
     // ── 工厂方法 ──
     // 每个 make* 返回一个新构造的 Type 节点；组合规则见上方"洋葱式"说明。
-    // 各工厂函数的入参含义、产物形状与 encodeType 结果见 src/type.cpp 对应实现。
+    // 各工厂函数的入参含义、产物形状与 encodeType 结果见 src/ast/type.cpp 对应实现。
     static TypePtr makeVoid();
     static TypePtr makeBool();
     // ── 整型家族（[basic.fundamental]/2）──
@@ -487,7 +344,7 @@ struct Type {
     static TypePtr makeRValueReference(TypePtr referenced);   // T&&
     static TypePtr makeConst(TypePtr inner);                  // const T
     static TypePtr makeClass(const std::string& name);
-    // 数组类型工厂（主线 E）
+    // 数组类型工厂
     static TypePtr makeArray(TypePtr elem, int64_t size);
     static TypePtr makeArray(TypePtr elem, DecltypeExprPtr sizeExpr);
     static TypePtr makeTemplateParam(const std::string& paramName);
@@ -500,11 +357,8 @@ struct Type {
     bool isBool()             const { return kind == TypeKind::Bool; }
     bool isInt()              const { return kind == TypeKind::Int; }
     bool isDouble()           const { return kind == TypeKind::Double; }
-    // ── 整型家族谓词 ──
-    // ★ isInteger() 把 bool 也算进来：bool 不是整型家族的成员（[basic.fundamental]/2 里
-    //   它与整型并列），但它能参与【整型转换】（[conv.integral]/1，bool → int 是转换，
-    //   int → bool 也是）。凡是"按整型规则互相转换/比较"的判据点都该用 isInteger()，
-    //   而不是 isInt() —— 这正是 `Flag<1>`（bool 形参收 int 字面量）此前被误拒的根因类。
+    // isInteger 包含 bool，供算术与整型常量检查统一使用。
+    // bool 的可表示集合仍单独按 {0,1} 处理。
     bool isInteger()          const {
         switch (kind) {
             case TypeKind::Bool:
@@ -533,7 +387,7 @@ struct Type {
     }
     // 整型值 v 能否被本类型【无损表示】（[dcl.init]/7 的窄化 + [expr.const]/10 的
     // converted constant expression 例外：常量表达式只要"值装得下"就不算窄化）。
-    // 定义放 src/type.cpp（要用到 integerBitWidth 的移位，且这是"类型自己答得出"的问题）。
+    // 定义放 src/ast/type.cpp（要用到 integerBitWidth 的移位，且这是"类型自己答得出"的问题）。
     // demo: makeBool().canRepresentValue(1)   ⇒ true   （bool 的可表示集合是 {0,1}）
     //       makeBool().canRepresentValue(2)   ⇒ false
     //       makeUInt().canRepresentValue(-1)  ⇒ false  （无符号装不下负值）
@@ -563,8 +417,7 @@ struct Type {
     bool isTemplateParam()    const { return kind == TypeKind::TemplateParam; }
     bool isAuto()             const { return kind == TypeKind::Auto; }
     bool isDecltype()         const { return kind == TypeKind::Decltype; }
-    // 算术类型（numeric）：整型家族 + bool + double —— 能参与二元算术表达式的都是它。
-    // 旧版写死 isInt() || isDouble()，char/unsigned 一进来就会漏判。
+    // 可参与算术的类型：整型（含 bool）与 double。
     bool isNumeric()          const { return isInteger() || isDouble(); }
 
     // 去除引用和 const 的"裸类型"（用于类型比较和推导）

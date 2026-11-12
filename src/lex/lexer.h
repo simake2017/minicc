@@ -1,29 +1,8 @@
 #pragma once
-// =============================================================================
-// src/lex/lexer.h —— 阶段 1：词法分析器 (Lexer / Scanner)
-// =============================================================================
-// 职责：源码字符串逐字符扫描 ⇒ Token 流。手写 DFA：按【首字符】分派，每个分支产出一个 Token。
-// 对照 clang：clang/lib/Lex/Lexer.cpp（LexNextToken 同样是首字符大 switch——【对照】）
-//
-// 管线位置  源码(.cpp) → Preprocessor → ★Lexer★ → Parser → Sema → … → CodeGen
-//           输入 = 预处理后的整段源码；输出 = std::vector<Token>（以 Eof 收尾）
-// 标准章节  [lex.phases] 阶段 3/7（合并两级，直接产语法 token）│ [lex.token] / [lex.operators]
-// 对照 clang：clang/lib/Lex/Lexer.cpp:Lexer::LexTokenInternal —— 即本 DFA 所实现的划分规则
-//
-// 首字符分派表（扫到什么 ⇒ 走哪条分支 ⇒ 产出什么）：
-//   `0-9`        ⇒ scanNumber()              ⇒ "42"   → Token{IntLiteral,"42"}
-//   `a-z A-Z _`  ⇒ scanIdentifierOrKeyword() ⇒ "x"    → Token{Identifier,"x"}
-//                                            ⇒ "int"  → Token{KwInt,"int"}
-//   `"`          ⇒ scanString()              ⇒ "hi\n" → Token{StringLiteral, 转义后的内容}
-//   其他         ⇒ scanOperator()            ⇒ "=" → Token{Assign}；"<=" → {LessEqual}
-//                                            ⇒ "->" → Token{Arrow}
-//   EOF（消费尽）⇒ 不再分派                    ⇒ Token{Eof,""}，★重复调用恒返回 Eof（幂等）
-// 空白与 `//` `/*` 在分派之前被 skipWhitespaceAndComments() 吃掉 ⇒ 不产 Token。
-//
-// 为什么手写而不是 lex/flex：教科书路线是正则式 → NFA → DFA；工业编译器（clang/gcc）却普遍手写
-// "按首字符分派"的扫描器 —— 等价于手工特化的 DFA，但更易调试、报错更友好。本项目选手写，
-// 正是为了把自动机的每一步都摊开给人看。
-// =============================================================================
+// 单向词法扫描器：预处理文本 → 带位置的 Token 流。
+// 参考 clang/Lex/Lexer.cpp: Lexer::LexTokenInternal；标准 [lex.token]。
+// 例：int x=42; → KwInt、Identifier、Assign、IntLiteral、Semicolon、Eof。
+// 采用最长匹配：<= 是一个 Token，< = 是两个。
 
 #include "token.h"
 #include <string>
@@ -32,57 +11,26 @@
 
 namespace minicc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Lexer：词法分析主体（一次性、单向推进的扫描器）
-// ─────────────────────────────────────────────────────────────────────────────
-// demo: Lexer("int x = 42;").tokenizeAll() ⇒ [KwInt][Identifier][Assign][IntLiteral][;][Eof]
-// 外层分派（nextToken() 每次调用的流程）：
-//
-//     skipWhitespaceAndComments()      ← 循环吃掉空白/注释
-//              │
-//        到文件尾了？ ──是──► 返回 Token{Eof}
-//              │否
-//    按首字符 c 分派（只看第一个字符就决定分支）
-//      ├─ isdigit(c)            → scanNumber()              如 42
-//      ├─ isalpha(c) || c=='_'  → scanIdentifierOrKeyword() 如 x / int
-//      ├─ c=='"'                → scanString()              如 "hi"
-//      └─ 其他                  → scanOperator()            如 = <= ->
-//              │
-//        返回一个 Token ──── 下一次调用从停下的位置继续
-//
-// 全部内部状态只有 4 个成员（源码 + 光标 + 行 + 列），前瞻用只读 peek、不回退不缓存。
+// 扫描器持有源码及游标，支持逐个读取和一次性读取。
 class Lexer {
 public:
-    // 构造：接管整份源码（按值传参 + 移动，右值实参可零拷贝）。
-    // demo: Lexer lex("int x = 42;"); ⇒ 光标停在文件开头，行=列=1
+    // 按值接管源码，Token 的文本独立持有。
     explicit Lexer(std::string source);
 
-    // 扫描全部 Token（含末尾 Eof）—— main.cpp 用的一次性接口。
-    // demo: Lexer("int x;").tokenizeAll() ⇒ [KwInt][Identifier "x"][Semicolon][Eof]
+    // 返回含末尾 Eof 的完整 Token 流。
     std::vector<Token> tokenizeAll();
 
-    // 逐个获取下一个 Token（流式接口）：DFA 的真正外层循环。
-    // 源码耗尽后【永远】返回 Eof（幂等），调用方循环条件无需特判。
-    // demo: "42;" ⇒ 第 1 次 Token{IntLiteral,"42"}，第 2 次 Token{Semicolon}，
-    //       第 3 次及以后 Token{Eof}
+    // 流式读取；耗尽后重复调用仍返回 Eof。
     Token nextToken();
 
 private:
-    // ── 扫描器的四个状态（一趟式词法分析的全部状态）──
-    // m_source    ：源码全文（完整持有，peek/peekNext 依赖随机访问）
-    // m_pos       ：扫描光标，指向"下一个待读字符"的下标，只前进不回退
-    // m_line/m_col：光标对应的行/列，在 advance() 中同步维护，用于生成 SourceLocation
-    // demo: 源码 "ab\nc" —— 消费 3 个字符后 m_pos==3、m_line==2、m_col==1（指向 'c'）
+    // 扫描状态；行列号用于诊断。
     std::string m_source;
     size_t      m_pos    = 0;
     uint32_t    m_line   = 1;
     uint32_t    m_col    = 1;
 
-    // ── 字符级操作：DFA 的"眼睛和手" ──
-    // peek/peekNext 只读前瞻（看而不消费，保证可以"反悔"）；advance 是唯一的消费动作。
-    // 越界读取统一返回 '\0'，调用方无需处处判边界。
-    // 前瞻的必要性：切词要不断做"再看一个字符"的决定 —— "==" 还是 "="？"//" 注释
-    // 还是除法？ 这正是 [lex.pptoken] 最长匹配的要求。
+    // 字符前瞻与消费。
 
     // 查看当前字符但不消费。demo: "x+1" ⇒ peek()=='x'，再 peek() 仍是 'x'
     char peek() const;

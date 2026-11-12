@@ -1,38 +1,6 @@
-// =============================================================================
-// minicc —— Mini C++ Compiler 主程序（编译器驱动，按顺序编排 6 个阶段）
-// =============================================================================
-// 用法  ./minicc <source.cpp> [-o output] [-I dir] [-S] [-E] [--dump-*]
-//
-//   参数 ⇒ 效果（速查；<source.cpp> 必填）：
-//     -o <path>  ⇒ 输出路径：默认去扩展名出可执行文件；-S 出 .s；-E 写预处理文本
-//     -I <dir>   ⇒ 头文件搜索目录，可重复（-I include -I third_party）；
-//                  出现顺序即搜索优先级，原样传给预处理器
-//     -S         ⇒ 只跑到阶段 5 为止，出 .s 汇编（等价 gcc -S，不链接）
-//     -E         ⇒ 只跑阶段 0，输出展开后纯文本（等价 gcc -E，调试宏/include 用）
-//     --dump-tokens / --dump-ast       ⇒ 阶段 1 后打印 Token 流 / 阶段 2 后打印 AST
-//     --dump-hierarchy / --dump-layout ⇒ 阶段 3 后打印类层次图 / 类内存布局详图
-//     （多个 --dump-* 可同时使用，如 --dump-hierarchy --dump-layout）
-//
-// demo: ./minicc tests/test_tmpl_01.cpp             ⇒ 全管线，产出 test_tmpl_01.s
-//       ./minicc tests/pp/main.cpp -I tests/pp -E   ⇒ 只看预处理结果
-//
-// 阶段表 —— 每阶段「把什么变成什么」：
-//   0 预处理     源码.cpp + 头文件  ⇒ 展开后的纯文本（无 '#'、无宏）
-//   1 词法分析   纯文本             ⇒ Token 流（以 Eof 收尾）
-//   2 语法分析   Token 流           ⇒ AST（TranslationUnit）
-//   3 语义分析   AST                ⇒ 类型标注 + 类布局/vtable/RTTI
-//   4 模板实例化 模板蓝图 + 实参    ⇒ 具体类/函数（类=替换，函数=推导）
-//   5 代码生成   带类型的 AST       ⇒ x86-64 AT&T 汇编（.s）
-//   6 链接       .o（系统 as 产出） ⇒ 非 PIE 可执行文件
-// 上表各阶段的实现入口（顺序同表）+ 标准章节：
-//   preprocessor.cpp::processFile()            [cpp]/[lex.phases]1~4
-//   lexer.cpp::tokenizeAll()                   [lex.*]
-//   parser.cpp::parseTranslationUnit()         [gram]
-//   semantic_analyzer.cpp::analyze()           [basic]/[class]
-//   template_instantiation.cpp::instantiate()  [temp.*]
-//   codegen.cpp::generate()                    （x86-64 AT&T 后端，无标准章节）
-//   src/linker.cpp::link()（见 docs/learn/15）
-// =============================================================================
+// minicc 驱动：预处理、词法、语法、语义、实例化、汇编生成与链接。
+// 用法：minicc source.cpp [-o output] [-I dir] [-S] [-E] [--dump-*]。
+// 例：-E 输出预处理文本；-S 仅生成汇编；默认生成可执行文件。
 
 #include "lexer.h"
 #include "parser.h"
@@ -102,27 +70,8 @@ static void printNode(const std::string& prefix, bool isLast, const std::string&
     std::cout << prefix << (isLast ? "└── " : "├── ") << label << "\n";
 }
 
-// ── AST 树形打印（访问者版，由 --dump-ast 触发）───────────────────────────────
-// 用 ├──/└──/│ 风格绘制完整 AST（含函数体、语句、表达式）。
-// 分派手法：14 种表达式 + 8 种语句全部走 accept 的虚表分派，本类只重写关心的
-// visit 重载，零 cast（判据见 semantic_analyzer.h 注释；理论见 docs/learn/29）。
-// 未重写的节点类型 = "什么都不做"，与原先 else 分支的语义等价。
-//
-// 节点 ⇒ 打印出的标签（只列代表性的，其余同形）：
-//   IntLiteralExpr(42)  ⇒ "IntLiteral: 42"
-//   VarExpr(x)          ⇒ "VarExpr: x"
-//   BinaryExpr(Add)     ⇒ "BinaryExpr: +"（左右子树递归下钻）
-//   CallExpr            ⇒ "CallExpr" + arg[i] 子树
-//   MemberExpr          ⇒ "MemberExpr: .x" / "->x"
-//   VarDeclStmt(x:int)  ⇒ "VarDeclStmt: x : int"
-//   IfStmt              ⇒ condition / thenBranch / elseBranch 三支
-//   FunctionDecl(f)     ⇒ "FunctionDecl: f() → 返回类型"（构造/析构共用同一分支）
-//
-// 【位置信息怎么传】prefix/isLast 是"每个节点各不相同"的上下文，塞不进通用访问者接口
-// ⇒ 存成成员变量，由 dumpXxx 在 accept 之前设好：
-//   dumpExpr(e, "  ", true) ⇒ setPos("  ",true) ⇒ e->accept(*this) ⇒ visit 读 m_prefix/m_isLast
-//   ★ 递归约定：每个 visit 必须先把 m_prefix/m_isLast 取进【局部变量】再往下递归 ——
-//   子节点的 dumpXxx 会覆写成员，回来后读到的就是别人的前缀。
+// AST 树形打印，由 --dump-ast 触发；访问者递归展示语句与表达式。
+// 例：二元表达式展示左右子树；类展示字段与方法。
 class AstDumper : public AstVisitor {
 public:
     // ── 入口：每个都对 null 做保护，再设好位置状态后 accept ──
@@ -658,17 +607,10 @@ int main(int argc, char* argv[]) {
         // ═══════════════════════════════════════════════════════════════
         printPhase("Phase 2: Syntax Analysis (语法分析)");
 
-        // 递归下降解析（对照标准 [gram] 文法的子集），
-        // 产出 TranslationUnit = 顶层声明列表（函数/类/模板）。
-        // ★ Sema 先于 Parser 构造（Stage 3：clang Actions 模式）——
-        //   Parser 解析期要向 Sema 登记"我声明了什么名字"、查询"这个名字在此处
-        //   是什么"（窄接口，见 semantic_analyzer.h），故句柄必须在 Parser 之前
-        //   就位。对照 clang：Parser 构造时就持有 `Sema &Actions`
-        //   （clang/include/clang/Parse/Parser.h:639）。
-        //   ★ Sema 的构造【不产生任何输出】—— 阶段顺序与日志逐字节不变。
+        // 递归下降生成 TranslationUnit；类型与名字的完整检查由后续阶段完成。
         SemanticAnalyzer semaAnalyzer;
 
-        // ★ Stage 3 批 2：名字登记表（NameRegistry）已退场 —— 它是【前向扫
+        // ★ 名字登记表（NameRegistry）已退场 —— 它是【前向扫
         //   token 流】猜出来的第二份作用域事实，回答不了"此处可见吗"。
         //   Parser 现在直接问 Sema 的活作用域表（clang Actions 模式）。
         Parser parser(std::move(tokens));
@@ -691,7 +633,7 @@ int main(int argc, char* argv[]) {
 
         // 类型检查 + auto 推导 + 类内存布局（字段偏移/对齐、vtable、RTTI）。
         // 布局结果供两处消费：下方打印（可观测性）与阶段 5 CodeGen（访存偏移）。
-        // ★ semaAnalyzer 已在【阶段 2 之前】构造（Stage 3：Parser 持 Sema 句柄）。
+        // ★ semaAnalyzer 已在【阶段 2 之前】构造（Parser 持 Sema 句柄）。
         semaAnalyzer.analyze(unit);
 
         auto& classTypes = semaAnalyzer.getClassTypes();
@@ -754,12 +696,7 @@ int main(int argc, char* argv[]) {
                 }
                 std::cout << ">\n";
 
-                // 函数模板（S1）：蓝图存储即可，实例化由调用点实参推导驱动（S2+）。
-                // 别名模板（[temp.alias]）：别名不是新类型 ⇒ 没有"实例化"这一步，
-                // 使用时在 Phase 3 由 expandAliasTemplate【解糖】成既有类型，
-                // 既不产生新类也不产生新符号。
-                // ⚠ 必须在这里拦下：下面各分支都假设 classTemplate != nullptr，
-                // 别名模板的 classTemplate 是空的，会直接空指针崩。
+                // 函数模板由调用点推导触发实例化；别名模板展开类型，不生成独立类。
                 if (tmpl->isAliasTemplate()) {
                     std::cout << std::format(
                         "  (alias template '{}': no instantiation — desugars to an "
@@ -785,10 +722,7 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                // ── 特化（偏/全）不参与"用各种类型演示实例化"（[temp.class.spec]）──
-                // 特化的形参模式限定了它只对某一类实参有意义（如 Box<T*,T> 只收
-                // 「指针 + 同类型」），拿 int/double/int&/… 硬填会产出语义错误的实例。
-                // 它的正确触发方式是【使用点实参】—— Sema::selectClassTemplate 择优命中。
+                // 演示实例化只选主模板；特化的实参域受模式约束，不能套任意演示类型。
                 if (tmpl->isSpecialization()) {
                     std::cout << std::format(
                         "  ({} specialization of '{}': matched on demand at use sites "
@@ -811,11 +745,7 @@ int main(int argc, char* argv[]) {
                     std::cout << std::format(
                         "\n  ─── Instantiation (NTTP): {}<4> ───\n",
                         tmpl->classTemplate->name);
-                    // ★ 演示值 4 的【形态】取自形参声明的类型，不能硬写 int：
-                    //   `template<unsigned N>` 若按 int 编码会得到 _Z1BILi4EE，
-                    //   与使用点实例化（Sema 归一后）编出的 _Z1BILj4EE 不一致 ——
-                    //   同一个实例两处两个符号名，正是本项目反复踩的"同判据写两遍"。
-                    //   形参类型装不下 4（如 bool）时退回 int：演示分支不产生非法实参。
+                    // 演示值沿用形参声明类型，避免 unsigned/bool 等被误编码成 int。
                     TypePtr vt = tmpl->templateParams[0]->nonType;
                     if (!vt || !vt->canRepresentValue(4)) vt = Type::makeInt();
                     auto instance = instantiator.instantiate(
@@ -881,11 +811,7 @@ int main(int argc, char* argv[]) {
                             "use-site driven — see Phase 3)\n");
                     }
                     else if (p1.kind == TemplateParamKind::NonType) {
-                        // 首形参是 NTTP（`template<bool B, class T>` 这种"值 + 类型"混排）。
-                        // ★ 此前没有这条分支，`enable_if<B, T>` 会落进下面的"两类型形参"
-                        //   分支、被喂 <int, double> —— 类型实参塞进 NTTP 槽，实例化直接抛
-                        //   "must be a value, but 'int' is a type"。判据必须【逐位看形参
-                        //   自己的 kind】，不能只看第二位的形态。
+                        // 首位为 NTTP 时按值构造演示实参，再填后续类型位置。
                         std::cout << std::format(
                             "\n  ─── Instantiation: {}<true, int> (NTTP + type) ───\n",
                             tmpl->classTemplate->name);

@@ -1,27 +1,6 @@
-// =============================================================================
-// ParseScopeTable 实现（作用域链 + 名字分类）
-// =============================================================================
-// ① 定位：本文件实现"解析期活作用域表"的全部机制 —— 进出作用域、登记名字、
-//    沿链分类（裸名与限定名两种查询）。
-// ② 源码锚点：clang/include/clang/Sema/Scope.h:Scope（作用域节点 + parent 链）
-//    + clang/lib/Sema/SemaDecl.cpp:1574:Sema::PushOnScopeChains（名字入作用域）
-//    + clang/lib/Sema/SemaDecl.cpp:912:Sema::ClassifyName（沿链查并分类）。
-// ③ 动机：★ 三条判据各自只写一处（判据单点）：
-//    ① "内层遮蔽外层"——classify 沿链自内向外、首命中即返回；
-//    ② "限定名不外溢"——classifyQualified 在限定者落到的那层里查，查不到即无；
-//    ③ "作用域名字可持久"——离开 namespace/class 后其名字仍能被限定名查到
-//       （clang 的 DeclContext 持久、Scope 节点临时）。
-//    ★ 第③条与第①②条不是一回事：可见性（①②）看**活链**，限定名（③）看**持久
-//      上下文** —— 一个 namespace 里的类型在离开该 namespace 后依然能用
-//      `N::T` 指到（这正是限定名与可见性的区别）。
-// ④ demo: namespace N { struct S{}; }
-//       enter(Namespace,"N") ⇒ 链 [global, "N::"]，global 层记 N→{Namespace,"N::"}
-//       leave() ⇒ N 层的名字并入 m_contexts["N::"]
-//       classifyQualified("N::S")：N 的 scopePath="N::" ⇒ 在 "N::" 层查 S
-//       ⇒ 未命中（该层没有 S，只有 N 自己）⇒ 返回 0（不外溢到全局）
-//       classify("S") 在 global 层查 ⇒ 未命中 ⇒ 0（S 不可见）
-// 回归：tests/unit/test_parse_scope.cpp
-// =============================================================================
+// 解析期作用域链与名字分类实现。
+// 参考 clang/Sema/Scope.h、SemaDecl.cpp: ClassifyName。
+// 例：内层值名 T 遮蔽外层类型 T；N::T 只在 N 对应上下文中查询。
 
 #include "parse_scope.h"
 
@@ -29,16 +8,7 @@
 
 namespace minicc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 作用域进出
-// ─────────────────────────────────────────────────────────────────────────────
-// 进入新作用域：路径按种类决定是否追加成分。
-//   Namespace/Class/Function ⇒ 追加 name + "::"（限定名的路径成分）
-//   TemplateParam/Block ⇒ 沿用父层路径（不引入路径成分）
-// ★ Function 也加成分：函数体里的**局部类**需要与命名空间里的同名类区分
-//   （`void f(){ struct L{}; }` 的 L 落在 "f::L::" 而不是与全局 L 同路径）。
-//   代价：同名重载的两个函数共用同一路径 —— 已知边界（局部类场景），
-//   见 docs/learn/51 §5。
+// 类与命名空间引入路径成分，块与模板形参层沿用父路径。
 void ParseScopeTable::enter(ScopeKind kind, const std::string& name) {
     Scope s;
     s.kind = kind;
@@ -78,10 +48,8 @@ void ParseScopeTable::leave() {
     }
 }
 
-// 名字所属的作用域：最近的外层"非模板形参作用域"。
-// ★ 模板形参作用域对【名字登记】是透明的 —— `template<class T> struct Box`
-//   的名字 Box 属于命名空间 N（不属���形参域 T），clang 同理：
-//   模板的名字挂在外层 DeclContext，形参挂在自己的 TemplateParameterList。
+// 模板形参层对名字登记透明，但仍参与查询与遮蔽。
+// 例：template<class T> struct Box 的 Box 属于外层，T 属于形参层。
 std::size_t ParseScopeTable::nameScopeIndex() const {
     for (std::size_t i = m_stack.size(); i-- > 0;) {
         if (m_stack[i].kind != ScopeKind::TemplateParam) return i;

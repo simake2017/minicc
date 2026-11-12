@@ -101,6 +101,7 @@ add_executable(unit_tests
     tests/unit/test_member_assign_clobber.cpp
     tests/unit/test_member_template_params.cpp
     tests/unit/test_ref_alias.cpp
+    tests/unit/test_template_qualified_expr.cpp
     src/lex/preprocessor.cpp
     src/sema/sfinae.cpp
     src/ast/constant_folder.cpp

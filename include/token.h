@@ -1,17 +1,7 @@
 #pragma once
-// =============================================================================
-// include/token.h —— 阶段 1：词法分析的产物（Token 定义）
-// =============================================================================
-// 管线位置：源码(.cpp) → Preprocessor → ★Lexer★ → Parser → Sema → … → CodeGen(.s)
-//   本文件定义 Lexer 交给 Parser 的"数据格式"：Parser 从此不再看见字符，只看见 Token。
-// 对照 clang：clang/include/clang/Basic/TokenKinds.def（同"一张 kind 表驱动一切"；本版手写 enum——【简化】）
-//   Token = 流水线上第一个"零件"：带类型标签与位置信息的最小语法单元。
-//
-// 标准章节  [lex.phases] 阶段 3/7（切词）│ [lex.token] 五类终结符 │ [lex.pptoken]
-// 对照 clang：Basic/TokenKinds.def（tok:: 大枚举 ／ 本项目 TokenType）
-//             Basic/Token.h（种类+长度+位置 ／ 本项目 Token 结构）
-// demo: `int x = 42;` ⇒ [KwInt][Identifier "x"][Assign "="][IntLiteral "42"][Semicolon][Eof]
-// =============================================================================
+// Lexer 与 Parser 共用的 Token 格式。
+// 参考 clang/Basic/TokenKinds.def、Basic/Token.h；标准 [lex.token]。
+// 例：int x = 42; → KwInt、Identifier、Assign、IntLiteral、Semicolon、Eof。
 
 #include <cstdint>
 #include <string>
@@ -21,15 +11,7 @@
 
 namespace minicc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TokenType：所有可能的 Token 种类 —— 文法"终结符集合"(terminals) 的扁平枚举
-// ─────────────────────────────────────────────────────────────────────────────
-// 底层 uint8_t：种类不足 256，一字节足够；Token 量大且随流传递，尺寸小对缓存友好。
-// 顺序有语义：Eof 居首（所有循环以它收尾），其后按
-//   字面量 → 标识符 → 关键字 → 运算符 → 分隔符 分组。
-// clang 对应 tok:: 命名空间 + TokenKinds.def 宏展开的大枚举，思路相同、种类更多。
-//
-// demo: `int x = 42;` ⇒ [KwInt][Identifier "x"][Assign "="][IntLiteral "42"][Semicolon][Eof]
+// 文法终结符；uint8_t 可容纳当前种类。
 enum class TokenType : uint8_t {
     // ── 文件结束 ──
     Eof,
@@ -130,15 +112,8 @@ enum class TokenType : uint8_t {
     RBracket,         // ]
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 关键字字符串 → TokenType 的映射表（关键字清单由标准 [lex.key] 规定）
-// ─────────────────────────────────────────────────────────────────────────────
-// 两步法：先按标识符规则扫出完整单词，再查这张表 —— 查表结果直接决定 Token 种类：
-//   "template"  ⇒ 命中 ⇒ Token{KwTemplate,"template"}
-//   "templata"  ⇒ 未中 ⇒ Token{Identifier,"templata"}
-// 好处：不必为每个关键字写状态机，新增关键字只在这里加一行（对照 clang：IdentifierTable）。
-// demo: "template" ⇒ KwTemplate；"templata"（未命中）⇒ Identifier
-// inline const：头文件内定义、多个翻译单元共享且只构建一次。
+// 完整标识符扫描后查表，避免将关键字前缀误认成关键字。
+// 例：template → KwTemplate；templata → Identifier。
 inline const std::unordered_map<std::string_view, TokenType> kKeywordMap = {
     {"auto",      TokenType::KwAuto},
     {"bool",      TokenType::KwBool},
@@ -187,13 +162,8 @@ inline const std::unordered_map<std::string_view, TokenType> kKeywordMap = {
     {"while",     TokenType::KwWhile},
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SourceLocation：源码中的精确位置，用于报错
-// ─────────────────────────────────────────────────────────────────────────────
-// Token 流是"破坏性"的 —— 切成 token 后原始行列号就丢了，故每个 token 自带位置快照，
-// 供后续诊断（如 Sema 报"3:7 处变量未声明"）。
-// clang 是 FileID + 偏移的编码（SourceLocation）；本项目简化为 (行, 列)，均从 1 开始。
-// demo: 首行 "int x" 中 token x 的位置是 {1,5}；SourceLocation{12,5}.toString() ⇒ "12:5"
+// 源码行列从 1 开始，随 Token 保留供后续诊断使用。
+// 例：首行 int x 中 x 位于 {1,5}；{12,5} 格式化为 "12:5"。
 struct SourceLocation {
     uint32_t line   = 1;
     uint32_t column = 1;
@@ -204,38 +174,18 @@ struct SourceLocation {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Token：词法分析的最小产物 = 类型标签 + 原始文本 + 位置
-// ─────────────────────────────────────────────────────────────────────────────
-// 不存字面量的"数值"：把 "42" 换算成 int 是 Parser/Sema 的事（[lex.token] 的职责边界）。
-// text 用 std::string 值语义，避免 string_view 悬空到源码生命周期
-//（clang::Token 只存偏移+长度、按需回查源码文本，本项目为教学选择直接拷贝）。
-//
-// demo: `int x = 42;` ⇒ Token{KwInt,"int",{1,1}} {Identifier,"x",{1,5}} {Assign,"=",{1,7}}
-//                       {IntLiteral,"42",{1,9}} {Semicolon,";",{1,11}} {Eof,"",{1,12}}
+// Token 保存类别、文本和位置；字符串按值持有，避免依赖源码寿命。
+// 数字仍保留文本，由 Parser 解释数值和后缀；字符、字符串已翻译转义。
 struct Token {
     TokenType     type     = TokenType::Eof;
     std::string   text;            // 原始文本（如标识符名、数字文本）
     SourceLocation location;
 
-    // 种类判断 / 取反判断（Parser 中高频使用的快捷方法）。
-    // demo: tok.is(TokenType::KwIf) ⇒ true；isNot 让循环条件更易读：
-    //       while (tok.isNot(TokenType::Eof)) {...}
     bool is(TokenType t) const { return type == t; }
     bool isNot(TokenType t) const { return type != t; }
 
-    // 判断是否为类型关键字（内置标量 + const + decltype）
-    // Parser 识别声明（"类型 + 名字"）时用：
-    //   Token{KwInt}      ⇒ true   Token{KwConst}    ⇒ true   Token{KwDecltype} ⇒ true
-    //   Token{KwUnsigned} ⇒ true   Token{KwLong}     ⇒ true   Token{KwClass}    ⇒ false
-    //   （class 引入的是类定义而非内置类型名，故不在此列）
-    // ★ KwConst 必须在此列：const 是【类型说明符】的开头（[dcl.type]：
-    //   type-specifier-seq 可为 `const` + 类型），`const int x = 1;` 是一条正经的声明。
-    // ★ 整型家族的每个关键字都必须在列（[dcl.type.simple] 的 type-specifier）：
-    //   漏了 KwUnsigned ⇒ `unsigned x = 1;` 在【语句层】不可解析 —— 这正是
-    //   docs/learn/22 的 ⑤ 号 bug（isTypeKeyword 缺 KwConst）的同族复发点。
-    //   ⚠ 顶层声明走的是"试探性 parseType + 回滚"、不看本函数 —— 同一语义在两条
-    //   路径上判定，改这里（或改那条前瞻）时必须两边一起核对。
+    // 可作为类型说明符序列开头的关键字，不包含用户定义类型名。
+    // 例：const int x、unsigned x、decltype(x) y；class 由类声明分支处理。
     bool isTypeKeyword() const {
         return type == TokenType::KwInt
             || type == TokenType::KwChar
@@ -260,20 +210,15 @@ struct Token {
             || type == TokenType::KwProtected;
     }
 
-    // 调试输出：[类型枚举数值] '原始文本' @ 行:列
-    // demo: Token{KwInt,"int",{1,1}}.toString() ⇒ "[13] 'int' @ 1:1"
-    //       （数值即枚举序号，改枚举顺序会让这条输出整体漂移）
+    // 调试格式：[种类枚举值] '文本' @ 行:列；枚举值不属于稳定接口。
     std::string toString() const {
         return std::format("[{}] '{}' @ {}",
             static_cast<int>(type), text, location.toString());
     }
 };
 
-// Token 类型的可读名称（用于错误消息）。实现见 src/lexer.cpp 的大 switch 表，
-// 与枚举一一对应 —— 新增种类时两边都要补。
-// demo: tokenTypeName(KwInt) ⇒ "int"；tokenTypeName(Arrow) ⇒ "->"
-// 约定：关键字/运算符返回"源码形态"，字面量/标识符返回"类别名"，
-// 便于 Sema 直接拼出类似 "期望 ';' 但得到 '}'" 的可读报错。
+// 供诊断使用的名称，映射见 src/lex/lexer.cpp: tokenTypeName。
+// 例：KwInt → "int"；Arrow → "->"；Identifier → "Identifier"。
 const char* tokenTypeName(TokenType t);
 
 } // namespace minicc

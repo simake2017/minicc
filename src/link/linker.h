@@ -1,21 +1,7 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// linker.h —— minicc 教学链接器（主线 B）
-// ─────────────────────────────────────────────────────────────────────────────
-// 定位：把系统 as 产出的 .o（ELF64 可重定位文件）链接成一个可直接运行的非 PIE
-//       可执行文件。★ 不依赖系统 ld、不链接 libc/crt。
-// 对照 clang：无直接对应——lld/ELF 才是同类（本版只支持输入 .o 子集 + 非 PIE——【简化】）
-//
-// 【阶段 ⇒ 做什么 ⇒ 例子】（均为教学设计，详见 docs/learn/09）
-//   启动   注入 _start（14B 机器码，nop 补齐 16B 槽），替代 Scrt1.o/crti.o/crtn.o
-//          例子：call main; mov %eax,%edi; mov $231,%eax; syscall（231 = exit_group）
-//   new    内置 mini 运行时：malloc = 64KB arena bump 分配器，free = 空操作
-//          例子：new Dog ⇒ movq $8,%rdi; callq malloc; …（用户定义 malloc 可覆盖内置）
-//   段布局 非 PIE：固定基址 0x400000，一个 RX 段 + 一个 RW 段
-//   输入   单输入 .o（接口已按多 .o 设计）
-//
-// 完整流程：读 .o → 合并节 → 符号决议 → 重定位回填 → 写可执行 ELF
-// 对照 clang：ld.lld（lld/ELF/Writer.cpp::writeResult）
-// ─────────────────────────────────────────────────────────────────────────────
+// 教学用 ELF x86-64 静态链接器。
+// 参考 ELF gABI 与 System V AMD64 ABI 的节、符号、重定位规则。
+// 例：main.o 链接为可执行文件；跨 .o 的调用由符号决议与重定位接通。
+// 提供最小 _start、malloc/free 运行时，不支持动态链接。
 #pragma once
 
 #include <cstdint>

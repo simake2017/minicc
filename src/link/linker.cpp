@@ -1,22 +1,6 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// linker.cpp —— minicc 教学链接器（主线 B）实现
-// ─────────────────────────────────────────────────────────────────────────────
-// 五步流水线（与 docs/learn/15 一一对应）—— 每步做什么 + 一个例子：
-//   ① readObject        解析 .o（ELF64 节表 / 符号表 / .rela）
-//                       例：.text 节 + .rela.text 一条 R_X86_64_PLT32 指向 main
-//   ② layoutSections    合并同类节，分配虚地址（非 PIE，基址 0x400000）
-//                       例：0x400000 头部 → _start 槽 64B → 用户 .text → 页对齐后 RW 段
-//   ③ injectRuntime     注入 _start / malloc / free 机器码（不依赖 crt/libc）
-//                       例：_start 里 call main 的 rel32 链接期直接算出；malloc 溢出即返回 NULL
-//   ④ resolveSymbols    符号决议：定义(全局) 对上 引用(未定义)，报错列表化
-//                       例：无定义 ⇒ undefined reference to 'main'；重复定义 ⇒ 符号重复定义
-//   ⑤ applyRelocations  重定位回填：把 as 留下的 e8 00 00 00 00 欠条还清
-//                       例：R_X86_64_PLT32 填 call 位移；R_X86_64_32S 溢出即报错
-//   最后 writeExecutable 吐出只含 2 个 PT_LOAD 的最小可执行 ELF（e_entry = _start，不是 main）
-//
-// 对照 clang：lld/ELF/Writer.cpp::writeResult() 做同样的事，但多动态段/线程局部存储/
-//   异常帧/多架构，约 20 倍复杂度。
-// ─────────────────────────────────────────────────────────────────────────────
+// ELF x86-64 静态链接：合并节、决议符号、回填重定位并写出可执行文件。
+// 参考 ELF gABI 与 AMD64 ABI；教学运行时随输出一起注入。
+// 例：定义在 a.o、调用在 b.o 的函数按最终地址连接；缺失定义则报错。
 #include "linker.h"
 
 #include <algorithm>
@@ -114,13 +98,7 @@ int mergeKindOf(const std::string& name) {
 
 } // namespace
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ① readObject —— 解析一个 .o 文件
-// ═══════════════════════════════════════════════════════════════════════════
-// 把 ELF 可重定位文件拆成链接器关心的三样东西：
-//   可合并节（.text/.rodata/.data/.bss 的内容）、符号表、重定位表。
-// 教学点：.o 里所有符号值都是"节内偏移"，绝对地址要等链接时才产生 ——
-//   这正是重定位存在的根本原因。
+// 读取可重定位 ELF 对象，收集节、符号和重定位条目。
 bool MiniLinker::readObject(const std::string& path, LinkResult& res) {
     // 整个文件读进内存（.o 很小，全量读最简单）
     std::ifstream f(path, std::ios::binary);
@@ -238,27 +216,8 @@ bool MiniLinker::readObject(const std::string& path, LinkResult& res) {
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ② layoutSections —— 给各输出段分配虚地址
-// ═══════════════════════════════════════════════════════════════════════════
-// 布局图（非 PIE，基址 0x400000）：
-//
-//   0x400000 ┌──────────────────────┐
-//            │ ELF 头 + 2 个 Phdr   │  ← RX 段从文件偏移 0 开始
-//   +0xB0    ├──────────────────────┤
-//            │ 运行时 _start 等     │  （64B 固定槽）
-//            ├──────────────────────┤
-//            │ 用户 .text           │
-//            ├──────────────────────┤
-//            │ .rodata              │
-//            ├──────────────────────┤  ← 页对齐边界（0x1000 的倍数）
-//            │ 运行时堆控制字(16B)  │  ← RW 段
-//            │ 用户 .data           │
-//            ├──────────────────────┤
-//            │ .bss（不占文件）     │
-//            ├──────────────────────┤
-//            │ malloc 的 64KB arena │
-//            └──────────────────────┘
+// 为合并段分配地址，按页区分代码与可写数据。
+// .bss 仅占虚拟内存，不占输出文件字节。
 void MiniLinker::layoutSections() {
     constexpr uint64_t hdrSize = sizeof(Elf64_Ehdr) + 2 * sizeof(Elf64_Phdr); // 176
     static constexpr uint64_t kRuntimeSlot = 64;   // 运行时机器码固定占位
@@ -290,11 +249,7 @@ void MiniLinker::layoutSections() {
         heapInit_, heapEnd_, kArenaSize / 1024);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ③ injectRuntime —— 注入 _start / malloc / free（手写机器码）
-// ═══════════════════════════════════════════════════════════════════════════
-// 为什么需要：真实链接用 Scrt1.o 提供 _start、用 -lc 提供 malloc；
-// 本链接器不依赖外部库，把这两样直接编成机器码注入。
+// 注入最小运行时：入口 _start 与堆分配函数。
 void MiniLinker::injectRuntime(uint64_t mainAddr) {
     runtimeText_.clear();
     auto put = [&](std::initializer_list<uint8_t> bytes) {
@@ -321,21 +276,8 @@ void MiniLinker::injectRuntime(uint64_t mainAddr) {
     put({0x89, 0xc7, 0xb8, 0xe7, 0x00, 0x00, 0x00, 0x0f, 0x05});
     while (runtimeText_.size() < 16) put({0x90});       // nop 填充到槽边界
 
-    // ── malloc（36B）：bump 分配器，控制字在 .data 前 16 字节 ──
-    //   mov  [heapPtr], %rax     48 a1 <moffs64>   读当前指针
-    //   add  %rdi, %rax          48 01 f8          new = cur + size
-    //   cmp  $heapEnd, %rax      48 3d <imm32>     越界检查（堆满返回 NULL）
-    //   ja   .fail               77 0c
-    //   mov  %rax, [heapPtr]     48 a3 <moffs64>   推进指针
-    //   sub  %rdi, %rax          48 29 f8          返回旧指针（分配区起点）
-    //   ret                      c3
-    // .fail:
-    //   xor  %eax, %eax          31 c0             分配失败返回 NULL
-    // demo: `new int` ⇒ callq malloc ⇒ 返回 bump 区的【旧】指针（即新块首地址）；
-    //       堆满 64KB ⇒ ja .fail ⇒ 返回 0（NULL）。free 是空操作（bump 分配器不回收）。
-    //       真实日志："[link] 注入运行时: _start @ 0x4000b0 | malloc @ 0x4000c0 (bump)
-    //                 | free @ 0x4000e0 (nop)"
-    //   ret                      c3
+    // malloc 使用 bump 分配器：首次 mmap，之后移动堆顶；free 不回收。
+    // .data 的控制字保存当前指针与映射上界。
     put({0x48, 0xa1}); putImm64(heapPtrAddr_);
     put({0x48, 0x01, 0xf8});
     put({0x48, 0x3d}); putImm32((uint32_t)heapEnd_);
@@ -354,12 +296,7 @@ void MiniLinker::injectRuntime(uint64_t mainAddr) {
         startAddr_, mallocAddr_, freeAddr_);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ④ resolveSymbols —— 符号决议
-// ═══════════════════════════════════════════════════════════════════════════
-// 核心动作：把"定义方"（各 .o 中 st_shndx != UNDEF 的符号）汇成全局表，
-// 再检查每个"引用方"（未定义符号）能否对上。对不上 = 经典报错
-// "undefined reference to `xxx'"。
+// 全局符号决议：定义优先，未定义符号必须由其他对象或运行时提供。
 bool MiniLinker::resolveSymbols(LinkResult& res) {
     auto mergedBase = [&](int kind) -> uint64_t {
         switch (kind) {
@@ -429,20 +366,8 @@ bool MiniLinker::resolveSymbols(LinkResult& res) {
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ⑤ applyRelocations —— 重定位回填
-// ═══════════════════════════════════════════════════════════════════════════
-// as 阶段给不出最终地址的地方（跨节引用），.o 里留的是占位符 +
-// .rela 欠条。这里一笔笔还清：
-//   R_X86_64_64   : *P = S + A           （vtable/typeinfo 里的 8 字节指针）
-//   R_X86_64_PC32 : *P = S + A - P       （leaq sym(%rip) / 同段引用）
-//   R_X86_64_PLT32: 同 PC32（不链外部库时 PLT 降级为直接调用）
-//   其中 S = 符号最终地址，A = addend，P = 被修正处的地址
-// demo: 未回填时 .o 里对应位置是 0，全靠 .rela 记账；回填后变成最终虚地址 ——
-//       可观测处：vtable 槽指向 .text 里的函数体、`.quad .Lstr` 指向 .rodata 里的字符串。
-//       真实日志："链接成功：9 个符号决议, 3 条重定位回填, 入口 0x4000b0"
-//       （tests/ctor/test_ctor_01_basic.cpp —— 9 个符号决议 = 定义 + 引用配对，
-//        3 条回填 = 该程序里所有跨节引用；数字随程序而变，不是常量）
+// 按 AMD64 ELF 重定位类型回填；P 为补丁地址，S 为符号地址，A 为加数。
+// 例：绝对地址使用 S+A；PC 相对地址使用 S+A-P。
 bool MiniLinker::applyRelocations(LinkResult& res) {
     auto mergedBase = [&](int kind) -> uint64_t {
         switch (kind) {
@@ -549,11 +474,7 @@ bool MiniLinker::applyRelocations(LinkResult& res) {
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// writeExecutable —— 写出最小可执行 ELF（无节头，只有 2 个程序头）
-// ═══════════════════════════════════════════════════════════════════════════
-// 教学点：可执行文件**不需要节头表**——内核加载只看程序头(PT_LOAD)。
-// 这就是为什么 strip 过的二进制没有节名仍可运行。
+// 写出最小可执行 ELF，使用程序头描述加载段，不写节头表。
 bool MiniLinker::writeExecutable(const std::string& outputPath, LinkResult& res) {
     constexpr uint64_t hdrSize = sizeof(Elf64_Ehdr) + 2 * sizeof(Elf64_Phdr);
     (void)hdrSize;

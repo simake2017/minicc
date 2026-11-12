@@ -1,30 +1,8 @@
 #pragma once
-// =============================================================================
-// 阶段 3：语义分析与类型系统 (Semantic Analysis)（理论见 docs/learn/29）
-// =============================================================================
-// 哲学：编译期看"符号"（类型名/字段名），运行期看"偏移量"（内存布局）—— 本阶段就是把
-//   "符号"变成"偏移量"。三遍扫描（analyze）：注册类/模板 → 注册函数名 → 分析函数体。
-// 对照 clang：clang/lib/Sema/（SemaDecl/SemaExpr/SemaTemplate…按职能源文件分族；本版一个类三趟）
-//
-// ── 扫到哪种写法 ⇒ 本阶段做什么 ────────────────────────────────────────
-//   `int x = 1;`           ⇒ 入符号表 {name=x, kind=Variable, type=int, stack@-8}
-//   `int f(int a)`         ⇒ 入表 {name=f, kind=Function, type=int(返回类型)}
-//   `auto v = e;`          ⇒ auto 换成 e 的类型（inferType）
-//   `Animal* p = new Dog;` ⇒ 查布局表得 vptr@0 / 字段偏移 / RTTI 符号
-//   `Box<int> b;`          ⇒ 按需实例化出 Box_int 后当普通类处理
-//   `Box<int>::value`      ⇒ 静态常量折叠成字面量（foldStaticConst）
-//
-// 输入：TranslationUnit（AST，此时类型只是语法标记，名字均未决议）
-// 输出：① 标注 resolvedType 的 AST（auto 已抹去，每个表达式类型已定）
-//       ② 符号表快照（Scope 作用域链 + 栈偏移，可 dump 观察）
-//       ③ 类布局表（字段偏移 / vtable / RTTI，CodeGen 直接消费）
-// 管线：源码 → Preprocessor → Lexer → Parser → 【SemanticAnalyzer】 → 模板推导/实例化 → CodeGen
-//
-// 标准章节：[basic.scope] Scope/SymbolTable │ [expr] inferType 系列（类型 + 左/右值性）
-//   │ [over.match] resolveTemplateCall / isAtLeastAsSpecialized │ [temp.names] 两阶段查找（简化）
-// 对照 clang：SemaDecl.cpp → processClassDecl/registerFunction │ SemaExpr.cpp → inferType
-//   │ SemaOverload.cpp → resolveTemplateCall / isAtLeastAsSpecialized
-// =============================================================================
+// 语义分析：名字查找、类型检查、模板决议与类布局。
+// 参考 clang/Sema/SemaDecl.cpp、SemaExpr.cpp、SemaTemplateDeduction.cpp。
+// 例：T* 与 int* 的调用推出 T=int；字段访问写入布局偏移供 CodeGen 使用。
+// Parser 维护解析期名字分类，后续分析负责完整语义裁决。
 
 #include "ast.h"
 #include "ast_visitor.h"
@@ -42,15 +20,7 @@
 
 namespace minicc {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SymbolKind：符号的种类
-// ─────────────────────────────────────────────────────────────────────────────
-// 作用域中同一个名字可能对应不同实体（变量 x / 函数 x / 类型 X），kind 告诉查找方
-//   如何解释这条符号、允许怎样的使用方式。
-// demo: `int x = 1;` 入表 → { name="x", kind=Variable, type=int, stack@-8 }
-//       `int f(int a)` 入表 → { name="f", kind=Function, type=int(返回类型) }
-// 注：ClassField / ClassMethod 为预留种类 —— 本实现中类成员不直接进 Scope，
-//   字段挂在 ClassLayout.fields，方法挂在 m_classDecls（见 SemanticAnalyzer）。
+// 符号种类；同名实体的解释取决于类别和当前上下文。
 enum class SymbolKind : uint8_t {
     Variable,         // 变量
     Parameter,        // 函数参数
@@ -63,14 +33,7 @@ enum class SymbolKind : uint8_t {
 
 const char* symbolKindName(SymbolKind k);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Symbol：符号表中的条目
-// ─────────────────────────────────────────────────────────────────────────────
-// 一条 Symbol 回答三个问题：这个名字是什么（kind）、什么类型（type）、数据在哪里
-//   （局部 → stackOffset；全局/成员 → 由布局表或 CodeGen 决定）。
-// demo: `int x = 42;` → { name="x", type=int, kind=Variable, isLocal=true, stackOffset=-8 }
-//       成员函数注册时隐式加入的 this →
-//       { name="this", type=Animal*, kind=Parameter, isLocal=true, stackOffset=-8 }
+// 符号条目保存类别、类型与后续阶段所需的存储信息。
 struct Symbol {
     std::string  name;
     TypePtr      type;
@@ -81,19 +44,8 @@ struct Symbol {
     SourceLocation definedAt;            // 定义位置
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Scope：作用域（支持嵌套）
-// ─────────────────────────────────────────────────────────────────────────────
-// 每个作用域一张表，可嵌套（[basic.scope] 作用域树 + [basic.scope.scope] 可见性规则）；
-//   查找从当前作用域沿链向外，直到命中或到全局。
-// 作用域链（f 内又有一个 `{ }` 块时）：
-//     global(depth=0) ← f(depth=1)[basic.scope.function] ← block(depth=2)[basic.scope.block]
-//
-// 查哪个名字 ⇒ 结果：
-//     block 层 lookup("t")（t 声明于 f）    ⇒ block ✗ → f ✓ 命中（由内向外）
-//     f 层 lookup("u")（u 声明于 block 内） ⇒ ✗ —— 可见性单向，外不见内
-//     lookupLocal("t")                      ⇒ ✗ —— 只查本层，不上链
-// ─────────────────────────────────────────────────────────────────────────────
+// 嵌套作用域链优先查询当前层，再查询父层。
+// 例：块内 x 遮蔽外层 x，离开块后恢复外层可见性。
 class Scope {
 public:
     explicit Scope(Scope* parent = nullptr, int depth = 0,
@@ -176,25 +128,8 @@ private:
     std::vector<std::unique_ptr<Scope>> m_allScopes;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SemanticAnalyzer：语义分析器
-// ─────────────────────────────────────────────────────────────────────────────
-// ── 本类如何做 AST 分派（两种手法，各有其位）────────────────────────────────
-// ★ 判据（本项目唯一权威表述）：**handler 只要引用 → 访问者（accept 虚分派）；
-//   还要 shared_ptr 所有权或返回值 → 标签分派（switch）**。
-// 位置 ⇒ 走哪条（各配一个真实 handler）：
-//   ① 访问者    processStmt(BlockStmt) ⇒ void visit(Stmt&)：只要引用、不返回值
-//   ② 标签分派  processDecl(ClassDecl) ⇒ 要存进 m_classDecls（shared_ptr 所有权），
-//                而 visit 只给引用 —— 从引用还原 shared_ptr 不安全，硬套访问者就得引入
-//                隐藏的"当前节点暂存槽"，反而更难读
-//   ② 标签分派  inferType(CallExpr)    ⇒ 【取值型】递归要返回 TypePtr，而 visit 返回 void
-// ① 【访问者】语句处理链（processStmt）走 accept 虚表分派。
-// ② 【NodeKind 标签分派】声明链（processDecl）与类型推导（inferType / isLValueExpr）用 switch。
-// 对照 clang：RecursiveASTVisitor 只服务遍历，类型计算走 dyn_cast/switch。
-// ── "名字→单符号"教学模型 ──────────────────────────────────────────────
-// Scope/SymbolTable 一个名字只对应一个符号（不支持重载）；重载集（函数模板候选集）
-//   单独挂 m_functionTemplateCandidates。
-// 对照 clang：普通名字查找走 DeclContext::lookup，重载集是挂在 DeclContext 上的 Decl 链。
+// 语句由 Visitor 处理；表达式推导返回类型并写入 resolvedType。
+// 模板求值回调复用当前语义环境，避免重复维护名字与类型事实。
 class SemanticAnalyzer : public DecltypeEvaluator,
                          public MemberTypeResolver,
                          public AliasTemplateResolver,
@@ -249,24 +184,8 @@ public:
     // 获取符号表（供调试输出）
     SymbolTable& getSymbolTable() { return m_symbolTable; }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // 解析期活作用域（Stage 3：clang Actions 模式）
-    // ══════════════════════════════════════════════════════════════════════
-    // ★ 这组接口是 Parser 唯一的名字通道 —— 对照 clang 的 Actions 模式：
-    //   clang/include/clang/Parse/Parser.h:639 的 `Sema &Actions;`
-    //   + clang/lib/Parse/Parser.cpp:427/437 的 EnterScope/ExitScope
-    //     （写作用域），
-    //   + clang/lib/Parse/Parser.cpp:1696 的 Actions.ClassifyName(...)
-    //     （读：问名字的种类）。
-    //   本项目的对应形状：Parser 持 SemanticAnalyzer* 句柄，登记走
-    //   enter/leave/declareParseName，查询走 classifyParseName。
-    // 【为什么表住在 Sema 而不是 Parser】红线 1「语义裁决权单一」：名字的
-    //   种类与可见性只由 Sema 裁决；Parser 只能通过窄接口**问**，并服从答复。
-    //   若表住在 Parser，就是"Parser 自建第二份作用域事实"（spec 拍板记录 #1
-    //   明确拒绝的形态）。
-    // 【为什么与语义期的符号表不是同一张】clang 也是两张：Scope 节点是
-    //   【临时】的解析期结构，DeclContext 是【持久】的语义期结构；本表对应
-    //   前者，Sema 现有的 m_classTypes / m_functions 等对应后者。
+    // Parser 用此接口登记和进出作用域，查询用于声明/表达式及模板消歧。
+    // 参考 clang Parser 的 Actions 机制；名字位见 include/name_scope.h。
 
     // 进入一层作用域（Namespace/Class 会把 name 追加进路径；其余沿用父层）。
     void enterParseScope(ScopeKind kind, const std::string& name);
@@ -295,23 +214,17 @@ private:
     // ── 符号表管理 ──
     SymbolTable m_symbolTable;
 
-    // ── 解析期活作用域表（Stage 3；clang 的 Scope 链对应物）──
+    // ── 解析期活作用域表（clang 的 Scope 链对应物）──
     // 解析期由 Parser 经上面那组窄接口写入（登记/进出），查询走同一张表。
     // 与语义期的 m_symbolTable 等**不是同一张**：前者是临时的作用域结构
     // （名字 → 种类位），后者是持久的语义事实（类型/布局/符号）。
     ParseScopeTable m_parseScopes;
 
-    // 常量折叠器（主线 D）：语句访问点先 fold 再定型，折叠结果写回 AST
+    // 常量折叠器：语句访问点先 fold 再定型，折叠结果写回 AST
     ConstantFolder m_constantFolder;
 
-    // ── 主线 D 二批：编译期常量表（constexpr / const 整型变量）──────────
-    // 声明时登记（值 + 形态），两条消费路径：
-    //   ① 常量传播 —— ConstantFolder 经 setConstResolver 回调查它，
-    //      `const int c = 4; int x = c * 2;` 的 c 在折叠期替换成字面量；
-    //   ② NTTP 实参重解 —— resolveType 见 `Buf<k>` 的裸名字实参、该位
-    //      形参是 NTTP 时，按名字查表改写成值实参（[temp.arg.nontype]）。
-    // 键是裸名（无作用域链，内层声明覆盖外层同名 —— 与命名空间回退同款的
-    // "只记最近一层"取舍，见 processNamespaceDecl 注释）。
+    // 编译期整型常量表保留值与类型，供常量传播及模板实参求值共用。
+    // 例：const int n=4 使 n*2 可折成 8；4L 保留 long 类型。
     std::map<std::string, ConstantFolder::IntegralValue> m_constValues;
 
     // 查编译期常量表（无 ⇒ nullopt）。供本类各处与 resolveType 的
@@ -369,22 +282,11 @@ private:
     std::unordered_map<std::string, std::vector<TemplateDeclPtr>> m_partialSpecs;
     std::unordered_map<std::string, std::vector<TemplateDeclPtr>> m_explicitSpecs;
 
-    // ── 别名模板注册表（[temp.alias]）──
-    // 别名模板名 → 蓝图。单独一张表而不混进 m_classTemplates，因为两者的【消费方式
-    //   根本不同】：类模板名要"实例化"（造新类、发新符号），别名模板名只要"替换"
-    //   （解糖成既有类型，零新符号）。混在一起会让 resolveType 不得不在同一个分支里
-    //   靠 isAliasTemplate() 二次分派，反而更容易写错。
-    // 对照 clang：TypeAliasTemplateDecl 与 ClassTemplateDecl 是两种 Decl，
-    //   在 DeclContext 里同名不同种（clang 靠 Decl 类型而非 flag 区分）。
+    // 别名模板独立登记，展开只得到目标类型，不生成新类。
+    // 例：Ptr<int>=int*；类模板 Box<int> 则生成实例类。
     std::unordered_map<std::string, TemplateDeclPtr> m_aliasTemplates;
 
-    // ── 推导指引注册表（[temp.deduct.guide]）──
-    // 类模板名 → 该模板的指引列表。CTAD 时**指引优先于构造函数**：只要用户写了指引，
-    //   就按指引推（这正是指引存在的意义 —— 覆盖默认规则）。
-    // 对照 clang：ClassTemplateDecl::getDeductionGuides() 是一个独立的小集合（⚠ 该符号在
-    //   【本地 clang 语料】里 grep 不到：clang/include/clang/AST/DeclTemplate.h 的
-    //   ClassTemplateDecl 段未收录该成员），隐式指引
-    //   （从构造函数合成）与显式指引并排在候选列表里，显式优先。
+    // 类模板的用户推导指引列表；当前 CTAD 优先用显式指引，缺省再考虑构造函数。
     std::unordered_map<std::string, std::vector<DeductionGuideDeclPtr>> m_deductionGuides;
     // 递归别名防护：正在展开的别名名集合（X<T> 的底层又写 X<...> 时死循环）。
     // 对照 clang：err_alias_template_extra_headers 之外的
@@ -527,17 +429,12 @@ private:
     void visit(AssignStmt& stmt) override;
     // 表达式语句：推导类型、丢弃值（副作用语句，如函数调用）
     void visit(ExprStmt& stmt) override;
-    // 空语句 / 无声明符的声明：`;` 与 `A<int,int>;` 无事可做；
-    // ★ B37：裸类型名声明（`S;`）在此裁决【这个名字在此处可见吗】——
-    //   可见性只由本类的符号表回答（红线 3 判据单点），Parser 只给候选。
+    // 名字可见性与类型身份的统一检查，供类型解析和裸名声明裁决共用。
     void visit(EmptyStmt& stmt) override;
 
     // ── 类型与别名解析 ──
     TypePtr resolveType(TypePtr type);
-    // ★ B37：名字可见性判据（单点）——"这个名字在此处可见吗、且是个类型吗"。
-    //   两个消费点共用：resolveType 的兜底链、visit(EmptyStmt) 的裸名声明裁决。
-    //   查找顺序（clang [basic.lookup.unqual] 简化版）：当前类作用域 →
-    //   命名空间链（内→外，含全局）。详见 .cpp 处的判据说明。
+    // 名字可见性与类型身份的统一检查，供类型解析和裸名声明裁决共用。
     struct VisibleType {
         TypePtr    type;       // 可见的类型（已解糖）；nullptr = 不可见
         TypePtr    raw;        // 命中的原始条目（类作用域别名 = 未解糖的目标；其余同 type）
@@ -618,6 +515,7 @@ private:
     // 返回：可折叠时给出新的字面量表达式；否则原样返回。
     // 对照 clang：clang/lib/Sema/SemaExpr.cpp:Sema::BuildDeclarationNameExpr 命中静态数据成员后，在常量求值
     //   上下文里由 Expr::EvaluateAsInt 折叠。
+    TypePtr resolveTypeQualifier(const ExprPtr& expr);
     ExprPtr foldStaticConst(ExprPtr expr);
     // 沿【继承链】查找静态常量（[class.member.lookup]）。
     // 返回：找到则填 outValue 并返回 true。
@@ -626,17 +524,9 @@ private:
     // lookupStaticConst 的副产物：命中常量的类型（决定折叠成 bool 还是 int 字面量）
     TypePtr m_lastStaticConstType;
 
-    // ── 类模板偏序裁决（[temp.class.order]，理论见 docs/learn/21）────────
-    // 判定偏特化 a 是否"至少与 b 同样特化"。算法与 [temp.func.order] 同源，只是数据
-    //   来源换成 specPattern：
-    //   ① 把 a 的模式里的形参名换成【唯一合成名】（避免 a、b 用同名形参时互相误绑定
-    //      —— clang 用 UniqueSynthesizedType 做同一件事）
-    //   ② 拿它当【实参】去推导 b 的模式
-    //   ③ 推得通 ⇒ b 覆盖 a 的全部输入域 ⇒ a 接受的类型更少 ⇒ a 更特化
-    // demo: a = S<T*>，b = S<T**> —— 用 a 推 b：P=T** 配 A=$a* ⇒ 指针层数对不上 ✗；
-    //   用 b 推 a：P=T* 配 A=$b** ⇒ 剥一层 ⇒ T := $b* ✓ ⇒ b（T**）更特化，胜出。
-    // 对照 clang：SemaOverload.cpp → IsAtLeastAsSpecialized（类模板走
-    //   Sema::getMoreSpecializedPartialSpecialization，最终同一套比较逻辑）。
+    // 偏特化偏序以双向推导判断模式包含关系（[temp.class.order]）。
+    // 形参先改成独立合成类型，防止同名误绑定。
+    // 例：S<T**> 比 S<T*> 更特化；参考 clang getMoreSpecializedPartialSpecialization。
     bool classSpecAtLeastAsSpecialized(const TemplateDeclPtr& a,
                                        const TemplateDeclPtr& b);
 
@@ -673,10 +563,7 @@ private:
     // 成员访问 obj.x / p->x：字段查布局表(得偏移)，方法查类声明
     TypePtr inferMember(MemberExpr& expr);
 
-    // ── 类成员查找的两条通路（[class.member.lookup]）──
-    // ★ 抽出来的理由与 BUGS.md B10 同源：同一条"成员叫什么/是不是它"的判据一旦写成
-    //   两份，就会各自演化出不一致（那里是符号名后缀，这里是"查不查基类"）。
-    //   两条通路共用下面两个原语，谓词只有一处。
+    // 类成员查找原语统一基类遍历与签名匹配规则。
     /** 在【单个类】的方法表里按名字找方法；arity < 0 表示不看参数个数。
      *  argTypes（可空）给出调用实参类型：同名同个数有多个候选时按它择优
      *  （精确 > 可隐式转换 > 退回首个，见 BUGS.md B22）。 */
@@ -694,21 +581,9 @@ private:
      *  [expr.prim.id.general]/3 的"隐式 this 成员访问"，否则是命名空间限定名
      *  （走符号表）。BUGS.md B21。 */
     bool isClassOrBaseOf(const std::string& derived, const std::string& base) const;
-    /** 限定名成员 `Q::m` 落到【ownerClass 对象布局】里的那一条字段。
-     *  调用前需自行确认 Q 是 ownerClass 或它的基类（isClassOrBaseOf）。
-     *  返回 nullptr = Q 的作用域里没有叫 m 的数据成员。
-     *  为什么必须走布局而不是 Q 自己的布局：同一字段在派生类布局里的偏移可能含
-     *  子对象偏移（[class.mi]），而 CodeGen 用的就是这个布局。 */
-    /** 限定名成员 `Q::m` 落到【ownerClass 对象布局】里的那一条字段。
-     *  调用前需自行确认 Q 是 ownerClass 或它的基类（isClassOrBaseOf）。
-     *  返回 nullptr = Q 的作用域里没有叫 m 的数据成员。
-     *  为什么必须走布局而不是 Q 自己的布局：同一字段在派生类布局里的偏移可能含
-     *  子对象偏移（[class.mi]），而 CodeGen 用的就是这个布局。
-     * 【B33 扩展】第二查找源：布局落空后查符号表 "Q::m" —— static 数据成员
-     *  不占布局（[class.static.data]），是"挂在类名上的全局符号"。两路合一
-     *  是本判据的【单点】：类内裸名 `A::count`（inferVar 第 0 步）与
-     *  `obj.A::count`（inferMember 限定分支）共用，隐藏方向（实例字段优先）
-     *  与 [class.member.lookup]/3 一致。 */
+    // 限定成员查找使用 ownerClass 的完整布局，保留基类子对象偏移。
+    // 调用方须确认 Q 是当前类或其基类；实例字段优先，再查 Q::m 静态符号。
+    // 例：obj.Base::x 返回派生对象内的偏移；Base::count 不占对象布局。
     struct QualifiedLookupResult {
         const FieldInfo* field = nullptr;   // ① 实例字段命中（权威偏移在它身上）
         Symbol*          statik = nullptr;  // ② static 数据成员命中（符号表第二源）
@@ -718,15 +593,13 @@ private:
                                                 const std::string& qualifier,
                                                 const std::string& member);
 
-    // ── static 数据成员（[class.static.data]；BUGS.md B33）────────────────────
+    // ── static 数据成员（[class.static.data]；已知边界）────────────────────
     // 类外定义（`int A::count = 7;`，Parser 拼成 GlobalVarDecl{name="A::count"}）
     // 决议时登记：防"一个成员两个定义"（C++ 是 ODR 违规，链接器层面才爆）。
     std::set<std::string> m_definedStaticMembers;
 
-    // ── auto 占位符（[dcl.spec.auto]/7）──
-    // auto 可能被 cv/指针/引用包住（Const(Auto) / Pointer(Auto) / ...），
-    // 只认光杆 Auto 的写法会让 const auto、auto*、auto& 全部误报 —— 见 docs/BUGS.md B1。
-    // 判据：递归下钻到壳底，看是不是 Auto。
+    // auto 可能位于 const、指针或引用壳内，必须递归查询。
+    // 例：const auto、auto*、auto& 都不是裸 Auto 节点。
     bool containsAuto(const TypePtr& t) const;
     // 用初始化式反推 auto，并把 pattern 的外壳原样套回。
     // 等价于把 auto 当模板形参跑一次实参推导（[temp.deduct.call]）。
