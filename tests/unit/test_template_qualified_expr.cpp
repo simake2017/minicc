@@ -68,6 +68,38 @@ TEST(TemplateQualifiedExpr, RejectsValueAsQualifier) {
     }
 }
 
+TEST(TemplateQualifiedExpr, MemberClassTemplateAccessSurvivesFunctionInstantiation) {
+    StdoutCapture capture;
+    EXPECT_NO_THROW(compileQualified(
+        "template<class T> struct Box { template<class U> struct Inner {"
+        " static int add(int x){return x+3;} }; };"
+        "template<class V> int run(V x){return Box<int>::Inner<long>::add(x);}"
+        "int main(){return run(4);} "));
+}
+
+TEST(TemplateQualifiedExpr, MemberClassTemplateFieldsBindBothLayers) {
+    StdoutCapture capture;
+    Lexer lexer(
+        "template<class T> struct Box { template<class U> struct Inner {T a; U b;}; };"
+        "int main(){Box<int>::Inner<long> a; Box<long>::Inner<int> b; return 0;}");
+    Parser parser(lexer.tokenizeAll());
+    auto unit = parser.parseTranslationUnit();
+    SemanticAnalyzer sema;
+    ASSERT_NO_THROW(sema.analyze(unit));
+    int instances = 0;
+    for (const auto& [name, decl] : sema.getClassDecls()) {
+        if (decl->fields.size() != 2) continue;
+        ASSERT_NE(decl->fields[0].type, nullptr);
+        ASSERT_NE(decl->fields[1].type, nullptr);
+        const auto first = decl->fields[0].type->toString();
+        const auto second = decl->fields[1].type->toString();
+        EXPECT_TRUE((first == "int" && second == "long") ||
+                    (first == "long" && second == "int"));
+        ++instances;
+    }
+    EXPECT_EQ(instances, 2);
+}
+
 TEST(TemplateQualifiedExpr, RejectsNonStaticCallWithoutObject) {
     StdoutCapture capture;
     try {

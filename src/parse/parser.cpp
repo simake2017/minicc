@@ -315,6 +315,9 @@ TypePtr Parser::parseType() {
                     "Expected member type name after '::'");
                 TypePtr nested = Type::makeClass(memberTok.text);
                 nested->nestedQualifier = qual;
+                if (check(TokenType::Less)) {
+                    nested->templateArgs = parseTemplateArgumentList();
+                }
                 qual = nested;
                 logParse("  [parse:type] ★ nested name: {}\n",
                     qual->toString());
@@ -361,6 +364,9 @@ TypePtr Parser::parseType() {
                         "Expected member type name after '::'");
                     TypePtr nested = Type::makeClass(memberTok.text);
                     nested->nestedQualifier = base;
+                    if (check(TokenType::Less)) {
+                        nested->templateArgs = parseTemplateArgumentList();
+                    }
                     base = nested;
                     logParse("  [parse:type] ★ nested name: {}\n",
                         base->toString());
@@ -1541,49 +1547,38 @@ ClassDeclPtr Parser::parseClassDecl(std::vector<TemplateArg>* outSpecPattern) {
             advance();
         }
 
-        // [temp.mem]：`struct S { template<class T> T id(T x) { return x; } };`。
-        // 成员函数模板与自由模板共用形参解析和推导，实例化函数另带 ownerClassName。
-        // 本入口仅支持成员函数模板，成员类模板、别名模板和变量模板仍不支持。
-        // 参考：clang/lib/Parse/ParseDeclCXX.cpp:Parser::ParseCXXMemberSpecification。
+        // [temp.mem]：成员 template-head 可声明函数模板或类模板。
         if (check(TokenType::KwTemplate)) {
-            advance();   // 'template'
+            advance();
             expect(TokenType::Less, "Expected '<' after 'template'");
-
             auto memTmpl = std::make_shared<TemplateDecl>();
-            // 形参作用域建帧：使下面 parseMethodDecl 里的裸 T 认得出是模板形参
             TemplateParamFrame memFrame(this, memTmpl.get());
-            //  进模板形参作用域：形参名登记进这一层，方法体解析期间可见。
             openScope(ScopeKind::TemplateParam, "", 0u);
-
-            // 成员模板调用共享 parseTemplateParameterList，形参能力及可见计数与自由模板一致。
             parseTemplateParameterList(*memTmpl, memFrame);
 
-            // 成员说明符位于 template-head 之后：`template<class U> static U f(U);`。
-            bool mtIsStatic = isStatic;          // 前缀位置已吃过 ⇒ 兼容既有写法
-            if (match(TokenType::KwStatic)) mtIsStatic = true;
-            if (check(TokenType::KwVirtual) || isVirtual) {
-                // 成员【函数】模板不能是虚函数（[temp.mem]/2 末句：模板不能被 virtual 化
-                // —— 虚表要求每个实例一张条目，而实例是按需产生的）。
-                // 文案与 clang 逐字相同（'virtual' cannot be specified on
-                // member function templates）。
-                error("'virtual' cannot be specified on member function templates");
+            if (check(TokenType::KwClass) || check(TokenType::KwStruct)) {
+                memTmpl->classTemplate = parseClassDecl();
+                memTmpl->isMemberTemplate = true;
+                decl->memberClassTemplates.push_back(memTmpl);
+                closeScope();
+                declareName(memTmpl->classTemplate->name,
+                            ScopeBit::Type | ScopeBit::Template);
+                continue;
             }
 
+            bool mtIsStatic = isStatic;
+            if (match(TokenType::KwStatic)) mtIsStatic = true;
+            if (check(TokenType::KwVirtual) || isVirtual) {
+                error("'virtual' cannot be specified on member function templates");
+            }
             auto method = parseMethodDecl(decl->name, access);
-            method->isStatic  = mtIsStatic;
-            method->isVirtual = false;           // 上面已把 virtual 拒掉
-            memTmpl->funcTemplate = method;   // templateName() 由此取到函数名
+            method->isStatic = mtIsStatic;
+            method->isVirtual = false;
+            memTmpl->funcTemplate = method;
             memTmpl->isMemberTemplate = true;
             decl->memberTemplates.push_back(memTmpl);
-            //  出模板形参作用域；随后给方法名补【模板位】——
-            //  位置在 closeScope() 之后：此时"当前作用域"是类作用域。
-            //  方法名的【值位】已经在那儿了 —— parseFunctionDecl 里的
-            // openScope(Function, name, Value) 把名字登记进【最近的外层非模板形参
-            // 作用域】（ParseScopeTable::nameScopeIndex 跳过模板形参作用域 ⇒ 落类作用域），
-            // 这里只补一位（位并集 ⇒ 值位|模板位）。
             closeScope();
             declareName(method->name, ScopeBit::Template);
-
             logParse(
                 "  [parse:member] ★ '{}' 是成员模板（{} 个模板形参，[temp.mem]）"
                 "—— 调用点按实参推导实例化\n",
@@ -2631,6 +2626,9 @@ ExprPtr Parser::parsePrimaryExpr() {
                         "Expected member name after '::'");
                     auto me = std::make_shared<MemberExpr>(qualified, memTok.text, /*arrow=*/false);
                     me->isTypeAccess = true;
+                    if (check(TokenType::Less)) {
+                        me->explicitTemplateArgs = parseTemplateArgumentList();
+                    }
                     me->location = loc;
                     logParse(
                         "  [parse] 类型限定访问: <template-id>::{} (static member)\n",

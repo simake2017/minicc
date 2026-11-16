@@ -8,7 +8,7 @@
 
 - 每个阶段输出**中文日志**，推导逐对打印（如 `P=T A=int ⇒ T := int ✓`）；
 - 每个新判据先拿 `clang++-18` 当语义 oracle 探针实测，报错文案逐字对齐；
-- **日志即契约**：171 份集成基线逐字节比对，重构不许改变任何可观测行为。
+- **日志即契约**：172 份集成基线逐字节比对，重构不许改变任何可观测行为。
 
 > 难度选择：项目主战场是 C++ 里最难的**模板机制**（实参推导 ≈ 合一算法、
 > 实例化 ≈ 结构化替换、两阶段查找、重载决议、SFINAE、偏序裁决）——
@@ -19,8 +19,8 @@
 | 指标 | 数值 |
 |---|---|
 | 核心代码（include + src） | 约 2.4 万行 C++20，全阶段中文日志 |
-| 单测 | **434** 例（googletest，断言不变量而非具体符号名） |
-| 集成测试 | **171** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
+| 单测 | **436** 例（googletest，断言不变量而非具体符号名） |
+| 集成测试 | **172** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
 | 学习文档 | docs/learn/ 01..60（每篇点名标准章节 + clang 源码对照表） |
 | 配套标准库 | ministl：vector / list / map / set（红黑树）/ 智能指针 / function / algorithm / ranges，与 std 随机对拍 |
 | 外部依赖 | 编译期零依赖；运行期借系统 `as` 产 .o，链接与运行时（_start + bump malloc）自研，**不依赖 libc/crt** |
@@ -112,7 +112,8 @@ Sema 的符号表；Parser 只能通过窄的只读查询接口向 Sema 提问�
 | 别名模板（三处解糖 + 推导期 desugar） | [temp.alias] | tmpl 50 |
 | CTAD + 推导指引 | [dcl.type.class.deduct] [temp.deduct.guide] | tmpl 51 |
 | 模板模板参数（P0522R0 逐位签名） | [temp.arg.template] | tmpl 53、57..60 |
-| 成员模板（含类模板体内，两层形参绑定时机） | [temp.mem] | tmpl 52、54、56、69 |
+| 成员函数模板与成员类模板（外层绑定后保留内层形参） | [temp.mem] | tmpl 52、54、56、69、79 |
+| 非依赖逐段模板限定名 `Outer<int>::Inner<long>::value_type` | [basic.lookup.qual] [temp.inst] | tmpl 79 |
 | 依赖类型名 `typename T::type` | [temp.res]/5 | tmpl 49 |
 
 ### 语言基础
@@ -151,8 +152,8 @@ Sema 的符号表；Parser 只能通过窄的只读查询接口向 Sema 提问�
 
 ```bash
 ./build.sh                          # ① 0 警告
-ctest --test-dir build-linux -j6    # ② 434/434
-./logdiff.sh diff                   # ③ 171 份基线逐字节零漂移
+ctest --test-dir build-linux -j6    # ② 436/436
+./logdiff.sh diff                   # ③ 172 份基线逐字节零漂移
 ```
 
 三件套缺一不算完成。纪律（血泪换的，见 [PITFALLS.md](docs/PITFALLS.md)）：

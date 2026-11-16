@@ -601,7 +601,17 @@ TypePtr SemanticAnalyzer::resolveTypeQualifier(const ExprPtr& expr) {
     } else if (expr->kind == NodeKind::Member) {
         auto member = std::static_pointer_cast<MemberExpr>(expr);
         TypePtr parent = resolveTypeQualifier(member->object);
-        type = findMemberType(parent, member->memberName);
+        if (!member->explicitTemplateArgs.empty()) {
+            const std::string qualifiedName = parent->name + "::" + member->memberName;
+            auto tmpl = m_classTemplates.find(qualifiedName);
+            if (tmpl != m_classTemplates.end()) {
+                type = Type::makeClass(qualifiedName);
+                type->templateArgs = member->explicitTemplateArgs;
+                type = resolveType(type);
+            }
+        } else {
+            type = findMemberType(parent, member->memberName);
+        }
         if (!type) {
             error(std::format("'{}::{}' is not a class, namespace, or enumeration",
                               parent->toString(), member->memberName), expr->location);
@@ -839,7 +849,16 @@ TypePtr SemanticAnalyzer::resolveType(TypePtr type) {
 
             TypePtr qual = resolveType(type->nestedQualifier);
             std::string qualName = (qual && qual->isClass()) ? qual->name : "?";
-            TypePtr member = findMemberType(qual, type->name);
+            TypePtr member;
+            if (!type->templateArgs.empty()) {
+                auto memberId = Type::makeClass(qualName + "::" + type->name);
+                memberId->templateArgs = type->templateArgs;
+                if (m_classTemplates.count(memberId->name)) {
+                    member = resolveType(memberId);
+                }
+            } else {
+                member = findMemberType(qual, type->name);
+            }
             if (member) {
                 TypePtr target = resolveType(member);
                 std::cout << std::format("  [sema:alias] {}::{} ⇒ {}\n",
@@ -2105,6 +2124,18 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
         std::cout << std::format(
             "    ↳ member template '{}::{}' registered ({} template parameter(s))\n",
             decl->name, mt->templateName(), mt->templateParams.size());
+    }
+
+    for (auto& mt : decl->memberClassTemplates) {
+        if (!mt->classTemplate) continue;
+        auto& member = mt->classTemplate;
+        member->ownerClassName = decl->name;
+        member->name = decl->name + "::" + member->name;
+        m_classTemplates[member->name] = mt;
+        std::cout << std::format(
+            "    ↳ member class template '{}::{}' registered ({} template parameter(s))\n",
+            decl->name, member->name.substr(decl->name.size() + 2),
+            mt->templateParams.size());
     }
 
     // ── 注册方法，检查虚函数 ──

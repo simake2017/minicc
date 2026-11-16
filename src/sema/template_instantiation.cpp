@@ -553,6 +553,12 @@ ClassDeclPtr TemplateInstantiator::instantiate(
             nc->name);
     }
 
+    for (auto& mt : templateDecl->classTemplate->memberClassTemplates) {
+        auto clonedMt = std::make_shared<TemplateDecl>(*mt);
+        clonedMt->classTemplate = cloneNestedClass(mt->classTemplate, subst);
+        newClass->memberClassTemplates.push_back(clonedMt);
+    }
+
     // 6. 生成 mangled name
     std::string mangledName = NameMangler::mangleTemplateInstance(
         templateDecl->classTemplate->name, args);
@@ -1061,6 +1067,11 @@ ClassDeclPtr TemplateInstantiator::cloneNestedClass(
         clonedMt->funcTemplate = cloneMethod(mt->funcTemplate, subst, "");
         cloned->memberTemplates.push_back(clonedMt);
     }
+    for (auto& mt : src->memberClassTemplates) {
+        auto clonedMt = std::make_shared<TemplateDecl>(*mt);
+        clonedMt->classTemplate = cloneNestedClass(mt->classTemplate, subst);
+        cloned->memberClassTemplates.push_back(clonedMt);
+    }
     for (auto& nc : src->nestedClasses) {
         cloned->nestedClasses.push_back(cloneNestedClass(nc, subst));
     }
@@ -1194,6 +1205,19 @@ ExprPtr TemplateInstantiator::cloneExpr(
             auto cloned = std::make_shared<MemberExpr>(
                 cloneExpr(e.object, subst), e.memberName, e.isArrow);
             cloned->location = e.location;
+            cloned->isTypeAccess = e.isTypeAccess;
+            cloned->isMethodCall = e.isMethodCall;
+            cloned->resolvedCalleeSymbol = e.resolvedCalleeSymbol;
+            cloned->resolvedFieldOffset = e.resolvedFieldOffset;
+            for (const auto& arg : e.explicitTemplateArgs) {
+                if (arg.isType() && arg.type) {
+                    TemplateArg copied = arg;
+                    copied.type = substituteType(arg.type, subst);
+                    cloned->explicitTemplateArgs.push_back(std::move(copied));
+                } else {
+                    cloned->explicitTemplateArgs.push_back(arg);
+                }
+            }
             return cloned;
         }
 

@@ -224,6 +224,7 @@ struct MemberExpr : Expression {
     bool        isArrow;     // true 表示 ->, false 表示 .
     bool        isMethodCall = false; // Sema 标记成员调用及类型限定访问；`Cls<Args>::member` 不依赖对象实例。
     bool        isTypeAccess = false;
+    std::vector<TemplateArg> explicitTemplateArgs;
 
     // 成员模板实例化符号由 Sema 选定并回填，CodeGen 不再依据实参自行定名。
     std::string resolvedCalleeSymbol;
@@ -798,6 +799,7 @@ struct ClassDecl : Declaration {
     // 每个元素是一个函数模板蓝图（funcTemplate 非空），与自由函数模板**同构** ——
     // 调用点用同一套合一算法推导，只是实例化出来的函数带 ownerClassName。
     std::vector<std::shared_ptr<TemplateDecl>> memberTemplates;
+    std::vector<std::shared_ptr<TemplateDecl>> memberClassTemplates;
 
     // [class.nest]：嵌套类保存在成员树中，由 Sema 统一限定名字。
     // `A::B` 与其他类中的 B 保持独立身份；模板实例化递归克隆该树。
