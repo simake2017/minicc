@@ -1854,7 +1854,7 @@ StmtPtr Parser::parseStatement() {
                     // 模板 id 无声明符候选需保留类型实参语法，包括限定者链上的模板 id。
                     bool hasTemplIdSyntax = false;
                     for (TypePtr t = type; t; t = t->nestedQualifier) {
-                        if (!t->templateArgs.empty()) { hasTemplIdSyntax = true; break; }
+                        if (!t->templateArgs.empty()) { hasTemplIdSyntax = true; break; } // mrd 如果有参数
                     }
                     isDecl = hasTemplIdSyntax && isDeclaratorlessDecl(type);
                     // 裸 `S;` 若不是值名，保留为无声明符的类型候选；可见性由 Sema 裁决。
@@ -2625,7 +2625,7 @@ ExprPtr Parser::parsePrimaryExpr() {
                     const Token& memTok = expect(TokenType::Identifier,
                         "Expected member name after '::'");
                     auto me = std::make_shared<MemberExpr>(qualified, memTok.text, /*arrow=*/false);
-                    me->isTypeAccess = true;
+                    me->isTypeAccess = true; // mrd 类型成员访问
                     if (check(TokenType::Less)) {
                         me->explicitTemplateArgs = parseTemplateArgumentList();
                     }

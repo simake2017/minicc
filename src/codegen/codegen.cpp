@@ -2778,7 +2778,7 @@ void CodeGen::visit(CallExpr& expr) {
     if (sretCall) {
         emit(std::format("leaq {}(%rbp), %rdi       # rdi = 返回缓冲（sret 隐藏参数）", sretBuf));
     }
-    emit(std::format("callq {}                  # 调用函数 {}", funcName, funcName));
+    emit(std::format("callq {}                  # 调用函数 {}", funcName, funcName)); // mrd** 调用call
     if (sretCall) {
         emit(std::format("leaq {}(%rbp), %rax       # 表达式的值 = 返回缓冲地址", sretBuf));
     }
