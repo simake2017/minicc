@@ -48,7 +48,13 @@
 ## 0. 当前优先级（下一批起按此顺序）★ 2026-11-02 重排
 
 **一句话**：**理论密度优先** —— 先补「标准有明确条文、clang 有现成答案、且能讲清楚为什么」
-的模板语义；语法面欠账整体降级到 §0.3；**暂不开新战线**（§0.4 明写，免得下个会话顺手加功能）。
+的语义；语法面欠账整体降级到 §0.5；**暂不开新战线**（§0.6 明写，免得下个会话顺手加功能）。
+
+★ **2026-11-20 定向**：学习目标从"模板机制"扩到"**C++ 原理 + 布局原理**" ⇒
+模板线（§0.4 主线 K）降为收尾，新增 **§0.2 主线 L（对象模型与布局，四批 + 1 可选）**。
+执行序：**§0.1 批 0（缺陷收口，B50 段错误最先）→ §0.2 主线 L（L1→L4）∩ §0.3 主线 M（M0→M5，M0 运算符重载是硬门槛）→ §0.4 主线 K（K-2/K-3 优先）**。
+★ **2026-11-20 第二次定向**：学习目标再扩一项 —— **还原 STL 主要数据结构、让 minicc 编得过 ministl**（见 §0.3 主线 M）。L 与 M 是两面：L 讲"布局的规则"，M 看"规则在真实代码里长什么样"。
+★ 判据不变：**静默**类缺陷永远排特性前面；"能对拍 clang"优先于"功能更多"。
 
 **排序判据**（两条，缺一不可）：
 
@@ -75,9 +81,93 @@
 | 0-8 | **类体 static 成员解析日志打印空名**（BUGS.md B62，一行） | 观测层（纯日志） | 所有用例打 `[parse:member] ★ '' 是 static 数据成员`（`push_back(std::move(sm))` 之后才读 `sm.name`） | `logParse` 挪到 `push_back` 之前 | 日志出现成员真名；有意漂移仅这一行 |
 | 0-9 | **Sema 的 `stack@` 与 CodeGen 实际槽位不一致**（BUGS.md B63） | 观测层（日志/文档与实现不同源） | `struct S{int f(int a){int x=a;return x;}}` ⇒ Sema 日志 `a@-8, this@-16, x@-24` / 汇编 `this→-8, a→-16, x→-32`（成员函数顺序相反；形参后第一个局部差一格）。自由函数：`s@-24` vs `s→-32` | 二选一：① Sema 按 ABI 顺序（sret → this → 形参 → 局部，含 CodeGen 的保留槽）分配；② 明确声明 `stackOffset` 是 Sema 模型、并把 `docs/lines/03` 的对照表改掉 | 日志 `stack@` 与 `-N(%rbp)` 逐名字相等；或文档明确二者不同源 |
 | 0-10 | **`const T&` 的两种表示：`makeConst` 不归一**（BUGS.md B64） | 合法程序被拒 + 类型表示不唯一（潜在静默算错） | `typedef int& R; const R r = a;` ⇒ clang rc=0（仅警告 cv 无效）/ minicc rc=1 `Type mismatch … declared 'int& const'`；`int& const` 直接写 clang 报 ill-formed / minicc 建成 `int& const`。★ `isWritableLValueRefType` 第 34 行是**恒假死代码**（同一节点不可能既是引用又是 const） | ① `Type::makeConst`：内层是引用 ⇒ 原样返回（忽略 cv）；② Parser 后缀 const 遇引用 ⇒ 报 `'const' qualifier may not be applied to a reference`；③ 删 `codegen.cpp:34` | `typedef` / `using` / 别名模板三形态 rc=0 且写回生效；`int& const` 与 clang 同文案；`const int&` 零漂移 |
+| 0-11 ✅ | **嵌套类的构造/析构身份 + 初始化列表构造目标**（BUGS.md B60） | ★ **合法程序汇编期炸 + 静默泄漏** | `struct Outer{struct Inner{int v; Inner(int x){v=x;}}; Inner m; Outer():m(9){}};` ⇒ clang rc=**9** / 修前 minicc **汇编失败** （`as` 报 `junk '::Inner_Outer::Inner_1'`）；合成 ctor 名字拿登记名 ⇒ `Outer::Mem_int_Outer::Mem_int` 与用户写的口径不一致；成员名泄漏成全局可见（`namespace N{struct S{}; } int main(){ S; }` 静默通过） | 判据单点 `unqualifiedName`（构造函数的名字 = 本类**裸名**）+ `CtorInitializer::{isBaseInit,ctorSymbol}` 由 Sema 回填（`resolveCtorInitTarget` 校验与回填共用 + `pickBestByArgs` 选定）；符号表**只登记自由函数** | ✅ **已完成 2026-11-20**：与 clang 对拍全绿（嵌套/命名空间/成员类模板/类模板内嵌套/new 七类形态）；单测 `NestedCtorIdentity.*` 8 例 + 集成 tests/lang/test_basics_39；突变验证 **10/10**；ctest 436 → **444**；集成 **106 份有意漂移**（合成 ctor/dtor 名字 + 成员函数退出全局符号表，rc 与运行输出逐字节不变，已重刷基线）；docs/learn/62 + BUGS.md B60（连带登记 **B61**：`m_classLocals` 平表） |
 
-| 0-6 ✅ | **嵌套类的构造/析构身份 + 初始化列表构造目标**（BUGS.md B60） | ★ **合法程序汇编期炸 + 静默泄漏** | `struct Outer{struct Inner{int v; Inner(int x){v=x;}}; Inner m; Outer():m(9){}};` ⇒ clang rc=**9** / 修前 minicc **汇编失败** （`as` 报 `junk '::Inner_Outer::Inner_1'`）；合成 ctor 名字拿登记名 ⇒ `Outer::Mem_int_Outer::Mem_int` 与用户写的口径不一致；成员名泄漏成全局可见（`namespace N{struct S{}; } int main(){ S; }` 静默通过） | 判据单点 `unqualifiedName`（构造函数的名字 = 本类**裸名**）+ `CtorInitializer::{isBaseInit,ctorSymbol}` 由 Sema 回填（`resolveCtorInitTarget` 校验与回填共用 + `pickBestByArgs` 选定）；符号表**只登记自由函数** | ✅ **已完成 2026-11-20**：与 clang 对拍全绿（嵌套/命名空间/成员类模板/类模板内嵌套/new 七类形态）；单测 `NestedCtorIdentity.*` 8 例 + 集成 tests/lang/test_basics_39；突变验证 **10/10**；ctest 436 → **444**；集成 **106 份有意漂移**（合成 ctor/dtor 名字 + 成员函数退出全局符号表，rc 与运行输出逐字节不变，已重刷基线）；docs/learn/62 + BUGS.md B60（连带登记 **B61**：`m_classLocals` 平表） |
-### 0.2 批 1~6：主线 K —— 模板线六项（理论密度最高）
+### 0.2 主线 L：对象模型与布局原理（★ 2026-11-20 用户定向）
+
+**为什么有这条线**：2026-11-20 用户把学习目标从"模板机制"明确为
+"**C++ 原理 + 布局原理**"。模板线（§0.4 主线 K）已到收尾，而布局线在本项目里
+**只走了前一半** —— 会写"布局的表"（偏移累加 + 多继承子对象），还没碰"布局的规则"
+（对齐 / EBO / 平凡性 / 虚继承 / 生命周期）。三个空白是当天实跑探针确认的：
+
+| 探针（2026-11-20 实跑） | clang | minicc |
+|---|---|---|
+| `struct S{int v; S(){v=1;} S(const S& o){v=o.v+10;}}; S a; S b=a;` | rc=**11** | rc=**1**（用户写的拷贝构造**从未被调用**，走的仍是逐字节拷贝） |
+| `struct D : virtual B { int y; };` | rc=3 | **解析期拒收**（`Expected base class name: got 'virtual'`） |
+| `struct E{}; struct D{E e; int v;}; sizeof(D)` | 8 | **没有 `sizeof`**（`use of undeclared identifier 'sizeof'`）⇒ 布局无法与 clang 对拍 |
+
+**批次（执行序）**：
+
+| 批 | 要回答的原理问题 | 现状 | 落点 | 验收 |
+|---|---|---|---|---|
+| L1 | 为什么 `struct {char c; int i;}` 是 8 不是 5？数组步长为什么必须等于 sizeof？ | 布局只有顺序累加 + 4/8 字节宽；无 `sizeof`/`alignof` | `Type` 引入 `alignment`；`computeClassLayout` 按 [basic.align] 算对齐与尾部补齐；Sema 把 `sizeof`/`alignof` 折叠成常量（CodeGen 空操作） | 与 clang 对拍 20 个结构的 `sizeof`/`alignof`；既有集成用例零回归（或有申报的漂移） |
+| L2 | 为什么 `sizeof(D)` 可能比成员之和更小（EBO）？哪些类能 `memcpy`？`S b = a;` 为什么必须调拷贝构造？ | 无 EBO、无平凡性判据、用户拷贝构造被忽略（实测 rc=1 vs clang 11） | `[class.prop]` 三条判据（trivial / standard-layout / trivially_copyable）+ EBO 摆放 + 用户定义的拷贝/移动构造与赋值（rule of five） | 对拍 sizeof；`S b = a` 走用户拷贝构造（rc=11）；平凡性判定表 + `memcpy` 边界用例 |
+| L3 | 虚继承：为什么 `&d.Base` ≠ `&d`？为什么虚基类只由**最派生类**构造？ | 解析期直接拒收 | 虚基类偏移表（Itanium §2.6）+ 共享子对象 + 构造顺序（最派生类负责虚基类） | 菱形虚继承的 sizeof / 逐字段偏移与 clang 对拍 |
+| L4 | placement new 之后为什么需要 `launder`？类型双关为什么必须 `memcpy`？ | 无显式析构调用、无存储期模型 | 显式析构语法 + placement new + [basic.life] 语义演示（复用现有 RAII 析构机制） | 与 clang 对拍 placement new / 显式析构场景 |
+| L5（可选） | 位域怎么装进 4 字节？union 的活跃成员是谁？ | 解析期都没有 | 位域打包规则 + union 布局与活跃成员 | 与 clang 对拍 sizeof / 位域读写 |
+
+**排序理由**：L1 成本最低，却是唯一能把"布局"从"看自家日志"变成"**与 clang 对拍**"的地基
+（没有 sizeof/alignof，后面三批都没法验证）；L2 依赖 L1 的尺寸模型；L3 最硬，
+依赖已有的多继承子对象机制；L4 与 L2 的平凡性判据互为印证。
+
+**产物**：每批必须出 `docs/learn/NN` + 单测 + 集成用例 + 突变验证脚本；
+只有接口/契约变更才写 `docs/specs` / `docs/designs`（判据见 06 §2.0）。
+
+### 0.3 主线 M：STL 还原与「自举」（★ 2026-11-20 用户定向）
+
+**为什么有这条线**：2026-11-20 用户第二次定向 ——"**会逐渐还原 STL 中主要数据结构，
+从它们实际出发，理解 STL 编译器**"。这条线与 §0.2 主线 L 是同一件事的两面：
+L 回答"布局的规则是什么"，M 回答"**规则在真实代码里长什么样**"。
+
+★ **关键事实（先讲清，否则会做错方向）**：本项目**已经有一套 5826 行的 ministl**
+（`ministl/include/ministl/`：vector / list / map / set / unordered_map / hash /
+algorithm / ranges / iterator / memory / type_traits / utility / function），
+**但它跑在宿主 clang++-18 上**（`ministl/tests/*.cpp` 用 gtest，`add_subdirectory(ministl)`）。
+其中 `map.h:75 operator=`、`map.h:101 operator[]` 这些**minicc 根本解析不了**。
+
+⇒ 所以这条线**不是"从零写 STL"**，而是 **"让 minicc 自己编得过 ministl"** ——
+编译器与标准库互为对方的试金石：库逼出编译器缺哪条语言规则，编译器逼出库的哪些写法
+其实依赖了实现细节。这就是"理解 STL 编译器"的实质闭环，也是本项目最好的自举目标。
+
+**探针（2026-11-20 实跑，`build-linux/minicc` vs `clang++-18 -std=c++20`）**：
+
+| 能力 | 探针 | clang | minicc | 对 STL 的影响 |
+|---|---|---|---|---|
+| 成员 `operator[]` | `int& operator[](int)` | 7 | ❌ 解析拒收 | ★ **容器接口本身**（vector/map/unordered_map） |
+| 成员 `operator=` | `S& operator=(const S&)` | 5 | ❌ 解析拒收 | 每个容器都要 |
+| 成员 `operator()` | 仿函数 / 比较器 | 4 | ❌ 解析拒收 | ★ 排序策略、`hash`、`function` |
+| 迭代器 `operator*` / `++` | `It& operator++()` | — | ❌ 解析拒收 | ★ list/map 迭代器（vector 可用裸指针绕开） |
+| 非成员 `operator<` | `bool operator<(const S&, const S&)` | 5 | ❌ 解析拒收 | 有序容器比较 |
+| `noexcept` | `void set(...) noexcept` | 3 | ❌ 解析拒收 | 库的标准签名到处有（纯语法糖，可忽略） |
+| C 风格 / `static_cast` | `(int)d`、`static_cast<double>(i)` | 3 | ❌ 解析拒收 | 分配器、哈希、大小计算到处用 |
+| 浮点字面量 | `double d = 1.5;` | 0 | ❌ 词法把 `.5` 当成员访问 | hash/浮点用例 |
+| 数组 `new` / `delete[]` | `S* a = new S[3]` | 9 | ❌ 语义错误（只支持单对象） | ★ 容器的连续块分配 |
+| placement new | `new (buf) S()` | 8 | ❌ 解析拒收 | ★ allocator / `function` 的 SBO |
+| 数组初始化列表 | `int a[3] = {1,2,3}` | 3 | ❌ 解析拒收 | 小型查找表 |
+| 类模板偏特化 | `struct ITraits<T*>` | ✅ 6 | ✅ **6（已通）** | ★ 好消息：`iterator_traits` 的地基已在 |
+| `new` / `delete` / 指针链 | `a->next = b` | ✅ 0 | ✅ 0 | list/map 节点 |
+
+**批次（执行序，M0 是硬门槛）**：
+
+| 批 | 要回答的问题 | 依赖 | 验收（与 clang 对拍） |
+|---|---|---|---|
+| **M0** | 运算符重载到底该在 AST 的哪里落地？（成员/非成员、重写集、`operator[]` 的引用返回） | 无（★ 但**卡着整条线**，故排第一） | 上面 6 条运算符探针全通；`vector` 的对外接口能过 minicc 解析 |
+| **M1** | 三指针布局为什么是 24 字节？扩容为什么是倍增而不是 +1？迭代器为什么可以是裸指针？ | L1（尺寸/对齐）、M0 | `sizeof(vector<int>)==24`、`size/capacity` 序列与 clang 版逐位相同 |
+| **M2** | 链表迭代器为什么要重载 `*` `->` `++`？迭代器失效的边界在哪？ | M0 | `list` 遍历/插入/删除 rc 与 clang 版一致 |
+| **M3** | `iterator_traits` 为什么必须**偏特化 `T*`**？算法怎么做到不关心容器？ | M1/M2 | 同一个 `distance()` 对裸指针与链表迭代器都正确 |
+| **M4** | allocator 为什么要 placement new + 显式析构？`rebind` 解决什么？ | L4、M0 | 用 allocator 造对象再手工析构；SBO 不分配堆 |
+| **M5** | 红黑树的不变式怎么在代码里体现？哈希桶为什么链地址？ | M0~M4 | `map`/`set` 有序性 + `unordered_map` 桶链，与 clang 版输出对拍 |
+| M6（可选） | `function` 的 SBO、`ranges` 的视图惰性求值 | M4 | 小对象不分配堆 |
+
+**排序理由**：M0 不是"最理论"的，却是**唯一让后面五批可以开始**的
+（没有 `operator[]`，vector 连声明都写不出来）—— 这与 §0.2 把 L1 排第一同理：
+**先解掉"挡在所有东西前面"的那一个**。M1 是第一个能用 `sizeof` 与 clang 对拍的容器，
+所以它紧跟 L1 之后最划算。
+
+**产物**：每批必须出 `docs/learn/NN` + 单测 + 集成用例 + 突变验证脚本；
+★ M 线的额外验收标准是**双栖**：同一份 `ministl` 头文件既过 `clang++-18` 也过 `minicc`。
+
+### 0.4 批 1~6：主线 K —— 模板线收尾六项（理论密度高）
 
 明细见 **§1**（每项含：标准章节 / clang 参照 / 实测现状 / 落点 / 验收 / 产物）。
 
@@ -96,7 +186,7 @@ clang 的措辞是 `partial specialization of alias templates is not permitted` 
 所以 K-1 是"**把非法程序拒得更准**"，**不是**"补一个特性"。
 ★ 这类"缺口其实是缺口"的条目最容易被后来的会话读成"待实现"—— 故在此单列一行说清方向。
 
-### 0.3 降级区：语法面欠账（**不占主线位**）
+### 0.5 降级区：语法面欠账（**不占主线位**）
 
 触发条件：① 用户点单；② 主线 K 收尾后按余量捡；③ 某条欠账被别的特性**依赖**时顺手做。
 共同形态：多为**语法面**（解析糖一类），理论点薄、clang 参照分散 ⇒ 不单独成批。
@@ -123,13 +213,13 @@ clang 的措辞是 `partial specialization of alias templates is not permitted` 
 | 全局限定名 `::X`（`::g` / `::N::S`） | B54 | Parser 在表达式/类型位置直接拒收 `::`（"Unexpected token '::'"）；即使放行，Scope 表的空段分支也只是**跳过**、不把路径落到全局层（`parse_scope.cpp:167` 注释与实现不符）⇒ 要修得**两处一起**改 |
 | 模板类 static 数据成员：类外定义 + 类型限定读写 | 手工探针 2026-11-19 | **未实现（clang 接受、minicc 拒 ⇒ 按 §0 判据属"功能缺失"，不计入 BUGS.md）**。① `template<typename T> int Box<T>::intValue = 5;` 解析期就拒（`[Parse Error] at '<': Expected '(' after function name` —— `parseFunctionDecl` 不认 `Box<T>::` 作限定符）⇒ 实例永远拿不到存储；② `int a = Box<int>::intValue;` 类型限定访问查符号表全名 `Box_int::intValue`（`semantic_analyzer.cpp:5027`）查不到，报 `no static member 'intValue' in class 'Box_int'`（★ 文案误导：成员在实例类里已登记，缺的是**符号**）；③ 对象访问 `b.intValue = 2` Sema 过、符号算成 `Box_int__intValue`，链接期 `undefined reference`（★ 两条路径对同一实体符号名**不同源**，与 B45/B22 同坑型）。clang 对拍：类外定义 + 读 + 写 rc=**52**，minicc rc=1。**已能用**：`static const int intValue = 5;` 类内初始化（常量折叠、无存储，读对拍 rc=5）；普通类的 `Counter::count = 10;` 读写均正常（tests/lang/test_basics_13）。修法顺序：先让 Parser 收 `TemplateId::name` 类外定义，再统一符号名口径 |
 
-### 0.4 暂不开新战线（明写出来，免得"顺手加个功能"）
+### 0.6 暂不开新战线（明写出来，免得"顺手加个功能"）
 
 | 候选 | 为什么现在不做 |
 |---|---|
-| 主线 F 深水区（运算符重载 / lambda / 异常 / 虚继承） | 各自是独立子系统（重写集 / 闭包转换 / LSDA / vbptr 布局），与模板线不共享地基；当前无教学刚需 |
+| 主线 F 深水区（运算符重载 / lambda / 异常） | 各自是独立子系统（重写集 / 闭包转换 / LSDA），与当前两条主线都不共享地基；当前无教学刚需。★ **虚继承已升格**为 §0.2 主线 L 的批 L3 |
 | `auto` 类型推导（P2） | 与 `template<auto V>`（NTTP 的 deduced 形参）同名不同物、易混；且要新开一层推导 |
-| 移动语义 / 右值引用全套 | 依赖拷贝语义先修（批 0-1），且要动 ABI（sret + move ctor） |
+| 移动语义 / 右值引用全套 | ★ **已并入 §0.2 主线 L 的批 L2**（与拷贝构造同属 rule of five；单独做会把 ABI 的账付两遍） |
 | 并行 / 增量编译 / JIT / LTO | 超出"学习编译器理论"的项目定位（CLAUDE.md 最高优先级） |
 | 除 ministl 外的第三方库适配 | 教学项目；ministl 双栖桩已足够 |
 
@@ -139,7 +229,7 @@ clang 的措辞是 `partial specialization of alias templates is not permitted` 
 
 **为什么单独立线**：这六项都是**标准有明确条文、clang 有现成答案**的语义缺口，
 不是"再加个语法糖"。它们共享同一套地基（模板实参表 / 模式匹配 / 合一算法），
-一批做完，模板这块才算封口；再往下就是语法面（§0.3）与深水区（§0.4）。
+一批做完，模板这块才算封口；再往下就是语法面（§0.5）与深水区（§0.6）。
 
 ### K-1 别名模板的偏特化 / 显式特化 ⇒ **拒得更准**
 
@@ -395,7 +485,7 @@ break、continue、三元 ?:（含短路语义）。Sema 循环深度栈（m_loo
 `m_caseValueSets` 栈保证 case 值常量且不重（文案与 clang 逐字同）；
 CodeGen switch 降级成比较链（逐条 cmp-je）、do-while 体先于条件、continue 落条件式；
 逗号表达式纯字面量在常量折叠里消除。
-**剩余**：区间 for、赋值表达式化（⇒ 已降级到 §0.3 语法面欠账）。
+**剩余**：区间 for、赋值表达式化（⇒ 已降级到 §0.5 语法面欠账）。
 
 ## 主线 D：常量折叠 / constexpr —— ✅ 首批 2026-10（learn/39）/ 二批 2026-10（learn/40）
 
@@ -429,7 +519,7 @@ CodeGen switch 降级成比较链（逐条 cmp-je）、do-while 体先于条件�
 > `valueExpr` 载荷，求值发生在【算缓存键之前】的归一预处理 —— 下游
 > （形态归一 / 可表示性检查 / 缓存键 / mangling）确实一行没动。
 > 剩余：constexpr **函数**（需可解释器的求值器）、`if constexpr`、浮点折叠
-> ⇒ 已降级到 §0.3 语法面欠账。
+> ⇒ 已降级到 §0.5 语法面欠账。
 > mangling 的 `TnDa`（`<template-param-decl>`，只用于**函数**模板的 `auto` NTTP）
 > 仍未实现 —— 函数模板的显式 NTTP 实参目前直接报
 > `explicit non-type template argument … for function template … is not supported yet`，
@@ -449,9 +539,9 @@ CodeGen switch 降级成比较链（逐条 cmp-je）、do-while 体先于条件�
 > 三处声明点，Sema 经常量折叠器把 `arraySizeExpr` 求值为正整数，
 > CodeGen 局部数组栈分配 + 零初始化、全局数组 `.data` 节发 `.zero`，
 > 数组名向首元素地址退化（array-to-pointer decay）。
-> **剩余**：`T[N]` **数组类型偏特化**（需给 `TypeKind::Array` 开偏特化路径）⇒ 已降级到 §0.3。
+> **剩余**：`T[N]` **数组类型偏特化**（需给 `TypeKind::Array` 开偏特化路径）⇒ 已降级到 §0.5。
 
-## 主线 F（选做，深水区 ⇒ 2026-11-02 明确"暂不开新战线"，见 §0.4）
+## 主线 F（选做，深水区 ⇒ 2026-11-02 明确"暂不开新战线"，见 §0.6）
 
 | 特性 | 理论点 | 参照 |
 |---|---|---|
@@ -604,4 +694,4 @@ SFINAE 探测不命中时**静默回退**而非报错；与 clang oracle 对拍�
    不再顺手补两份流程文档。理由：本项目一轮主线动辄产出十几份文档，
    文档一旦与代码不同步就成负债；"接口/契约变了"是唯一值得多写两遍的场合。
 6. ★ **每批开做前先读 §0**（当前优先级），批次之间可穿插但**不并行开新战线**；
-   §0.3 降级区的条目只在"被依赖"或"用户点单"时才捡。
+   §0.5 降级区的条目只在"被依赖"或"用户点单"时才捡。

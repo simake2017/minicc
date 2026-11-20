@@ -23,7 +23,7 @@
 
 | 优先级 | 项 | 理论点 | clang 参照 |
 |---|---|---|---|
-| ★★★ | **运算符重载** | 成员/非成员重写集（rewrite candidate） | SemaOverload.cpp / ParseCXX.cpp |
+| — | **运算符重载（已升格为主线 M 批 M0）** | 成员/非成员重写集（rewrite candidate） | 见 [ROADMAP §0.3](docs/ROADMAP.md)；★ 它是 STL 还原的头号门槛 |
 | ★★★ | **lambda** | 闭包转换：匿名类 + `operator()` + 捕获列表 | SemaLambda.cpp |
 | ★★☆ | constexpr 函数 + if constexpr | [dcl.constexpr] 常量求值器（解释器雏形） | ExprConstant.cpp（clang 常量求值器） |
 | ★★☆ | 函数默认实参 | [dcl.fct.default] 缺省实参在调用点回填 | SemaDecl.cpp |
@@ -37,7 +37,7 @@
 | 优先级 | 项 | 理论点 | clang 参照 |
 |---|---|---|---|
 | ★☆☆ | 异常 | Itanium EH ABI：personality、LSDA、zero-cost 展开 | libunwind + CGException.cpp |
-| ★☆☆ | 虚继承 | vbptr、菱形布局 | CGRecordLayoutBuilder |
+| — | **虚继承（已升格为主线 L 批 L3）** | 虚基类偏移表 + 共享子对象 + 最派生类构造 | 新增 `## L` 组，见 [ROADMAP §0.2](docs/ROADMAP.md) |
 | ☆☆☆ | 概念约束 `requires` | 原子约束合取规范化 | SemaConcept.cpp |
 
 ## C. 语义精度（收口已记录的宽方向边界）
@@ -73,7 +73,7 @@
 | 优先级 | 项 | 做法 | 验收 |
 |---|---|---|---|
 | ★★★ | **随机差分 fuzz** | 生成随机小程序（模板/继承/常量表达式组合），minicc 与 clang++-18 对拍 rc + 运行输出 | 每周跑一轮，分歧即新 BUGS 条目 |
-| ★★☆ | ministl 对拍扩展 | map/set 已有 5000 步对拍；扩 unordered_map / ranges 视图 | 同框架 |
+| ★★☆ | ministl 对拍扩展 | map/set 已有 5000 步对拍；扩 unordered_map / ranges 视图。★ 与主线 M 的"双栖"验收合并：同一套用例**既在 clang 跑也在 minicc 跑** | 同框架 |
 | ★★☆ | 错误恢复（panic 模式续编） | 同步点恢复，单文件报多个错 | 错例文件一次报全 |
 | ★☆☆ | 字面量溢出自动升格（[lex.icon]/2） | 十进制超 int ⇒ long ⇒ long long | 与 clang 形态对拍 |
 | ★☆☆ | `\x` / `\u` 转义 | 词法扩展 | 字符用例 |
@@ -103,10 +103,51 @@
 | ★☆☆ | `docs/upstream/` 再补上游机制科普 | 现 1 篇（标准库与头文件搜索） | constraints/05 L1 |
 | ★☆☆ | 表格化契约（分类 × 是否支持 × 出处） | 散在各文档的"支持特性"清单合并成一张总表 | TODO 由来 |
 | ★☆☆ | **判据⑦ 的人工抽查**：机器只查"有没有声明契约变更点"，查不出"声明得对不对" | 13 份 spec/design 的契约点是否名副其实，需人读一遍（与判据⑥ 同理：它挡路径漂移，挡不住语义漂移） | constraints/06 §2.0 |
-| ★☆☆ | **降级区（ROADMAP §0.3，17 条语法面欠账）的条目补"做完要多久"** | 现在只有"是什么/为什么现在不做"，没有工作量估计 ⇒ 将来捡起来仍要重新评估 | ROADMAP §0.3 |
+| ★☆☆ | **降级区（ROADMAP §0.4，17 条语法面欠账）的条目补"做完要多久"** | 现在只有"是什么/为什么现在不做"，没有工作量估计 ⇒ 将来捡起来仍要重新评估 | ROADMAP §0.4 |
+
+## L. 对象模型与布局原理（主线 L，★ 2026-11-20 用户定向）
+
+> 学习目标从"模板机制"扩到"**C++ 原理 + 布局原理**"。
+> 详版（原理问题 / 现状探针 / 落点 / 验收）在 **[ROADMAP §0.2 主线 L](docs/ROADMAP.md)** ——
+> 本节只留执行序与一句话，避免两处清单漂移。
+
+| 序 | 批 | 一句话 | 现状（2026-11-20 实测） |
+|---|---|---|---|
+| 1 | **L1 对齐与尺寸模型** | 引入 `alignment` + `sizeof`/`alignof`（Sema 折叠成常量）⇒ 布局第一次可以**与 clang 对拍** | `sizeof(D)` ⇒ `use of undeclared identifier 'sizeof'` |
+| 2 | **L2 EBO + 平凡性判据 + 拷贝/移动语义** | `[class.prop]` 三条判据 + 空基类优化 + rule of five | `S b = a;` 不调用户的 `S(const S&)`（rc=1 / clang 11） |
+| 3 | **L3 虚继承** | 虚基类偏移表 + 共享子对象 + 最派生类构造 | `struct D : virtual B` ⇒ 解析期拒收 |
+| 4 | **L4 对象生命周期** | placement new / 显式析构 / `launder` / [basic.life] | 无显式析构调用，无存储期模型 |
+| 5 | L5（可选） | 位域 + union（活跃成员） | 解析期都没有 |
+
+★ 每批交付三件套：`docs/learn/NN` + 单测/集成用例（**与 clang 对拍**）+ 突变验证脚本。
+
+## M. STL 还原与「自举」（主线 M，★ 2026-11-20 用户定向）
+
+> 用户原话："**会逐渐还原 STL 中主要数据结构，从它们实际出发，理解 STL 编译器**"。
+> 详版（探针表 / 批次 / 验收）在 **[ROADMAP §0.3 主线 M](docs/ROADMAP.md)**。
+>
+> ★ **先讲清方向**：`ministl/` 已经有 5826 行（vector / list / map / set / unordered_map /
+> hash / algorithm / ranges / iterator / memory / type_traits / utility / function），
+> **但它跑在宿主 clang++-18 上**（`ministl/tests/*.cpp` 是 gtest）。
+> ⇒ 这条线**不是"从零写 STL"**，而是 **"让 minicc 自己编得过 ministl"** ——
+> 库与编译器互为试金石，这才是"理解 STL 编译器"的实质闭环。
+> 验收标准因此是**双栖**：同一份头文件既过 `clang++-18` 也过 `minicc`。
+
+| 序 | 批 | 一句话 | 现状（2026-11-20 实测） |
+|---|---|---|---|
+| 0 | **M0 语言前置（运算符重载）** | 成员/非成员 `[]` `=` `()` `*` `->` `++` + `noexcept` + `static_cast` + 数组 new + placement new | ★ 全部**解析期拒收**；`double d = 1.5;` 也被词法拆错 |
+| 1 | **M1 vector 自举** | 三指针布局 / 倍增扩容 / 迭代器=裸指针 | 依赖 L1 的 `sizeof` 才能与 clang 对拍 |
+| 2 | **M2 list 自举** | 双向链节点 + 迭代器 `*`/`->`/`++` + 失效规则 | 等 M0 |
+| 3 | **M3 iterator_traits + 算法解耦** | 偏特化 `T*` + tag dispatch | ★ 地基已通：`traits<T*>` 探针 rc=6（与 clang 同） |
+| 4 | **M4 allocator + 生命周期** | placement new / 显式析构 / `rebind` | 与主线 L 的批 L4 复用；`new S[3]` 现在报错 |
+| 5 | **M5 map / set / unordered_map 自举** | 红黑树不变式 / 哈希桶链地址 | `detail/rb_tree.h` 已写好（539 行），只差 minicc 编得过 |
+| 6 | M6（可选） | `function` 的 SBO、`ranges` 视图惰性求值 | 需要可变参数模板 |
+
+★ 每批交付三件套：`docs/learn/NN` + 单测/集成用例（**与 clang 对拍**）+ 突变验证脚本。
 
 ## 排期建议
 
+0. **当前**（用户定向）：**主线 L 布局线 L1 → L4** 与 **主线 M STL 自举线 M0 → M5** 交错推进。先 L1（对齐与 `sizeof`/`alignof` —— 没有它，L2~L4 与 M1~M5 都没法与 clang 对拍），再 M0（运算符重载是 STL 的头号门槛）；模板线只剩 K-2/K-3
 1. **近期**（1~2 轮）：A1 寄存器分配（后端从"学生作业"拉到"能用"）+ E1 随机差分 fuzz
 2. **中期**：B1 运算符重载 → B1 lambda（.closure 转换是最值的理论点）+ C 组按 ★★ 收口
 3. **远期**：深水区按需；D 组模板补全是"主线任务"血统，随时可插
@@ -118,3 +159,5 @@
 | 2026-10-23 | 本文档建立；基线快照：362 单测 / 155 集成基线 / learn 01..47 |
 | 2026-11-02 | 文档线收敛规则落地（constraints/06 §2.0 + 判据⑦ + 突变验证 30/30）；ROADMAP 重排为"第一屏给执行序"的三段式；基线快照：**396** 单测 / **165** 集成基线 / learn 01..**55** |
 | 2026-11-02 | **文档标准一批**：按 `constraints/05`（族→技能归属 + 14 条冲突裁决）与 `constraints/06`（骨架规范）把全仓文档归族补骨架；新增 `check-doc-standard.sh`（6 条判据）+ `verify-doc-mutations.sh`（26 项突变验证）；`docs/arch/` 出首张架构图（archify）。基线快照刷新：376 单测 / 160 集成基线 / learn 01..50 |
+| 2026-11-20 | 学习目标定向为"C++ 原理 + 布局原理" ⇒ ROADMAP 新增 **§0.2 主线 L**（四批 + 1 可选），模板线降为收尾；TODO 新增 `## L` 组。同日已完成 B60（嵌套类构造/析构身份，learn/62）；基线快照：**444** 单测 / **173** 集成基线 / learn 01..**62** |
+| 2026-11-20 | 第二次定向：**还原 STL 主要数据结构 + 让 minicc 编得过 ministl** ⇒ ROADMAP 新增 **§0.3 主线 M**（M0~M6）；TODO 新增 `## M` 组；`operator[]`/`operator=`/`operator()`/`operator*`/`noexcept`/`static_cast`/`new S[3]`/placement new/浮点字面量 九项探针实测均拒收，`traits<T*>` 偏特化已通 |
