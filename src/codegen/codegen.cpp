@@ -545,58 +545,76 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
                     base.offset, base.baseClassName));
             }
         }
+        // 判据单点：这条初始化是不是基类构造 —— Sema 回填时已裁定（isBaseInit），
+        // CodeGen 只把结论对回布局里的具体基类。基类名按裸名比：显式基类说明符的
+        // 写法（"N::Base" / "Base"）与源码里的成员名不一定同形。
+        auto baseForInit = [this](const CtorInitializer& init) -> const BaseSubobject* {
+            if (!init.isBaseInit) return nullptr;
+            for (auto& base : m_currentClassType->classLayout.bases) {
+                if (init.memberName == base.baseClassName
+                    || unqualifiedName(base.baseClassName) == init.memberName) {
+                    return &base;
+                }
+            }
+            return nullptr;
+        };
+
         // 收集是否有基类构造调用
         bool hasBaseCtors = false;
         for (auto& init : ctor->initList) {
-            for (auto& base : m_currentClassType->classLayout.bases) {
-                if (init.memberName == base.baseClassName) { hasBaseCtors = true; break; }
-            }
-            if (hasBaseCtors) break;
+            if (baseForInit(init)) { hasBaseCtors = true; break; }
         }
 
         for (auto& init : ctor->initList) {
             if (!m_currentClassType) continue;
 
-            // 检查是否为基类构造调用（memberName 匹配 baseClassName）
-            bool isBaseCtor = false;
-            for (auto& base : m_currentClassType->classLayout.bases) {
-                if (init.memberName == base.baseClassName) {
-                    isBaseCtor = true;
-                    // 调用基类构造函数（base_className_N 格式）
-                    std::string baseCtorName = base.baseClassName + "_" + base.baseClassName;
+            // 检查是否为基类构造调用
+            if (const BaseSubobject* baseHit = baseForInit(init)) {
+                const BaseSubobject& base = *baseHit;
+                // 构造符号由 Sema 回填（选定 + 定名一处完成）。
+                // 兜底只在回填缺失时走旧约定，且同样按【裸名】口径拼 ——
+                // 拿登记名当函数名会拼出 "Outer::Inner_Outer::Inner_1"（learn/62）。
+                std::string baseCtorName = init.ctorSymbol;
+                if (baseCtorName.empty()) {
+                    baseCtorName = base.baseClassName + "_"
+                                 + unqualifiedName(base.baseClassName);
                     if (!init.arguments.empty()) {
                         baseCtorName += "_" + std::to_string(init.arguments.size());
                     }
-                    // 计算实参
-                    for (size_t ai = 0; ai < init.arguments.size() && ai < 5; ai++) {
-                        emitExpr(init.arguments[ai]);
-                        emit("pushq %rax               # 暂存实参值到栈上");
-                    }
-                    for (int ai = static_cast<int>(init.arguments.size()) - 1; ai >= 0 && ai < 5; ai--) {
-                        static const char* regs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
-                        emit(std::format("popq %{}              # 逆序弹出实参到寄存器", regs[ai]));
-                    }
-                    // this 指针：主基类用原始 this，次基类用 this + offset
-                    emit("movq -8(%rbp), %rdi       # 加载 this 指针作为基类构造第 0 参数");
-                    if (!base.isPrimary) {
-                        emit(std::format("addq ${}, %rdi          # 次基类偏移调整（'{}'）",
-                            base.offset, base.baseClassName));
-                    }
-                    emit(std::format("callq {}                # 调用基类构造函数 '{}'",
-                        baseCtorName, base.baseClassName));
-                    break;
                 }
+                // 计算实参
+                for (size_t ai = 0; ai < init.arguments.size() && ai < 5; ai++) {
+                    emitExpr(init.arguments[ai]);
+                    emit("pushq %rax               # 暂存实参值到栈上");
+                }
+                for (int ai = static_cast<int>(init.arguments.size()) - 1; ai >= 0 && ai < 5; ai--) {
+                    static const char* regs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
+                    emit(std::format("popq %{}              # 逆序弹出实参到寄存器", regs[ai]));
+                }
+                // this 指针：主基类用原始 this，次基类用 this + offset
+                emit("movq -8(%rbp), %rdi       # 加载 this 指针作为基类构造第 0 参数");
+                if (!base.isPrimary) {
+                    emit(std::format("addq ${}, %rdi          # 次基类偏移调整（'{}'）",
+                        base.offset, base.baseClassName));
+                }
+                emit(std::format("callq {}                # 调用基类构造函数 '{}'",
+                    asmSymbol(baseCtorName), base.baseClassName));
+                continue;
             }
 
-            if (!isBaseCtor) {
+            {
                 // 字段初始化
                 const FieldInfo* field = m_currentClassType->classLayout.findField(init.memberName);
                 if (field && !init.arguments.empty()) {
                     if (field->type && field->type->isClass()) {
                         // 类字段内联于 this + fieldOffset；构造时传子对象地址，不能当标量赋值。
-                        const std::string& cn = field->type->name;
-                        std::string ctorName = cn + "_" + cn + "_" +
-                            std::to_string(init.arguments.size());
+                        // 符号同样取 Sema 回填值（嵌套类的"类名_裸名_N"旧约定拼不出来）。
+                        std::string ctorName = init.ctorSymbol;
+                        if (ctorName.empty()) {
+                            const std::string& cn = field->type->name;
+                            ctorName = cn + "_" + unqualifiedName(cn) + "_" +
+                                std::to_string(init.arguments.size());
+                        }
                         for (size_t ai = 0; ai < init.arguments.size() && ai < 5; ai++) {
                             emitExpr(init.arguments[ai]);
                             emit("pushq %rax               # 暂存嵌套构造实参");
@@ -608,7 +626,8 @@ void CodeGen::emitFunction(FuncDeclPtr func) {
                         emit("movq -8(%rbp), %rdi       # 加载 this 指针");
                         emit(std::format("addq ${}, %rdi          # 调整到嵌套子对象 '{}'（偏移 {}）",
                             field->offset, field->name, field->offset));
-                        emit(std::format("callq {}                # 调用嵌套类构造函数", ctorName));
+                        emit(std::format("callq {}                # 调用嵌套类构造函数",
+                            asmSymbol(ctorName)));
                     } else {
                         // 字段存储按宽度选择 movb/movl/movq，避免覆盖相邻字段。
                         // 参考：clang/lib/CodeGen/CGExpr.cpp:CodeGenFunction::EmitStoreOfScalar。
@@ -1426,8 +1445,9 @@ void CodeGen::visit(VarDeclStmt& decl) {
                 return;
             }
 
+            // 兜底同样按【裸名】口径拼（构造函数的名字是本类的裸名，learn/62）
             const std::string ctorSym = decl.ctorSymbol.empty()
-                ? cit->second->name + "_" + cit->second->name   // 兜底（旧约定）
+                ? cit->second->name + "_" + unqualifiedName(cit->second->name)
                 : decl.ctorSymbol;
             emit(std::format("leaq {}(%rbp), %rdi       # this = 栈对象地址 &{}",
                 offset, decl.name));
@@ -3066,7 +3086,8 @@ void CodeGen::visit(NewExpr& expr) {
     // 调用与定义均经 asmSymbol 净化限定名，避免符号拼写不一致。
     std::string ctorName = expr.ctorSymbol;
     if (ctorName.empty()) {
-        ctorName = expr.className + "_" + expr.className;   // 兜底（旧约定）
+        // 兜底同样按【裸名】口径拼（构造函数的名字是本类的裸名，learn/62）
+        ctorName = expr.className + "_" + unqualifiedName(expr.className);
         if (!expr.constructorArgs.empty()) {
             ctorName += "_" + std::to_string(expr.constructorArgs.size());
         }

@@ -2054,20 +2054,28 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
     }
 
     // ── 合成默认构造与析构（若未显式提供）──
+    // ★ 判据单点：函数名用【本类的裸名】，作用域身份用【登记名】。
+    //   decl->name 是登记名（"Outer::Inner" / "Box_int::Inner" / "Outer::Mem_int"），
+    //   用户写的 ctor 名来自源码 token（天然裸名）—— 合成侧若照抄登记名，
+    //   同一个类就有了两种符号形态（实测 "Outer::Mem_int_Outer::Mem_int"
+    //   vs "Outer::Inner_Inner"，docs/learn/62）。
+    //   名字分支（method->name == ownName）只是 kind 判据的兜底：parser 一定会
+    //   设 kind，两者口径一致时才不会一边真一边假。
+    const std::string ownName = unqualifiedName(decl->name);
     bool hasExplicitCtor = false;
     bool hasExplicitDtor = false;
     for (auto& method : decl->methods) {
-        if (method->kind == NodeKind::Constructor || method->name == decl->name) {
+        if (method->kind == NodeKind::Constructor || method->name == ownName) {
             hasExplicitCtor = true;
         }
-        if (method->kind == NodeKind::Destructor || method->name == "~" + decl->name) {
+        if (method->kind == NodeKind::Destructor || method->name == "~" + ownName) {
             hasExplicitDtor = true;
         }
     }
 
     if (!hasExplicitCtor) {
         auto defaultCtor = std::make_shared<ConstructorDecl>();
-        defaultCtor->name = decl->name;
+        defaultCtor->name = ownName;
         defaultCtor->ownerClassName = decl->name;
         defaultCtor->returnType = Type::makeVoid();
         defaultCtor->isDefaultCtor = true;
@@ -2076,7 +2084,7 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
     }
     if (!hasExplicitDtor) {
         auto defaultDtor = std::make_shared<DestructorDecl>();
-        defaultDtor->name = "~" + decl->name;
+        defaultDtor->name = "~" + ownName;
         defaultDtor->ownerClassName = decl->name;
         defaultDtor->returnType = Type::makeVoid();
         defaultDtor->isDefaultDtor = true;
@@ -2085,26 +2093,19 @@ void SemanticAnalyzer::processClassDecl(ClassDeclPtr decl) {
     }
 
     // ── 校验构造函数初始化列表 ──
+    // 目标类（基类 / 类类型字段）的认法走公用判据 resolveCtorInitTarget ——
+    // 与 Pass 3 回填构造符号用的是同一份答案（"名字写裸名、登记名带作用域"）。
     for (auto& method : decl->methods) {
         if (method->kind == NodeKind::Constructor) {
             auto ctor = std::static_pointer_cast<ConstructorDecl>(method);
             for (auto& init : ctor->initList) {
-                bool found = false;
-                // 检查是否匹配任一基类名
-                for (auto& bn : decl->baseClassNames) {
-                    if (init.memberName == bn) { found = true; break; }
-                }
-                // 检查是否匹配自身字段（含限定名）
-                for (auto& f : decl->fields) {
-                    if (f.name == init.memberName) {
-                        // 去掉限定名再比
-                        found = true; break;
+                bool found = !resolveCtorInitTarget(decl, init).className.empty();
+                if (!found) {
+                    // 剩下的合法形态只有标量字段（没有构造目标，但有名字）。
+                    for (auto& f : decl->fields) {
+                        if (f.name == init.memberName
+                            || f.bareName() == init.memberName) { found = true; break; }
                     }
-                    // 匹配裸名
-                    std::string rawName = f.name; // 有可能因为上面操作 成了 "a.name"这种结构
-                    auto dot = rawName.find('.');
-                    if (dot != std::string::npos) rawName = rawName.substr(dot + 1);
-                    if (rawName == init.memberName) { found = true; break; }
                 }
                 if (!found) {
                     error(std::format("Member '{}' not found in class '{}' during initializer list",
@@ -2487,14 +2488,26 @@ void SemanticAnalyzer::registerFunction(FuncDeclPtr decl) {
     }
 
     // 注册到符号表
-    Symbol sym;
-    sym.name = decl->name;
-    sym.type = decl->returnType;
-    sym.kind = SymbolKind::Function;
-    sym.isLocal = false;
-    sym.ownerClass = decl->ownerClassName;
-    sym.definedAt = decl->location;
-    m_symbolTable.define(decl->name, sym);
+    // ★ 只有【自由函数】进符号表：成员的名字只在类作用域里可见
+    //   （[basic.lookup.unqual]/6），把裸名 define 进当前（全局）作用域
+    //   等于把成员名泄漏成全局可见的名字。实测：命名空间/嵌套类的合成构造函数
+    //   按裸名登记后，`namespace N { struct S { int x; }; }
+    //   int main() { S; }`（clang 拒收 use of undeclared identifier 'S'）
+    //   被静默接受（docs/learn/62）。成员函数靠 m_functionMap + 类的 methods 表
+    //   提供，类内查找走 findMethodInHierarchy，不经过这里。
+    //   ★ 注意不能改成"用限定名登记"：`类名::成员名` 这个键空间是【静态成员】
+    //     的判据（inferMember / inferVar 的 static 分支按它查），成员函数占进去
+    //     会让静态分支误命中（实测 `d.g()` 被当成 static member，docs/learn/62）。
+    if (decl->ownerClassName.empty()) {
+        Symbol sym;
+        sym.name = decl->name;
+        sym.type = decl->returnType;
+        sym.kind = SymbolKind::Function;
+        sym.isLocal = false;
+        sym.ownerClass = decl->ownerClassName;
+        sym.definedAt = decl->location;
+        m_symbolTable.define(decl->name, sym);
+    }
 
     std::string paramStr;
     for (size_t i = 0; i < decl->parameters.size(); i++) {
@@ -2643,6 +2656,11 @@ void SemanticAnalyzer::analyzeFunctionBody(FuncDeclPtr decl) {
     }
 
     // ── 分析函数体（不创建新的 block scope，直接在函数 scope 中）──
+    // 构造函数的初始化列表先于函数体求值（[class.base.init]/13 的求值顺序），
+    // 而它的实参里可以用形参 / this ⇒ 必须等参数与 this 入表之后再回填。
+    if (decl->kind == NodeKind::Constructor) {
+        resolveCtorInitList(std::static_pointer_cast<ConstructorDecl>(decl));
+    }
     for (auto& stmt : decl->body->statements) {
         processStmt(stmt);
     }
@@ -2660,6 +2678,95 @@ void SemanticAnalyzer::analyzeFunctionBody(FuncDeclPtr decl) {
     m_currentFuncName   = savedFuncName;
 
     std::cout << std::format("  ╚══ End {} ══╝\n\n", funcLabel);
+}
+
+// 初始化列表里这一条 init 的目标类是谁（[class.base.init]）。
+// 定位：`Outer() : m(9) {}` 里的 `m` 指的是基类子对象还是类类型字段，指向哪个类。
+// 源码锚点：clang/lib/Sema/SemaDeclCXX.cpp:Sema::BuildMemInitializer（按名字查
+//   基类表 / 成员表，选出要构造的子对象）。
+// 动机：Pass 1 的"成员是否存在"校验与 Pass 3 的"构造符号回填"必须给同一个答案，
+//   否则会出现"校验说有这个成员、回填却找不到目标类"的静默分叉（B10→B45 同款坑）。
+// 判据单点（两条都是【裸名】）：
+//   ★ 基类名：baseClassNames 存声明写法（"Base" / "N::Base"），源码写裸名 ⇒ 各按裸名比；
+//   ★ 字段名：FieldInfo::bareName() 是权威裸名（多继承下显示名带 "B.x" 前缀）。
+// demo：
+//   ① `Inner m; ... : m(9)` ⇒ {className="Inner", isBase=false}
+//   ② `struct D : N::Base { D() : Base(7) {} }` ⇒ {className="N::Base", isBase=true}
+//   ③ `int x; ... : x(0)` ⇒ {}（标量字段没有构造目标）
+SemanticAnalyzer::CtorInitTarget SemanticAnalyzer::resolveCtorInitTarget(
+    const ClassDeclPtr& own, const CtorInitializer& init) {
+    for (auto& bn : own->baseClassNames) {
+        if (bn == init.memberName || unqualifiedName(bn) == init.memberName) {
+            return {bn, true};
+        }
+    }
+    for (auto& f : own->fields) {
+        if (f.bareName() != init.memberName) continue;
+        TypePtr ft = f.type;
+        while (ft && ft->isConst()) ft = ft->stripConst();
+        if (ft && ft->isClass()) return {ft->name, false};
+        return {};   // 标量字段：没有构造目标
+    }
+    return {};
+}
+
+// 构造函数初始化列表：为每条初始化选定目标构造函数并回填符号（[class.base.init]）。
+// 定位：`Outer::Inner m; Outer() : m(9) {}` 里的 `m(9)` 该调哪个构造函数。
+// 源码锚点：clang/lib/Sema/SemaDeclCXX.cpp:BuildCXXConstructExpr（Sema 选定后
+//   把构造声明交给 CXXConstructExpr）；CodeGen 只读 CXXConstructExpr 的声明，
+//   从不按名字重算（clang/lib/CodeGen/CGExprCXX.cpp:EmitCXXConstructExpr）。
+// 动机：构造函数的定名是有状态的（同名多参追加 `_N`、同参数个数挂类型链），
+//   调用点拼不出来；B42 已为"CodeGen 硬拼"付过一次学费，本批补上漏改的
+//   嵌套类字段与基类两条路径（docs/learn/62、BUGS.md B60）。
+// demo：
+//   ① Part(int x); Part m; Holder() : m(9) {}
+//      ⇒ 目标类 Part，候选 1 个、精确匹配 int ⇒ ctorSymbol = "Holder::Part_Part_1"
+//   ② struct Part { int v; }; Part m; Holder() : m(9) {}
+//      ⇒ 候选 0 个 ⇒ 响亮拒收（clang: no matching constructor for initialization of 'm'）
+void SemanticAnalyzer::resolveCtorInitList(const CtorDeclPtr& ctor) {
+    if (ctor->initList.empty()) return;
+
+    auto clsIt = m_classDecls.find(m_currentClassName);
+    if (clsIt == m_classDecls.end()) return;
+    const ClassDeclPtr& own = clsIt->second;
+
+    for (auto& init : ctor->initList) {
+        // ── ① 这条 init 的目标类是谁 ──
+        const CtorInitTarget target = resolveCtorInitTarget(own, init);
+        init.isBaseInit = target.isBase;
+        if (target.className.empty()) continue;      // 标量字段：无构造目标
+
+        auto targetIt = m_classDecls.find(target.className);
+        if (targetIt == m_classDecls.end()) continue;
+
+        // ── ② 候选集 + 择优（与 `T x(args)` 同一套，不另写规则）──
+        std::vector<FuncDeclPtr> ctors;
+        for (auto& method : targetIt->second->methods) {
+            if (method->kind != NodeKind::Constructor) continue;
+            if (method->parameters.size() != init.arguments.size()) continue;
+            ctors.push_back(method);
+        }
+        std::vector<TypePtr> argTypes;
+        argTypes.reserve(init.arguments.size());
+        m_inferDepth++;
+        for (auto& a : init.arguments) argTypes.push_back(inferType(a));
+        m_inferDepth--;
+
+        const auto best = pickBestByArgs(ctors, argTypes,
+            std::format("ctor-initializer {}({} args)", init.memberName,
+                        argTypes.size()));
+        if (!best) {
+            error(std::format(
+                "no matching constructor for initialization of '{}' with {} "
+                "argument(s) —— '{}' 里找不到接受 {} 个实参的构造函数",
+                init.memberName, init.arguments.size(), target.className,
+                init.arguments.size()), init.location);
+        }
+        init.ctorSymbol = best->mangledName;
+        std::cout << std::format("  [ctor-init] ★ {}{}({} 个实参) ⇒ 选定构造函数符号 {}\n",
+            target.isBase ? "基类 " : "", init.memberName, init.arguments.size(),
+            init.ctorSymbol);
+    }
 }
 
 // [temp]：注册模板蓝图，按主模板、偏特化、全特化分别保存。

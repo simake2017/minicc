@@ -476,13 +476,18 @@ ClassDeclPtr TemplateInstantiator::instantiate(
 
         auto cloned = cloneMethod(method, subst, instanceName);
         // ★ 构造/析构函数名绑定在类名上：蓝图里的 Box/~Box 必须随实例改名，否则符号
-        //   与 CodeGen 发射的调用符号（类名_类名）对不上 ⇒ undefined reference。
+        //   与 CodeGen 发射的调用符号对不上 ⇒ undefined reference。
         //   对照 clang：实例化时按新类名重建 CXXConstructorDecl 的 DeclName。
-        if (cloned->kind == NodeKind::Constructor && cloned->name == blueprintName) {
-            cloned->name = instanceName;
+        // ★ 比较与改名都走【裸名】判据（type.h:unqualifiedName）：蓝图名对成员类模板
+        //   是限定名（"Outer::Mem"），而蓝图里的 ctor 名来自源码 token（"Mem"）——
+        //   拿限定名去比裸名恒为假 ⇒ 改名从不发生，符号里留着蓝图名（docs/learn/62）。
+        if (cloned->kind == NodeKind::Constructor
+            && cloned->name == unqualifiedName(blueprintName)) {
+            cloned->name = unqualifiedName(instanceName);
         }
-        if (cloned->kind == NodeKind::Destructor && cloned->name == "~" + blueprintName) {
-            cloned->name = "~" + instanceName;
+        if (cloned->kind == NodeKind::Destructor
+            && cloned->name == "~" + unqualifiedName(blueprintName)) {
+            cloned->name = "~" + unqualifiedName(instanceName);
         }
         newClass->methods.push_back(cloned);
     }
@@ -964,7 +969,10 @@ FuncDeclPtr TemplateInstantiator::cloneMethod(
         auto ctor = std::static_pointer_cast<ConstructorDecl>(method);
         auto clonedCtor = std::make_shared<ConstructorDecl>();
         clonedCtor->isDefaultCtor = ctor->isDefaultCtor;
-        // 初始化列表：成员名原样保留，实参表达式递归克隆
+        // 初始化列表：成员名原样保留，实参表达式递归克隆。
+        // ★ isBaseInit / ctorSymbol 是 Sema 在【实例类】上下文里回填的（Pass 3 会对
+        //   实例重新跑 resolveCtorInitList）——蓝图期算出的符号在实例里可能指向
+        //   不存在的目标，故一律不带过去（留空，由 Pass 3 重算）。
         for (auto& init : ctor->initList) {
             CtorInitializer clonedInit;
             clonedInit.memberName = init.memberName;

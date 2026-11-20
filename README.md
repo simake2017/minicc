@@ -14,14 +14,14 @@
 > 实例化 ≈ 结构化替换、两阶段查找、重载决议、SFINAE、偏序裁决）——
 > 这是"在编译器里再实现一台类型层面的 Prolog"。
 
-## 快照（2026-10-23）
+## 快照（2026-11-20）
 
 | 指标 | 数值 |
 |---|---|
 | 核心代码（include + src） | 约 2.4 万行 C++20，全阶段中文日志 |
-| 单测 | **436** 例（googletest，断言不变量而非具体符号名） |
-| 集成测试 | **172** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
-| 学习文档 | docs/learn/ 01..60（每篇点名标准章节 + clang 源码对照表） |
+| 单测 | **444** 例（googletest，断言不变量而非具体符号名） |
+| 集成测试 | **173** 份日志基线（编译日志 + 汇编全文 + 退出码 + 运行输出） |
+| 学习文档 | docs/learn/ 01..62（每篇点名标准章节 + clang 源码对照表） |
 | 配套标准库 | ministl：vector / list / map / set（红黑树）/ 智能指针 / function / algorithm / ranges，与 std 随机对拍 |
 | 外部依赖 | 编译期零依赖；运行期借系统 `as` 产 .o，链接与运行时（_start + bump malloc）自研，**不依赖 libc/crt** |
 
@@ -152,7 +152,7 @@ Sema 的符号表；Parser 只能通过窄的只读查询接口向 Sema 提问�
 
 ```bash
 ./build.sh                          # ① 0 警告
-ctest --test-dir build-linux -j6    # ② 436/436
+ctest --test-dir build-linux -j6    # ② 444/444
 ./logdiff.sh diff                   # ③ 172 份基线逐字节零漂移
 ```
 

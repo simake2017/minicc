@@ -37,6 +37,42 @@
 
 ### 最近批次（完整记录）
 
+✅ **嵌套类的构造/析构身份 + 初始化列表构造目标已完成（BUGS.md B60，docs/learn/62）** ——
+★ 起点是用户点单的一句观察：「`semantic_analyzer.cpp:2060` 这里的 `decl->name`
+**有可能是 `A::B::className` 了**」—— 核实后确认：**那两行名字比较是死分支**
+（`kind` 判据兜住了，改它观测不到任何行为变化），但紧跟其后的**合成**用登记名当函数名，
+而初始化列表的构造符号 CodeGen **又拼一遍** ⇒ 合法程序汇编期就炸。
+① **病灶**：`struct Outer{struct Inner{int v; Inner(int x){v=x;}}; Inner m; Outer():m(9){}};`
+⇒ clang rc=**9** / 修前 minicc **`as` 报 `junk '::Inner_Outer::Inner_1'`**（rc=1）；
+合成 ctor 名 = 登记名 ⇒ `Outer::Mem_int_Outer::Mem_int`，与用户写的 `Outer::Inner_Inner`
+**两种符号口径**。★ 这是 B42（构造符号 CodeGen 硬拼）漏改的第三条路径。
+② **判据单点**：`unqualifiedName`（`src/ast/type.h`）—— 构造函数的名字是**本类裸名**
+（[class.ctor]/1 的注入类名），限定前缀只是**作用域身份**（learn/49）。
+合成 ctor/dtor、实例化改名（`template_instantiation.cpp` 拿 `blueprintName` 比裸名恒为假）、
+CodeGen 兜底拼符号 —— 全部走它。
+③ **Sema 回填**：`CtorInitializer::{isBaseInit, ctorSymbol}`；
+`resolveCtorInitTarget`（Pass 1 的"成员是否存在"校验与 Pass 3 的回填**共用一份答案**）
++ `pickBestByArgs`（与 `T x(args)` 同一套决议）⇒ CodeGen 只发符号。
+④ **连带的静默缺陷**：合成 ctor 名变裸名后，`registerFunction` 把成员按**裸名** define
+进全局符号表 ⇒ `namespace N { struct S { int x; }; } int main() { S; }`（clang 拒收
+`use of undeclared identifier 'S'`）**静默通过** —— 既有单测
+`NameVisibility.NamespaceTypeNotVisibleAtGlobalScope` 当场抓住。修法：**只登记自由函数**
+（[basic.lookup.unqual]/6）。★ 反方向也踩过：改成"用限定名登记" ⇒ 占用静态成员的
+`类名::成员名` 键空间 ⇒ `d.g()` 被误判成 static member（单测钉住）。
+⑤ **clang 对照**：合成默认构造用 `Context.DeclarationNames.getCXXConstructorName(ClassType)`
+（SemaDeclCXX.cpp:14356）；`Sema::BuildMemInitializer`（:4431）/ `Sema::BuildCXXConstructExpr`
+（:16431）选目标，CodeGen 的 `EmitCXXConstructExpr`（CGExprCXX.cpp:612）只读声明。
+测试 tests/unit/test_nested_class_ctor_identity.cpp（`NestedCtorIdentity.*` 8 例：裸名口径 /
+符号唯一 / 不重复合成 / 回填 / 基类目标 / 缺失目标拒收 / 成员名不泄漏 / 不误判 static）
++ 集成 tests/lang/test_basics_39_nested_class_ctor.cpp（7 检查点，与 clang 对拍 rc=0）；
+突变验证 **10/10** 实跑变红（`tools/verify-nested-ctor-mutations.sh`，5 条判据 × 单测/集成两侧）。
+ctest 436 → **444**；集成 **106 份有意漂移**（合成 ctor/dtor 名字 + 成员函数退出全局符号表；
+★ **rc 与运行输出逐字节不变**，已重刷基线）；build 0 警告。
+文档 docs/learn/62（新）+ BUGS.md B60（连带登记 **B61**：`m_classLocals` 平表，
+不同块同名类对象串栈偏移）+ ROADMAP §0.1 批 0-6 标 ✅ + README 计数器（444 / 173 / learn 01..62）。
+★ **边界**：`p->v`（指针取**字段**）仍是既有缺口（B50 同族；本批集成用例改用成员方法读值）／
+`m_classLocals` 平表（**B61**）／嵌套类作基类（B43 遗留）／委托构造与 NSDMI 未支持。
+
 ✅ **引用的别名语义已完成（BUGS.md B6，docs/learn/59）** ——
 ★ 起点是 BUGS.md 里一条**积压已久的高危缺陷**：引用变量/引用形参**没有别名语义**
 ⇒ 写回不到被绑定对象 ⇒ ★ **静默算错**（两个方向都中招）。
@@ -120,39 +156,6 @@ M5 = 整体退回旧实现 ⇒ 5 例全红；★ 每条突变在集成侧同样�
 文档 docs/learn/58（新）+ BUGS.md B56（已修）/ B57（open）+ ROADMAP §0.1 批 0-4 标 ✅。
 ★ 副作用（下一批用得上）：主线 K 的 **K-4**（模板模板形参）现在**只需改自由侧那一处**，
 成员侧自动跟随。
-
-✅ **Stage 3 批 5（vtable 槽 → 声明句柄）已完成（docs/learn/54 + specs/designs）** ——
-★ 起点是 ROADMAP 行 7-4「主线 G 的第一笔债」：**槽里放的是符号串 ⇒ 规则在多处各写一遍**。
-① **槽里改挂声明句柄**：`VTableEntry::method`（`shared_ptr<FunctionDecl>`）——
-   `type.h` 只前置声明（依赖单向 ast.h → type.h），取符号的桥接函数
-   `vtableEntrySymbol()` 放 **ast.h**（那里 FunctionDecl 才完整）。
-② **符号只有一个来源**：唯一定名点仍是 `registerFunction`（写 `decl->mangledName`）；
-   三个填槽落点（**新槽 / 主表覆写 / 次表覆写**）只写句柄、**不再算符号**。
-③ **覆写 = 换句柄**（基类自己的表不动 ⇒ A 的对象不会调到 B 的实现）。
-④ **析构槽看声明名**（`~X`）而不是猜符号子串 ⇒ 修掉 **B46**。
-⑤ **CodeGen 四个消费点**（主表 `.quad` / 次表 + thunk / 虚调用命中 / 析构判定）
-   + Sema 两个 dump + main.cpp 布局 dump 统一走取符号入口。
-★ **修掉 B45（真链接期错配）**：嵌套类作虚函数**重载**的形参类型时，
-Pass 1 算的槽符号（未解析的 "Inner"）与 Pass 2 算的定义符号（已解析的
-"Outer::Inner"）**不同** ⇒ `.quad Outer_f_1_Inner` 指向没人定义的符号 ⇒
-`undefined reference`（clang rc=0）。★ 机理值得单独记：
-**"两处共用同一个函数"只治了"写错"，治不了"算两次"** —— 两处调用发生在
-不同时刻、看到的状态不同就还是会漂（B10 → B20 → B22 → B45 同一个坑的第四次现形）；
-治本只有一条：**只算一次，别处只引用**。
-★ 对照 clang：`VTableComponent::getFunctionDecl()` 返回 `CXXMethodDecl *`
-（槽里本来就是声明，不是名字）；`isDestructorKind()` 看声明**种类**（同款思路）。
-★ **本批零既有漂移**：既有 **164** 份集成日志逐字节一致（新文件 1 份）；
-全量 ctest **396/396**（+6 `VTableHandle.*`）；build 0 警告；
-check-doc-standard.sh 六判据全绿；突变验证 **5/5** 实跑变红
-（脚本 `tools/verify-vtable-handle-mutations.sh`）。
-★ **教训（值得单独记）**：**自指式断言测不出这类缺陷** —— 第一版单测把期望值
-取自被测的 accessor 自己（"自己验自己"）⇒ 突变 m5 全绿；期望值必须来自
-与被测物【无关】的来源（这里取"声明自己的 mangledName"）才抓住。
-★ **边界（本批未做）**：槽位身份仍用形参类型链近似签名（B22 的老边界）／
-析构按名字前缀而非声明种类（`FunctionDecl` 无"种类"字段）／
-Itanium 真 mangling 与 `CK_VCallOffset`（教学版口径不变）。
-文档 docs/learn/54（新）+ specs/vtable-slot-handle.spec.md + designs/…design.md；
-BUGS.md 新增 **B45**（槽的符号两处各算）/ **B46**（析构槽靠子串判定）。
 
 ✅ **ROADMAP 重排 + 文档线收敛规则已完成（docs/ROADMAP.md §0 + docs/learn/55）** ——
 **本批零代码改动**（唯一的"代码"是判据⑦与突变验证脚本）⇒ ctest/logdiff 保持全绿零漂移，
@@ -309,6 +312,7 @@ S f(){S s; s.v=7; return s;} int main(){S x=f(); return x.v;}`
 | 51 | 按值返回 + 拷贝省略已完成（BUGS.md B48/B49，docs/learn/57） | learn/57 ｜ B48/B49 ｜ tests×3 |
 | 52 | 成员模板的形参表收口到自由模板那一份（BUGS.md B56，docs/learn/58） | learn/58 ｜ B56 ｜ tests×2 |
 | 53 | 引用的别名语义（BUGS.md B6，docs/learn/59） | learn/59 ｜ B6/B58 ｜ tests×2 |
+| 54 | 嵌套类的构造/析构身份 + 初始化列表构造目标（BUGS.md B60，docs/learn/62） | learn/62 ｜ B60/B61 ｜ tests×2 |
 
 ### 交接状态
 

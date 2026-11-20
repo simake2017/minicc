@@ -90,6 +90,22 @@ struct FieldInfo {
     }
 };
 
+// 「限定名的最后一段」：登记名 ⇒ 本类的裸名（"Outer::Inner" ⇒ "Inner"）。
+// ★ 判据单点：构造函数的名字是【本类的裸名】（[class.ctor]/1 的
+//   injected-class-name 在类内就是这个裸名），限定前缀只是【作用域身份】
+//   （learn/49「作用域即身份」）。所以凡是"把类名当函数名用"的地方 ——
+//   Sema 合成 ctor/dtor、实例化时给克隆体改名、CodeGen 兜底拼符号 —— 都走这里。
+//   各写一遍的实测后果：`struct Outer { struct Inner { int v;
+//   Inner(int x){v=x;} }; Inner m; Outer() : m(9) {} };` 里合成侧用登记名当
+//   函数名 ⇒ 符号 "Outer::Inner_Outer::Inner_1"，定义侧是
+//   "Outer::Inner_Inner_1" ⇒ as 报 junk（docs/learn/62）。
+// demo：unqualifiedName("Outer::Inner") ⇒ "Inner"；("N::A::B") ⇒ "B"；
+//       ("main") ⇒ "main"
+inline std::string unqualifiedName(const std::string& qualified) {
+    const auto sep = qualified.rfind("::");
+    return sep == std::string::npos ? qualified : qualified.substr(sep + 2);
+}
+
 // 虚表槽持有方法声明，符号统一从声明的 mangledName 取得。
 // 参考 clang/AST/VTableBuilder.h: VTableComponent。
 // 避免在形参类型尚未解析时另算符号；覆写只替换句柄。

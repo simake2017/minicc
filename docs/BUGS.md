@@ -83,6 +83,8 @@ related: ["[[docs/learn/13-name-mangling]]", "[[docs/learn/17-multiple-inheritan
 | [B57](#b57-函数模板上的模板模板形参推导--默认实参填充未实现自由与成员同款) | 模板模板实参 `C<T>` 推不出来 + 未推导的形参不用默认实参顶上 ⇒ 两条形态的函数模板都推不出候选 | `src/sema/template_deduction.cpp` deducePair / 收尾检查 | 中（合法程序被拒；**自由与成员同款**，非成员侧独有） | ⬜ 未修 |
 | [B58](#b58-const-引用形参与右值引用形参按值传不跟踪被绑定对象) | `const int&` / `T&&` 形参的实参**可能是右值**（无地址）⇒ 本实现按值传，被调方看不到被绑定对象在调用期间的变化 | `src/codegen/codegen.cpp` 引用形参传递（判据 `isAliasBinding` 的边界） | 低（极窄：只有调用期间对象被改才有差异） | ⬜ 未修 |
 | [B59](#b59-模板限定表达式丢失多级链静态调用误走对象通道) | 多级 template-id 限定链与静态调用通道 | Parser / Sema / CodeGen | 中 | ✅ 已修 |
+| [B60](#b60-构造函数的名字被登记名占位合成-ctor-与初始化列表构造符号三处各算一遍) | 合成 ctor/dtor 拿**登记名**当函数名 + 初始化列表的嵌套字段/基类构造符号由 CodeGen **硬拼** ⇒ 限定名类拼出的符号没人定义（`as` 报 junk） | `src/sema/semantic_analyzer.cpp` 合成处 + `src/codegen/codegen.cpp` init-list 两分支 | 高（嵌套/命名空间/成员类模板的构造全线；合法程序汇编期炸） | ✅ 已修 |
+| [B61](#b61-m_classlocals-是平表同一函数里不同块的同名类对象互相串栈偏移) | `m_classLocals` 不随块退出清理 ⇒ 后一个块的同名类对象拿到前一个块的栈偏移（**静默算错**） | `src/codegen/codegen.cpp` `m_classLocals` 登记/清理 | 中（合法程序静默取错地址） | ⬜ 未修 |
 
 > ★ **索引欠账（历史遗留，已补）**：B33、B37~B46 一度**未补进上表**（条目正文都在，
 > 只是索引没跟上）—— 本表自 B36 之后断档；2026-11-11 已把缺失行补齐。
@@ -3990,3 +3992,108 @@ int read(const int& x) { mut(); return x; }   // clang=5，minicc=1
 - "引用一定是别名"是对的，但**"能不能当别名"取决于有没有地址** ——
   右值没有地址 ⇒ 要么物化临时量，要么退化成按值（并如实登记为边界）。
 
+
+## B60. 构造函数的名字被登记名占位：合成 ctor 与初始化列表构造符号三处各算一遍
+
+- severity: high ｜ status: fixed ｜ related: src/sema/semantic_analyzer.cpp, src/codegen/codegen.cpp, src/ast/type.h, docs/learn/62
+
+**现象**
+
+```cpp
+struct Outer {
+    struct Inner { int v; Inner(int x) { v = x; } };
+    Inner m;
+    Outer() : m(9) {}
+};
+int main() { Outer o; return o.m.v; }      // clang rc=9
+```
+
+修前 minicc **汇编期就炸**：
+
+```text
+    callq Outer::Inner_Outer::Inner_1                # 调用嵌套类构造函数
+/tmp/x.s:19: Error: junk `::Inner_Outer::Inner_1' after expression
+[ERROR] 汇编失败 (as 退出码 256)
+```
+
+合成构造的形态同样错：`struct Outer { template<class T> struct Mem { T v; }; };`
+`Outer::Mem<int> m;` ⇒ `[register] Outer::Mem_int::Outer::Mem_int()`，
+即同一个类有两种符号口径（用户写的 `Outer::Inner_Inner` vs 合成的 `Outer::Mem_int_Outer::Mem_int`）。
+
+**根因**（三处各算一遍同一个身份）：
+
+1. `processClassDecl` 合成默认 ctor/dtor 时 `name = decl->name` —— `decl->name` 是**登记名**
+   （`Outer::Inner` / `Box_int::Inner` / `Outer::Mem_int`），不是构造函数的名字。
+   按 [class.ctor]/1，构造函数的名字是**注入类名**（类内的裸名）。
+2. 初始化列表里"嵌套类字段该调哪个构造函数"由 **CodeGen 按 `类名_类名_N` 硬拼** ——
+   定名是有状态的（同名多参追加 `_N`、同参数个数挂类型链），调用点拼不出来。
+   这是 B42 的**同款病灶**，只是漏改了"初始化列表"这条路径。
+3. 实例化改名那一处拿 `blueprintName`（成员类模板是限定名 `Outer::Mem`）去比
+   `cloned->name`（裸名 `Mem`）⇒ 恒为假，改名从不发生。
+
+**修复**（判据单点 + 回填）：
+
+① `src/ast/type.h:unqualifiedName` —— "限定名最后一段"的唯一实现；
+② 合成 ctor/dtor 用裸名（`ownerClassName` 仍是登记名），名字比较同口径；
+③ `CtorInitializer` 新增 `isBaseInit` / `ctorSymbol` 两个回填槽，
+   `resolveCtorInitTarget`（Pass 1 校验与 Pass 3 回填**共用**）+ `pickBestByArgs` 选定；
+   CodeGen 只发 `init.ctorSymbol`，兜底也按裸名口径并过 `asmSymbol`；
+④ 与 B42 的边界不放大：目标类没有匹配构造函数时**响亮拒收**
+   （`no matching constructor for initialization of 'm'`）。
+
+**★ 连带修掉的静默缺陷**：合成 ctor 名变裸名后，`registerFunction` 把成员函数
+按**裸名** define 进全局符号表 ⇒ 成员名泄漏成全局可见名：
+
+```cpp
+namespace N { struct S { int x; }; }
+int main() { S; return 0; }        // clang: use of undeclared identifier 'S'
+```
+
+修前 minicc 静默通过（既有单测 `NameVisibility.NamespaceTypeNotVisibleAtGlobalScope` 抓住）。
+修法：**只有自由函数进符号表**（[basic.lookup.unqual]/6）。
+★ 反方向也踩过：改成"用限定名登记" ⇒ `类名::成员名` 这个**静态成员键空间**被成员函数占用
+⇒ `d.g()` 被误判成 static member（单测 `MemberFunctionIsNotMistakenForStaticMember` 钉住）。
+
+**验证**：单测 `NestedCtorIdentity.*` 8 例 + 集成 `tests/lang/test_basics_39_nested_class_ctor.cpp`
+（7 检查点，clang/minicc 双 rc=0）；突变验证 `tools/verify-nested-ctor-mutations.sh` **10/10**
+（5 条判据 × 单测侧 + 集成侧，逐条实跑变红）。
+全量 ctest 436 → 444；集成日志 **106 份有意漂移**（合成 ctor/dtor 名字 + 成员函数退出全局符号表），
+rc 与运行输出逐字节不变；已重刷基线。
+
+**教训**
+
+- **"登记名"与"函数名"是两个用途**：名字带作用域是为了区分身份，不是为了当拼写。
+  构造函数恰好是同一个字符串被两用的地方（类名 = 函数名），最容易混。
+- **"只算一次，别处只引用"**（B45 的原话）在本批又兑现一次：CodeGen 拼 init-list 符号
+  就是第二次算，且和第一次约定不同。
+
+## B61. `m_classLocals` 是平表：同一函数里不同块的同名类对象互相串栈偏移
+
+- severity: medium ｜ status: open ｜ related: src/codegen/codegen.cpp, docs/learn/59（作用域链的第三次现形）
+
+**现象**（本批写集成测试时实测踩到，与 B60 无关）：
+
+```cpp
+struct Outer { struct Plain { int w; }; };
+struct Holder { struct Part { int v; Part(int x){v=x;} int read(){ return v; } }; };
+int main() {
+    { Outer::Plain p; p.w = 3; }        // 块① 里有个叫 p 的类对象
+    Holder::Part* p = new Holder::Part(11);   // 块② 里同名 p（这次是指针）
+    if (p->read() != 11) return 7;      // 修前：this 用了块① 的栈偏移 ⇒ 读错对象
+}
+```
+
+生成汇编里 `p->read()` 的 `this` 是 `leaq -16(%rbp)`（块① 的 `p` 的槽），
+而不是块② 里指针变量 `p`（`-24(%rbp)`）。
+
+**根因**：CodeGen 的 `m_classLocals`（栈上类对象表）按**名字**登记，块退出**不清理**
+
+- 不随块弹层 ⇒ 后一个块的同名对象拿到前一个块的偏移 ⇒ 静默算错。
+这是 learn/59「作用域不是一张表，是一条链」的**第三次现形**（第一次=别名表，
+第二次=引用作用域，第三次=类对象表）。
+
+**修法**（未做）：与 `m_refScopes` 同款改成**作用域链**（块 push/pop 时同步弹层），
+`m_classLocals` 的查找从"平表 hit"改成"沿链由内向外"。
+
+**回归（修后要补）**：单测一例钉住"不同块同名类对象各拿各的偏移"
+（本批的 `tests/lang/test_basics_39` 里检查点②已用改名规避，修好后可改回同名）。

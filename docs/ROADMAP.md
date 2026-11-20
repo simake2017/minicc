@@ -7,6 +7,13 @@
 > 非虚继承的菱形在标准下合法；该文件已改写为私有继承错误用例）。
 > 构建：`cmake -S . -B build-linux -DCMAKE_CXX_COMPILER=clang++-18 && cmake --build build-linux -j`
 >
+> ★ **2026-11-20**：§0.1 批 0-6（**嵌套类的构造/析构身份 + 初始化列表构造目标**，BUGS.md B60
+> ＝ 用户点单，不是按序挑的）已完成（docs/learn/62 + BUGS.md B60，连带登记 B61 边界）
+> ⇒ **下一批仍是批 0-3（B50 全局类对象，★ 段错误）**，之后按 §0.2 进主线 K 六项。
+> ★ 本批修的是**合法程序汇编期就炸**（`as` 报 junk）+ 两处静默（成员名泄漏成全局可见 /
+> 初始化列表构造符号在调用点重算）。教训：**"登记名"与"函数名"是两个用途** ——
+> 构造函数恰好是同一个字符串被两用的地方，最容易混。
+>
 > ★ **2026-11-11**：§0.1 批 0-5（**引用的别名语义**，BUGS.md B6）已完成
 > （docs/learn/59 + BUGS.md B6；连带登记 B58 边界）
 > ⇒ **下一批仍是批 0-3（B50 全局类对象，★ 段错误）**，之后按 §0.2 进主线 K 六项。
@@ -55,6 +62,7 @@
 | 0-4 ✅ | **成员模板的形参表收口到自由模板那一份** | 规则分叉（合法程序被拒 + 5 项能力缺失） | `template <class T> typename T::type get(T x)` ⇒ clang rc=**5** / 修前 minicc rc=1 `unknown type name 'T::type'`（成员侧另写的形参表没同步帧计数 ⇒ **自己**的形参在方法体里认不出） | 抽 `Parser::parseTemplateParameterList` 为唯一实现（自由 + 成员共用）；连带补齐成员侧 无名形参 / 模板模板形参 / 默认实参 / 默认实参约束 | ✅ **已完成 2026-11-10**：rc=5 与 clang 对拍；集成 tests/tmpl/test_tmpl_78（rc=22）+ 单测 `MemberTemplateParams.*` 6 例；突变验证 5/5；**有意漂移 4 份**（rc/输出/汇编逐字节不变），另 165 份零漂移；docs/learn/58 + BUGS.md B56/B57 |
 | 0-5 ✅ | **引用的别名语义**（BUGS.md B6） | ★ **静默算错** | `int a=5; int& r=a; r=30;` ⇒ clang rc=**30** / 修前 minicc rc=**5**（引用槽里放的是值的拷贝）；`void f(int& x)` 实参**按值传** ⇒ 同款静默算错（★ 台账原文"形参天生正确"是错的，实测推翻） | 判据单点 `isAliasBinding(type, operandHasAddress)`：局部引用变量绑定到初始化式的**地址**（读=间接加载 / 写=间接存储）；引用形参在**调用点传地址**、被调点按别名解释（两侧读同一 Type 对象 ⇒ 不会口径漂移）；别名表改**作用域链**（`m_refScopes`） | ✅ **已完成 2026-11-11**：局部引用 + 引用形参两侧对拍 clang 全绿；单测 `RefAlias.*` 7 例 + 集成 tests/lang/test_basics_38（15 检查点）；突变验证 6/6；ctest 421 → **428**；**有意漂移 8 份**（rc 与运行输出逐字节不变，漂移只在汇编文本/段布局）；docs/learn/59 + BUGS.md B6（连带登记 **B58**：const/右值引用形参按值传） |
 
+| 0-6 ✅ | **嵌套类的构造/析构身份 + 初始化列表构造目标**（BUGS.md B60） | ★ **合法程序汇编期炸 + 静默泄漏** | `struct Outer{struct Inner{int v; Inner(int x){v=x;}}; Inner m; Outer():m(9){}};` ⇒ clang rc=**9** / 修前 minicc **汇编失败** （`as` 报 `junk '::Inner_Outer::Inner_1'`）；合成 ctor 名字拿登记名 ⇒ `Outer::Mem_int_Outer::Mem_int` 与用户写的口径不一致；成员名泄漏成全局可见（`namespace N{struct S{}; } int main(){ S; }` 静默通过） | 判据单点 `unqualifiedName`（构造函数的名字 = 本类**裸名**）+ `CtorInitializer::{isBaseInit,ctorSymbol}` 由 Sema 回填（`resolveCtorInitTarget` 校验与回填共用 + `pickBestByArgs` 选定）；符号表**只登记自由函数** | ✅ **已完成 2026-11-20**：与 clang 对拍全绿（嵌套/命名空间/成员类模板/类模板内嵌套/new 七类形态）；单测 `NestedCtorIdentity.*` 8 例 + 集成 tests/lang/test_basics_39；突变验证 **10/10**；ctest 436 → **444**；集成 **106 份有意漂移**（合成 ctor/dtor 名字 + 成员函数退出全局符号表，rc 与运行输出逐字节不变，已重刷基线）；docs/learn/62 + BUGS.md B60（连带登记 **B61**：`m_classLocals` 平表） |
 ### 0.2 批 1~6：主线 K —— 模板线六项（理论密度最高）
 
 明细见 **§1**（每项含：标准章节 / clang 参照 / 实测现状 / 落点 / 验收 / 产物）。
@@ -99,6 +107,7 @@ clang 的措辞是 `partial specialization of alias templates is not permitted` 
 | 字面量溢出自动升格 / `\x` `\u` 转义 / 非整型 NTTP | learn/35 §5 | — |
 | 纯右值 CTAD / 拷贝推导 / 聚合推导 / 指引参与重载决议 / CTAD 用于 `new` | learn/28 §5 | — |
 | 全局限定名 `::X`（`::g` / `::N::S`） | B54 | Parser 在表达式/类型位置直接拒收 `::`（"Unexpected token '::'"）；即使放行，Scope 表的空段分支也只是**跳过**、不把路径落到全局层（`parse_scope.cpp:167` 注释与实现不符）⇒ 要修得**两处一起**改 |
+| 模板类 static 数据成员：类外定义 + 类型限定读写 | 手工探针 2026-11-19 | **未实现（clang 接受、minicc 拒 ⇒ 按 §0 判据属"功能缺失"，不计入 BUGS.md）**。① `template<typename T> int Box<T>::intValue = 5;` 解析期就拒（`[Parse Error] at '<': Expected '(' after function name` —— `parseFunctionDecl` 不认 `Box<T>::` 作限定符）⇒ 实例永远拿不到存储；② `int a = Box<int>::intValue;` 类型限定访问查符号表全名 `Box_int::intValue`（`semantic_analyzer.cpp:5027`）查不到，报 `no static member 'intValue' in class 'Box_int'`（★ 文案误导：成员在实例类里已登记，缺的是**符号**）；③ 对象访问 `b.intValue = 2` Sema 过、符号算成 `Box_int__intValue`，链接期 `undefined reference`（★ 两条路径对同一实体符号名**不同源**，与 B45/B22 同坑型）。clang 对拍：类外定义 + 读 + 写 rc=**52**，minicc rc=1。**已能用**：`static const int intValue = 5;` 类内初始化（常量折叠、无存储，读对拍 rc=5）；普通类的 `Counter::count = 10;` 读写均正常（tests/lang/test_basics_13）。修法顺序：先让 Parser 收 `TemplateId::name` 类外定义，再统一符号名口径 |
 
 ### 0.4 暂不开新战线（明写出来，免得"顺手加个功能"）
 

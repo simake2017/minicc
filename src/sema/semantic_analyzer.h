@@ -393,6 +393,16 @@ private:
     void registerFunction(FuncDeclPtr decl);
     // Pass 3：进入函数作用域，注册参数/this，逐语句分析函数体
     void analyzeFunctionBody(FuncDeclPtr decl);
+    // [class.base.init]：初始化列表的每条构造调用由 Sema 选定并回填符号
+    // （CodeGen 只发符号 —— 定名有状态，调用点拼不出来；见 BUGS.md B42/B60）
+    // 目标类（基类子对象 / 类类型字段）的认法：Pass 1 校验与 Pass 3 回填共用一份答案。
+    struct CtorInitTarget {
+        std::string className;   // 目标类的登记名（空 = 没有类目标：标量字段 / 找不到）
+        bool        isBase = false;
+    };
+    CtorInitTarget resolveCtorInitTarget(const ClassDeclPtr& own,
+                                         const CtorInitializer& init);
+    void resolveCtorInitList(const CtorDeclPtr& ctor);
     // 模板蓝图注册（只存不查体——两阶段查找第一阶段 [temp.names] 简化）
     void processTemplateDecl(TemplateDeclPtr decl);
 

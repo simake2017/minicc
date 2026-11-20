@@ -646,6 +646,15 @@ struct CtorInitializer {
     std::string          memberName; // 字段名或基类名
     std::vector<ExprPtr> arguments;  // 传入的实参
     SourceLocation       location;
+    // ── Sema 回填槽（CodeGen 只发符号，不按名字重算）──
+    // [class.base.init]：初始化列表的每一条都要选定一个构造函数。
+    //   isBaseInit：目标是基类子对象（否则是本类的类类型字段）；
+    //   ctorSymbol：选定构造函数的 mangledName（空 = 无构造目标，标量字段）。
+    // ★ 为什么不让 CodeGen 自己拼：定名是【有状态】的（同名多参追加 `_N`、
+    //   同参个数挂类型链），限定名类更是拼不出来 —— B42 付过一次学费，
+    //   嵌套字段这条路径漏改了（docs/learn/62、BUGS.md B60）。
+    bool                 isBaseInit = false;
+    std::string          ctorSymbol;
 };
 
 // ─── 构造函数声明 ─────────────────────────────────────────────────────────────
