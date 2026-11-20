@@ -14,9 +14,18 @@
 > 初始化列表构造符号在调用点重算）。教训：**"登记名"与"函数名"是两个用途** ——
 > 构造函数恰好是同一个字符串被两用的地方，最容易混。
 >
+> ★ **2026-11-12**：登记 §0.1 **批 0-6 / 0-7 / 0-8 / 0-9 / 0-10**（类外定义的限定者判据整条链 B60 /
+> 类模板静态成员的类外定义 B61 / 类体 static 成员解析日志 use-after-move B62 /
+> Sema `stack@` 与 CodeGen 槽位不同源 B63 / `const T&` 的两种表示 B64）。
+> ★ **编号说明**：B59 已被同日的「模板限定表达式丢失多级链」占用（✅ 已修，learn/60），
+> 本批四条顺延为 B60~B63；后续 0-10 继续用 B64。
+> ★ **执行序：0-3（B50，★ 段错误）→ 0-6 → 0-7 → 0-8 → 0-9 → 0-10**；
+> 0-6 是"静默接受非法程序 + 合法程序走错实体"，排在段错误之后、主线 K 之前；
+> 0-10 与 0-6 同族（判据/表示两处各算），宜与 B6/B58 的引用线一起收口。
+>
 > ★ **2026-11-11**：§0.1 批 0-5（**引用的别名语义**，BUGS.md B6）已完成
 > （docs/learn/59 + BUGS.md B6；连带登记 B58 边界）
-> ⇒ **下一批仍是批 0-3（B50 全局类对象，★ 段错误）**，之后按 §0.2 进主线 K 六项。
+> ⇒ **下一批仍是批 0-3（B50 全局类对象，★ 段错误）**，之后 **0-6 → 0-7 → 0-8 → 0-9**，再按 §0.2 进主线 K 六项。
 > ★ 本批修的是**静默算错**（引用变量的写回不到被引用对象；引用形参实参按值传）——
 > 两处同款，靠判据单点（`isAliasBinding`）统一。
 > ★ **教训两条**：① "文档里写着这条路是对的"不等于它真的对 ——
@@ -61,6 +70,11 @@
 | 0-3 | **全局类对象**：存储尺寸 + 地址约定（BUGS.md B50） | ★ **段错误 / 静默踩内存** | `struct S{int v;}; S g; int main(){ g.v = 11; return g.v; }` ⇒ clang rc=**11** / minicc **SIGSEGV**（`g.v = 11` 这种基本写法就崩） | ① 全局变量发射按 `classLayout.totalSize` 分配存储（不再一律 `.quad 0`）；② `visit(VarExpr)` 的全局路径补"类对象 ⇒ 取地址"分支（与局部 `m_classLocals` 同款）；连带修"按引用返回类对象" | 运行期退出码与 clang 一致；三条用例（全局字段读写 / 全局类对象按值返回 / 按引用返回）全绿 |
 | 0-4 ✅ | **成员模板的形参表收口到自由模板那一份** | 规则分叉（合法程序被拒 + 5 项能力缺失） | `template <class T> typename T::type get(T x)` ⇒ clang rc=**5** / 修前 minicc rc=1 `unknown type name 'T::type'`（成员侧另写的形参表没同步帧计数 ⇒ **自己**的形参在方法体里认不出） | 抽 `Parser::parseTemplateParameterList` 为唯一实现（自由 + 成员共用）；连带补齐成员侧 无名形参 / 模板模板形参 / 默认实参 / 默认实参约束 | ✅ **已完成 2026-11-10**：rc=5 与 clang 对拍；集成 tests/tmpl/test_tmpl_78（rc=22）+ 单测 `MemberTemplateParams.*` 6 例；突变验证 5/5；**有意漂移 4 份**（rc/输出/汇编逐字节不变），另 165 份零漂移；docs/learn/58 + BUGS.md B56/B57 |
 | 0-5 ✅ | **引用的别名语义**（BUGS.md B6） | ★ **静默算错** | `int a=5; int& r=a; r=30;` ⇒ clang rc=**30** / 修前 minicc rc=**5**（引用槽里放的是值的拷贝）；`void f(int& x)` 实参**按值传** ⇒ 同款静默算错（★ 台账原文"形参天生正确"是错的，实测推翻） | 判据单点 `isAliasBinding(type, operandHasAddress)`：局部引用变量绑定到初始化式的**地址**（读=间接加载 / 写=间接存储）；引用形参在**调用点传地址**、被调点按别名解释（两侧读同一 Type 对象 ⇒ 不会口径漂移）；别名表改**作用域链**（`m_refScopes`） | ✅ **已完成 2026-11-11**：局部引用 + 引用形参两侧对拍 clang 全绿；单测 `RefAlias.*` 7 例 + 集成 tests/lang/test_basics_38（15 检查点）；突变验证 6/6；ctest 421 → **428**；**有意漂移 8 份**（rc 与运行输出逐字节不变，漂移只在汇编文本/段布局）；docs/learn/59 + BUGS.md B6（连带登记 **B58**：const/右值引用形参按值传） |
+| 0-6 | **类外定义的限定者判据整条链**（BUGS.md B60） | ★ **静默接受非法程序** + 合法程序走错实体 | `int x; int x::count = 3;` ⇒ clang rc=1 `'x' is not a class, namespace, or enumeration` / minicc rc=0 静默建全局；`int ns1::ns2::b = 5;`（命名空间里没这个变量）、枚举/类模板蓝图限定者同款；`typedef A X; int X::c = 1;`（合法）⇒ clang 定义 `A::c` / minicc 另建 `X::c`。★ 现报错分支是**死代码**（`test_basics_17` 是假绿） | ① Parser 保留限定者组件（不拼平串）；② Sema 单点裁决 class / namespace / enum / 别名 / 蓝图（需补命名空间注册表；现在只有 `m_currentNamespace` 字符串）；③ ODR 键用解析后的实体名 | 四类非法形态 rc=1 且与 clang 同文案；`test_basics_17` 恢复真负向；合法三形态（命名空间类 / 嵌套类 / 别名）rc=0 且落到同一符号 |
+| 0-7 | **类模板静态成员的类外定义**（BUGS.md B61） | 缺特性（合法程序被拒） | `template<> int B<int>::c = 1;` / `template<class T> int B<T>::c = 1;` ⇒ clang rc=0 / minicc rc=1 `Expected '(' after function name`（限定名不收 template-id） | Parser 的限定名收 template-id + `template<...>` 前缀在"限定者是模板 id、链尾不是 `(`"时改判静态成员定义 | 两形态 rc=0 并与 clang 对拍；类型不符负例报 `redefinition ... different type` |
+| 0-8 | **类体 static 成员解析日志打印空名**（BUGS.md B62，一行） | 观测层（纯日志） | 所有用例打 `[parse:member] ★ '' 是 static 数据成员`（`push_back(std::move(sm))` 之后才读 `sm.name`） | `logParse` 挪到 `push_back` 之前 | 日志出现成员真名；有意漂移仅这一行 |
+| 0-9 | **Sema 的 `stack@` 与 CodeGen 实际槽位不一致**（BUGS.md B63） | 观测层（日志/文档与实现不同源） | `struct S{int f(int a){int x=a;return x;}}` ⇒ Sema 日志 `a@-8, this@-16, x@-24` / 汇编 `this→-8, a→-16, x→-32`（成员函数顺序相反；形参后第一个局部差一格）。自由函数：`s@-24` vs `s→-32` | 二选一：① Sema 按 ABI 顺序（sret → this → 形参 → 局部，含 CodeGen 的保留槽）分配；② 明确声明 `stackOffset` 是 Sema 模型、并把 `docs/lines/03` 的对照表改掉 | 日志 `stack@` 与 `-N(%rbp)` 逐名字相等；或文档明确二者不同源 |
+| 0-10 | **`const T&` 的两种表示：`makeConst` 不归一**（BUGS.md B64） | 合法程序被拒 + 类型表示不唯一（潜在静默算错） | `typedef int& R; const R r = a;` ⇒ clang rc=0（仅警告 cv 无效）/ minicc rc=1 `Type mismatch … declared 'int& const'`；`int& const` 直接写 clang 报 ill-formed / minicc 建成 `int& const`。★ `isWritableLValueRefType` 第 34 行是**恒假死代码**（同一节点不可能既是引用又是 const） | ① `Type::makeConst`：内层是引用 ⇒ 原样返回（忽略 cv）；② Parser 后缀 const 遇引用 ⇒ 报 `'const' qualifier may not be applied to a reference`；③ 删 `codegen.cpp:34` | `typedef` / `using` / 别名模板三形态 rc=0 且写回生效；`int& const` 与 clang 同文案；`const int&` 零漂移 |
 
 | 0-6 ✅ | **嵌套类的构造/析构身份 + 初始化列表构造目标**（BUGS.md B60） | ★ **合法程序汇编期炸 + 静默泄漏** | `struct Outer{struct Inner{int v; Inner(int x){v=x;}}; Inner m; Outer():m(9){}};` ⇒ clang rc=**9** / 修前 minicc **汇编失败** （`as` 报 `junk '::Inner_Outer::Inner_1'`）；合成 ctor 名字拿登记名 ⇒ `Outer::Mem_int_Outer::Mem_int` 与用户写的口径不一致；成员名泄漏成全局可见（`namespace N{struct S{}; } int main(){ S; }` 静默通过） | 判据单点 `unqualifiedName`（构造函数的名字 = 本类**裸名**）+ `CtorInitializer::{isBaseInit,ctorSymbol}` 由 Sema 回填（`resolveCtorInitTarget` 校验与回填共用 + `pickBestByArgs` 选定）；符号表**只登记自由函数** | ✅ **已完成 2026-11-20**：与 clang 对拍全绿（嵌套/命名空间/成员类模板/类模板内嵌套/new 七类形态）；单测 `NestedCtorIdentity.*` 8 例 + 集成 tests/lang/test_basics_39；突变验证 **10/10**；ctest 436 → **444**；集成 **106 份有意漂移**（合成 ctor/dtor 名字 + 成员函数退出全局符号表，rc 与运行输出逐字节不变，已重刷基线）；docs/learn/62 + BUGS.md B60（连带登记 **B61**：`m_classLocals` 平表） |
 ### 0.2 批 1~6：主线 K —— 模板线六项（理论密度最高）
